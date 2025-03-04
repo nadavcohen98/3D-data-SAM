@@ -92,6 +92,7 @@ class BRATSDataset(data.Dataset):
         # Select a middle slice (2D)
         slice_idx = image.shape[2] // 2
         image = image[:, :, slice_idx]  # Now (H, W, C) or (H, W)
+        mask = mask[:, :, slice_idx]  # Now (H, W)
     
         # Ensure at most 4 channels
         if len(image.shape) == 2:  
@@ -105,22 +106,21 @@ class BRATSDataset(data.Dataset):
     
         # Convert (H, W, C) → (C, H, W) for PyTorch
         image = torch.tensor(image, dtype=torch.float32).permute(2, 0, 1)
+        mask = torch.tensor(mask, dtype=torch.float32).unsqueeze(0)  # Convert (H, W) → (1, H, W)
     
-        # Select corresponding mask slice
-        mask = mask[:, :, slice_idx]  # Shape: (H, W)
-        mask = torch.tensor(mask, dtype=torch.float32).unsqueeze(0)  # Add channel dim
-    
-        # 🔥 **CRITICAL FIX**: Convert `(C, H, W)` back to `(H, W, C)` before `apply_image()`
+        # 🔥 **Fix: Only transform the image, not the mask**
         if self.transform:
             image_np = image.permute(1, 2, 0).numpy()  # Convert (C, H, W) → (H, W, C)
-            print(f"Applying transform on shape (after permute): {image_np.shape}")  # Debug print
+            print(f"Applying transform on shape (after permute): {image_np.shape}")
     
             image = self.transform.apply_image(image_np)
-            mask = self.transform.apply_image(mask.numpy())
+            image = torch.tensor(image, dtype=torch.float32).permute(2, 0, 1)  # Convert back to (C, H, W)
     
-            # Convert back to (C, H, W) for PyTorch after transform
-            image = torch.tensor(image, dtype=torch.float32).permute(2, 0, 1)
-            mask = torch.tensor(mask, dtype=torch.float32)
+            # 🚨 **Fix: Do not apply `apply_image()` to masks**
+            # Instead, resize it manually (if necessary)
+            mask_np = mask.numpy().squeeze(0)  # Convert (1, H, W) → (H, W)
+            mask_resized = cv2.resize(mask_np, (image.shape[1], image.shape[2]), interpolation=cv2.INTER_NEAREST)
+            mask = torch.tensor(mask_resized, dtype=torch.float32).unsqueeze(0)  # Convert (H, W) → (1, H, W)
     
         return image, mask
 
