@@ -108,6 +108,9 @@ class BRATSDataset(data.Dataset):
         if image.shape[0] == 4:
             image = image[:3, :, :]  # Only keep first 3 channels
 
+        elif image.shape[0] == 1:  # If it's a single channel, duplicate it to 3
+            image = image.repeat(3, 1, 1)
+        
         # Resize and normalize mask
         mask = cv2.resize(mask, self.image_size, interpolation=cv2.INTER_NEAREST)
         mask = torch.tensor(mask, dtype=torch.float32).unsqueeze(0)
