@@ -8,9 +8,10 @@ import nibabel as nib
 from glob import glob
 from tqdm import tqdm
 from torch.amp import autocast, GradScaler
-from segment_anything import sam_model_registry
-from segment_anything.utils.transforms import ResizeLongestSide
 import skimage.transform as sk_transform
+
+# Segment Anything Model imports
+from segment_anything import sam_model_registry, Sam
 
 # Set CUDA memory optimization
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
@@ -18,7 +19,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # === BRATS Dataset Loader ===
 class BRATSDataset(data.Dataset):
-    def __init__(self, data_dir, slice_selection='middle', target_size=(256, 256)):
+    def __init__(self, data_dir, slice_selection='middle', target_size=(1024, 1024)):
         # Validate data directory
         if not os.path.exists(data_dir):
             raise ValueError(f"Data directory does not exist: {data_dir}")
@@ -122,77 +123,45 @@ def get_brats_dataloader(data_dir="/home/erezhuberman/data/Task01_BrainTumour", 
     trainset = BRATSDataset(data_dir)
     return data.DataLoader(trainset, batch_size=batch_size, shuffle=True, num_workers=num_workers)
 
-# Remainder of your original code stays the same
+# === SAM Model Initialization ===
+def initialize_sam_model(checkpoint_path="../sam2/sam2_vit_h.pth", model_type="vit_h"):
+    """
+    Initialize Segment Anything Model (SAM)
+    """
+    # Validate checkpoint path
+    if not os.path.exists(checkpoint_path):
+        raise ValueError(f"SAM checkpoint not found at {checkpoint_path}")
 
-train_loader = get_brats_dataloader()
-
-# === UNTER Model Definition ===
-class UNTER(nn.Module):
-    def __init__(self, in_channels=3, out_channels=1024):
-        super(UNTER, self).__init__()
-
-        self.conv1 = nn.Conv2d(in_channels, 256, kernel_size=3, padding=1)
-        self.conv2 = nn.Conv2d(256, 512, kernel_size=3, padding=1)
-        self.conv3 = nn.Conv2d(512, 1024, kernel_size=3, padding=1)
-        self.pool = nn.MaxPool2d(2, 2)
-
-        # Simplified transformer encoder
-        encoder_layer = nn.TransformerEncoderLayer(
-            d_model=1024,  # Match the channel dimension
-            nhead=8,
-            dim_feedforward=2048,
-            dropout=0.1,
-            batch_first=True
-        )
-        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=4)
-
-        # Ensure final output matches SAM's expected embedding size
-        self.final_conv = nn.Conv2d(1024, 1024, kernel_size=1)
-
-    def forward(self, x):
-        # Convolutional layers
-        x1 = torch.relu(self.conv1(x))
-        x2 = torch.relu(self.conv2(self.pool(x1)))
-        x3 = torch.relu(self.conv3(self.pool(x2)))
-
-        # Prepare for transformer
-        b, c, h, w = x3.shape
-        
-        # Reshape to (batch, sequence_length, embedding_dim)
-        x3_flat = x3.view(b, c, -1).permute(0, 2, 1)
-        
-        # Apply transformer
-        x3_transformed = self.transformer(x3_flat)
-        
-        # Reshape back to (batch, channels, height, width)
-        x3_out = x3_transformed.permute(0, 2, 1).view(b, c, h, w)
-
-        # Final convolution to match SAM's embedding size
-        x = self.final_conv(x3_out)
-
-        return x
+    # Initialize SAM model
+    sam = sam_model_registry[model_type](checkpoint=checkpoint_path)
+    sam.to(device)
+    return sam
 
 # === Prompt Encoder ===
 class PromptEncoder(nn.Module):
-    def __init__(self):
+    def __init__(self, in_channels=3, out_channels=1024):
         super(PromptEncoder, self).__init__()
-        self.encoder = UNTER(in_channels=3, out_channels=1024)
+        
+        self.encoder = nn.Sequential(
+            nn.Conv2d(in_channels, 256, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.MaxPool2d(2),
+            nn.Conv2d(256, 512, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.MaxPool2d(2),
+            nn.Conv2d(512, 1024, kernel_size=3, padding=1),
+            nn.ReLU()
+        )
         
     def forward(self, x):
-        features = self.encoder(x)
-        return features
+        return self.encoder(x)
 
-# Initialize models
-prompt_encoder = PromptEncoder().to(device)
-optimizer = optim.Adam(prompt_encoder.parameters(), lr=0.0003, weight_decay=1e-4)
-scaler = GradScaler()
-
-# === Training Loop ===
-def train_one_epoch():
+# === Training Function ===
+def train_one_epoch(prompt_encoder, sam, train_loader, optimizer, loss_fn):
     torch.cuda.empty_cache()
     prompt_encoder.train()
-    loss_fn = nn.BCEWithLogitsLoss()
-
+    sam.image_encoder.eval()  # Freeze image encoder
+    
     total_loss = 0
     for images, masks in tqdm(train_loader):
         images, masks = images.to(device), masks.to(device)
@@ -203,18 +172,18 @@ def train_one_epoch():
             # Generate prompt embeddings
             prompt_embeddings = prompt_encoder(images)
 
-            # Get image embeddings
+            # Get image embeddings (detach to prevent gradient flow)
             with torch.no_grad():
                 image_embeddings = sam.image_encoder(images)
 
-            # Create a dummy sparse embedding tensor
+            # Create dummy sparse embedding tensor
             batch_size = images.size(0)
             sparse_embeddings = torch.zeros(
                 (batch_size, 0, 256), 
                 device=device
             )
 
-            # Predict masks
+            # Predict masks using SAM's mask decoder
             masks_pred, _ = sam.mask_decoder(
                 image_embeddings=image_embeddings,
                 image_pe=sam.prompt_encoder.get_dense_pe(),
@@ -224,24 +193,43 @@ def train_one_epoch():
             )
 
             # Ensure masks_pred and masks are the same shape
-            masks_pred = masks_pred.squeeze(1)  # Remove channel dimension
-            masks = masks.squeeze(1)  # Remove channel dimension
+            masks_pred = masks_pred.squeeze(1)
+            masks = masks.squeeze(1)
 
             # Compute loss
             loss = loss_fn(masks_pred, masks)
 
         # Backward pass with gradient scaling
-        scaler.scale(loss).backward()
-        scaler.step(optimizer)
-        scaler.update()
+        loss.backward()
+        optimizer.step()
 
         total_loss += loss.item()
 
     avg_loss = total_loss / len(train_loader)
     print(f"Training loss: {avg_loss}")
 
-# === Run Training ===
-num_epochs = 20
-for epoch in range(num_epochs):
-    print(f"Epoch {epoch+1}/{num_epochs}")
-    train_one_epoch()
+# === Main Training Script ===
+def main():
+    # Initialize dataset
+    train_loader = get_brats_dataloader()
+
+    # Initialize SAM model
+    sam = initialize_sam_model()
+
+    # Initialize prompt encoder
+    prompt_encoder = PromptEncoder().to(device)
+
+    # Setup optimizer
+    optimizer = optim.Adam(prompt_encoder.parameters(), lr=0.0003, weight_decay=1e-4)
+
+    # Loss function
+    loss_fn = nn.BCEWithLogitsLoss()
+
+    # Training loop
+    num_epochs = 20
+    for epoch in range(num_epochs):
+        print(f"Epoch {epoch+1}/{num_epochs}")
+        train_one_epoch(prompt_encoder, sam, train_loader, optimizer, loss_fn)
+
+if __name__ == "__main__":
+    main()
