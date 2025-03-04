@@ -19,7 +19,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # === Load SAM2 Model ===
 sam_args = {
-    'sam_checkpoint': "../sam2/sam2_vit_h.pth",
+    'sam_checkpoint': "/home/amirlevy1/sam_checkpoints/sam_vit_h_4b8939.pth",  # Update to your path
     'model_type': "vit_h",
     'gpu_id': 0,
 }
