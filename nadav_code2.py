@@ -26,29 +26,76 @@ sam = sam_model_registry[sam_args['model_type']](checkpoint=sam_args['sam_checkp
 sam.to(device)
 transform = ResizeLongestSide(sam.image_encoder.img_size)
 
+# === BRATS Dataset Loader ===
+class BRATSDataset(data.Dataset):
+    def __init__(self, data_dir, transform=None, image_size=(1024, 1024)):
+        self.image_paths = sorted(glob(os.path.join(data_dir, "imagesTr", "*.nii.gz")))
+        self.mask_paths = sorted(glob(os.path.join(data_dir, "labelsTr", "*.nii.gz")))
+        self.transform = transform
+        self.image_size = image_size
+
+    def __len__(self):
+        return len(self.image_paths)
+
+    def __getitem__(self, idx):
+        image_path = self.image_paths[idx]
+        mask_path = self.mask_paths[idx]
+
+        # Load NIfTI images
+        image = nib.load(image_path).get_fdata()  # Shape: (128, 128, 4)
+        mask = nib.load(mask_path).get_fdata()  # Shape: (128, 128)
+
+        # Select the first 3 modalities (channels)
+        image = image[:, :, :3]  # Shape: (128, 128, 3)
+
+        # Normalize each channel separately
+        normalized_image = np.zeros_like(image, dtype=np.float32)
+        for i in range(3):
+            channel = image[:, :, i]
+            min_val, max_val = np.min(channel), np.max(channel)
+            normalized_image[:, :, i] = (channel - min_val) / (max_val - min_val + 1e-8)
+
+        # Resize image to match SAM's expected input size
+        resized_image = cv2.resize(normalized_image, self.image_size, interpolation=cv2.INTER_LINEAR)
+        
+        # Convert to tensor and reshape to (C, H, W)
+        image_tensor = torch.tensor(resized_image, dtype=torch.float32).permute(2, 0, 1)
+
+        # Preprocess mask
+        resized_mask = cv2.resize(mask.astype(np.float32), self.image_size, interpolation=cv2.INTER_NEAREST)
+        mask_tensor = torch.tensor((resized_mask > 0).astype(np.float32)).unsqueeze(0)  # Binary mask
+
+        return image_tensor, mask_tensor
+
+# === Load BRATS Dataset ===
+def get_brats_dataloader(data_dir="/home/erezhuberman/data/Task01_BrainTumour", batch_size=1, num_workers=2):
+    trainset = BRATSDataset(data_dir, transform=transform)
+    return data.DataLoader(trainset, batch_size=batch_size, shuffle=True, num_workers=num_workers)
+
+train_loader = get_brats_dataloader()
+
 # === UNTER Model Definition ===
 class UNTER(nn.Module):
-    def __init__(self, in_channels=3, out_channels=256):
+    def __init__(self, in_channels=3, out_channels=1024):
         super(UNTER, self).__init__()
 
-        self.conv1 = nn.Conv2d(in_channels, 64, kernel_size=3, padding=1)
-        self.conv2 = nn.Conv2d(64, 128, kernel_size=3, padding=1)
-        self.conv3 = nn.Conv2d(128, 256, kernel_size=3, padding=1)
+        self.conv1 = nn.Conv2d(in_channels, 256, kernel_size=3, padding=1)
+        self.conv2 = nn.Conv2d(256, 512, kernel_size=3, padding=1)
+        self.conv3 = nn.Conv2d(512, 1024, kernel_size=3, padding=1)
         self.pool = nn.MaxPool2d(2, 2)
 
         # Simplified transformer encoder
         encoder_layer = nn.TransformerEncoderLayer(
-            d_model=256,  # Match the channel dimension
+            d_model=1024,  # Match the channel dimension
             nhead=8,
-            dim_feedforward=512,
+            dim_feedforward=2048,
             dropout=0.1,
             batch_first=True
         )
         self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=4)
 
-        self.upconv1 = nn.ConvTranspose2d(256, 128, kernel_size=2, stride=2)
-        self.upconv2 = nn.ConvTranspose2d(128, 64, kernel_size=2, stride=2)
-        self.final_conv = nn.Conv2d(64, out_channels, kernel_size=1)
+        # Ensure final output matches SAM's expected embedding size
+        self.final_conv = nn.Conv2d(1024, 1024, kernel_size=1)
 
     def forward(self, x):
         # Convolutional layers
@@ -68,69 +115,20 @@ class UNTER(nn.Module):
         # Reshape back to (batch, channels, height, width)
         x3_out = x3_transformed.permute(0, 2, 1).view(b, c, h, w)
 
-        # Upsampling and final convolution
-        x = torch.relu(self.upconv1(x3_out))
-        x = torch.relu(self.upconv2(x))
-        x = self.final_conv(x)
+        # Final convolution to match SAM's embedding size
+        x = self.final_conv(x3_out)
 
         return x
-
-# === BRATS Dataset Loader ===
-class BRATSDataset(data.Dataset):
-    def __init__(self, data_dir, transform=None, image_size=(1024, 1024)):
-        self.image_paths = sorted(glob(os.path.join(data_dir, "imagesTr", "*.nii.gz")))
-        self.mask_paths = sorted(glob(os.path.join(data_dir, "labelsTr", "*.nii.gz")))
-        self.transform = transform
-        self.image_size = image_size
-
-    def __len__(self):
-        return len(self.image_paths)
-
-    def __getitem__(self, idx):
-        image_path = self.image_paths[idx]
-        mask_path = self.mask_paths[idx]
-
-        # Load NIfTI images
-        image = nib.load(image_path).get_fdata()  # Shape: (240, 240, 3, 4)
-        mask = nib.load(mask_path).get_fdata()  # Shape: (240, 240, D)
-
-        # Select the middle slice
-        slice_idx = image.shape[2] // 2  # Select the middle slice
-        image = image[:, :, slice_idx, :]  # Shape: (H, W, C)
-        
-        # Keep only the first 3 channels for SAM
-        image = image[:, :, :3]  # Keep first 3 channels
-
-        # Normalize image
-        image = (image - np.min(image)) / (np.max(image) - np.min(image))  # Normalize between 0-1
-        image = cv2.resize(image, self.image_size, interpolation=cv2.INTER_LINEAR)  # Resize to 1024x1024
-        image = torch.tensor(image, dtype=torch.float32).permute(2, 0, 1)  # Convert to (C, H, W)
-
-        # Preprocess mask
-        mask = mask[:, :, slice_idx]  # Select middle slice
-        mask = cv2.resize(mask, self.image_size, interpolation=cv2.INTER_NEAREST)
-        mask = (mask > 0).astype(np.float32)  # Binary mask
-        mask = torch.tensor(mask, dtype=torch.float32).unsqueeze(0)  # Convert (H, W) to (1, H, W)
-
-        return image, mask
-        
-# === Load BRATS Dataset ===
-def get_brats_dataloader(data_dir="/home/erezhuberman/data/Task01_BrainTumour", batch_size=1, num_workers=2):
-    trainset = BRATSDataset(data_dir, transform=transform)
-    return data.DataLoader(trainset, batch_size=batch_size, shuffle=True, num_workers=num_workers)
-
-train_loader = get_brats_dataloader()
 
 # === Prompt Encoder ===
 class PromptEncoder(nn.Module):
     def __init__(self):
         super(PromptEncoder, self).__init__()
-        self.encoder = UNTER(in_channels=3, out_channels=256)
-        self.conv1x1 = nn.Conv2d(256, 256, kernel_size=1)
-
+        self.encoder = UNTER(in_channels=3, out_channels=1024)
+        
     def forward(self, x):
         features = self.encoder(x)
-        return self.conv1x1(features)
+        return features
 
 # Initialize models
 prompt_encoder = PromptEncoder().to(device)
