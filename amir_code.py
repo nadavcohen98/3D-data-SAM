@@ -223,7 +223,7 @@ class BRATSDataset3D(data.Dataset):
             return image_tensor, mask_tensor
 
 # === Load BRATS Dataset ===
-def get_brats_dataloader(data_dir="/home/amirlevy1/data/Task01_BrainTumour", batch_size=1, 
+def get_brats_dataloader(data_dir="/home/erezhuberman/data/Task01_BrainTumour", batch_size=1, 
                         num_workers=2, mode="3d", image_size=(128, 128, 128)):
     """
     Create DataLoader for BRATS dataset
