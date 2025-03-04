@@ -15,13 +15,14 @@ from glob import glob
 # Check for GPU availability
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-# Load SAM2 Model
+# === SAM2 Model Setup ===
 sam_args = {
-    'sam_checkpoint': "../sam2/sam2_vit_h.pth",  # Updated path
+    'sam_checkpoint': "../sam2/sam2_vit_h.pth",  # Corrected path
     'model_type': "vit_h",
     'gpu_id': 0,
 }
 
+# Load SAM2
 sam = sam_model_registry[sam_args['model_type']](checkpoint=sam_args['sam_checkpoint'])
 sam.to(device=device)
 transform = ResizeLongestSide(sam.image_encoder.img_size)
@@ -89,14 +90,13 @@ class BRATSDataset(data.Dataset):
         # Select a middle slice (2D)
         slice_idx = image.shape[2] // 2
         image = image[:, :, slice_idx, :]  # Shape: (H, W, C)
+        mask = mask[:, :, slice_idx]  # Shape: (H, W)
 
         print(f"Image shape after slicing: {image.shape}")  # Debugging line
 
         # Ensure image has at most 3 channels (RGB) or convert to Grayscale
         if image.shape[-1] > 3:
             image = image[:, :, :3]  # Retain only first 3 channels
-
-        mask = mask[:, :, slice_idx]  # Shape: (H, W)
 
         # Normalize image
         image = (image - np.min(image)) / (np.max(image) - np.min(image))  # Normalize 0-1
@@ -110,18 +110,6 @@ class BRATSDataset(data.Dataset):
             mask = torch.tensor(mask, dtype=torch.float32)
 
         return image, mask
-    # Normalize image
-    image = (image - np.min(image)) / (np.max(image) - np.min(image))  # Normalize 0-1
-    image = torch.tensor(image, dtype=torch.float32).permute(2, 0, 1)  # Channels first
-    mask = torch.tensor(mask, dtype=torch.float32).unsqueeze(0)  # Add channel dim
-
-    if self.transform:
-        image = self.transform.apply_image(image.numpy())
-        mask = self.transform.apply_image(mask.numpy())
-        image = torch.tensor(image, dtype=torch.float32)
-        mask = torch.tensor(mask, dtype=torch.float32)
-
-    return image, mask
 
 # === Load BRATS Dataset ===
 def get_brats_dataloader(data_dir="/home/erezhuberman/data/Task01_BrainTumour", batch_size=4, num_workers=4):
