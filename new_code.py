@@ -62,8 +62,16 @@ class UNTER(nn.Module):
         return x
 
 # === BRATS Dataset Loader ===
+import cv2
+import torch
+import numpy as np
+import nibabel as nib
+import os
+from glob import glob
+import torch.utils.data as data
+
 class BRATSDataset(data.Dataset):
-    def __init__(self, data_dir, transform=None, image_size=(128, 128)):
+    def __init__(self, data_dir, transform=None, image_size=(1024, 1024)):  # ✅ Resize to match SAM
         self.image_paths = sorted(glob(os.path.join(data_dir, "imagesTr", "*.nii.gz")))
         self.mask_paths = sorted(glob(os.path.join(data_dir, "labelsTr", "*.nii.gz")))
         self.transform = transform
@@ -76,32 +84,34 @@ class BRATSDataset(data.Dataset):
         image_path = self.image_paths[idx]
         mask_path = self.mask_paths[idx]
 
-        image = nib.load(image_path).get_fdata()  # (H, W, D, C) or (H, W, D)
-        mask = nib.load(mask_path).get_fdata()
+        # Load NIfTI images
+        image = nib.load(image_path).get_fdata()  # Shape: (128, 128, 4)
+        mask = nib.load(mask_path).get_fdata()  # Shape: (128, 128)
 
-        slice_idx = image.shape[2] // 2
-        image = image[:, :, slice_idx]
-        mask = mask[:, :, slice_idx]
+        # Select a middle slice (keeping spatial resolution 128x128)
+        slice_idx = image.shape[-1] // 2  # Selecting middle modality
+        image = image[:, :, :3]  # 🔥 Keep first 3 channels for SAM compatibility (Drop 4th channel)
 
-        if len(image.shape) == 2:
-            image = np.expand_dims(image, axis=-1)
-        elif image.shape[-1] > 4:
-            image = image[:, :, :4]  # Keep only the first 4 channels
+        # Normalize image
+        image = (image - np.min(image)) / (np.max(image) - np.min(image))  # Normalize between 0-1
 
-        image = (image - np.min(image)) / (np.max(image) - np.min(image))
-        image = cv2.resize(image, self.image_size, interpolation=cv2.INTER_LINEAR)
-        image = torch.tensor(image, dtype=torch.float32).permute(2, 0, 1)
+        # Resize to SAM expected input size (1024x1024)
+        image = cv2.resize(image, self.image_size, interpolation=cv2.INTER_LINEAR)  # Resize to 1024x1024
+        image = torch.tensor(image, dtype=torch.float32).permute(2, 0, 1)  # Convert to (C, H, W)
 
-        # ✅ Ensure 3-channel input
-        if image.shape[0] == 4:
-            image = image[:3, :, :]
-        elif image.shape[0] == 1:
-            image = image.repeat(3, 1, 1)
+        # Ensure shape is always (3, 1024, 1024)
+        if image.shape[0] != 3:
+            print(f"⚠️ Warning: Image shape mismatch {image.shape}. Fixing channels.")
+            if image.shape[0] == 4:
+                image = image[:3, :, :]  # Keep only first 3 channels
+            elif image.shape[0] == 1:
+                image = image.repeat(3, 1, 1)  # Convert grayscale to RGB
 
+        # Resize mask
         mask = cv2.resize(mask, self.image_size, interpolation=cv2.INTER_NEAREST)
-        mask = torch.tensor(mask, dtype=torch.float32).unsqueeze(0)
+        mask = torch.tensor(mask, dtype=torch.float32).unsqueeze(0)  # Convert (H, W) to (1, H, W)
 
-        print(f"Final image shape before return: {image.shape}")  # Should always be (3, 128, 128)
+        print(f"✅ Final image shape before return: {image.shape}")  # Should be (3, 1024, 1024)
         return image, mask
 
 # === Load BRATS Dataset ===
