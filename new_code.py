@@ -79,36 +79,37 @@ class BRATSDataset(data.Dataset):
     def __len__(self):
         return len(self.image_paths)
 
+
     def __getitem__(self, idx):
         image_path = self.image_paths[idx]
         mask_path = self.mask_paths[idx]
-
+    
         # Load NIfTI images
         image = nib.load(image_path).get_fdata()  # Shape: (H, W, D, C)
         mask = nib.load(mask_path).get_fdata()  # Shape: (H, W, D)
-
+    
         # Select a middle slice (2D)
         slice_idx = image.shape[2] // 2
         image = image[:, :, slice_idx, :]  # Shape: (H, W, C)
         mask = mask[:, :, slice_idx]  # Shape: (H, W)
-
+    
         print(f"Image shape after slicing: {image.shape}")  # Debugging line
-
-        # Ensure image has at most 3 channels (RGB) or convert to Grayscale
+    
+        # **Fix: Ensure image has at most 3 channels**
         if image.shape[-1] > 3:
-            image = image[:, :, :3]  # Retain only first 3 channels
-
+            image = image[:, :, :3]  # Keep only the first 3 channels
+    
         # Normalize image
         image = (image - np.min(image)) / (np.max(image) - np.min(image))  # Normalize 0-1
         image = torch.tensor(image, dtype=torch.float32).permute(2, 0, 1)  # Channels first
         mask = torch.tensor(mask, dtype=torch.float32).unsqueeze(0)  # Add channel dim
-
+    
         if self.transform:
             image = self.transform.apply_image(image.numpy())
             mask = self.transform.apply_image(mask.numpy())
             image = torch.tensor(image, dtype=torch.float32)
             mask = torch.tensor(mask, dtype=torch.float32)
-
+    
         return image, mask
 
 # === Load BRATS Dataset ===
