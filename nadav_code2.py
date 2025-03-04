@@ -11,24 +11,15 @@ from tqdm import tqdm
 from torch.amp import autocast, GradScaler
 from segment_anything import sam_model_registry
 from segment_anything.utils.transforms import ResizeLongestSide
+import skimage.transform as sk_transform
 
 # Set CUDA memory optimization
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-# === Load SAM2 Model ===
-sam_args = {
-    'sam_checkpoint': "../sam2/sam2_vit_h.pth",
-    'model_type': "vit_h",
-    'gpu_id': 0,
-}
-sam = sam_model_registry[sam_args['model_type']](checkpoint=sam_args['sam_checkpoint'])
-sam.to(device)
-transform = ResizeLongestSide(sam.image_encoder.img_size)
-
 # === BRATS Dataset Loader ===
 class BRATSDataset(data.Dataset):
-    def __init__(self, data_dir, transform=None, image_size=(1024, 1024)):
+    def __init__(self, data_dir, target_size=(1024, 1024), transform=None):
         # Validate data directory
         if not os.path.exists(data_dir):
             raise ValueError(f"Data directory does not exist: {data_dir}")
@@ -44,18 +35,49 @@ class BRATSDataset(data.Dataset):
         if len(self.image_paths) != len(self.mask_paths):
             raise ValueError(f"Mismatch in number of images ({len(self.image_paths)}) and masks ({len(self.mask_paths)})")
 
+        self.target_size = target_size
         self.transform = transform
-        
-        # Ensure image_size is a tuple
-        if isinstance(image_size, int):
-            self.image_size = (image_size, image_size)
-        elif isinstance(image_size, tuple) and len(image_size) == 2:
-            self.image_size = image_size
-        else:
-            raise ValueError("image_size must be an integer or a tuple of two integers")
 
     def __len__(self):
         return len(self.image_paths)
+
+    def _robust_resize(self, image, target_size):
+        """
+        Robust resizing method using skimage for better handling of different input types
+        """
+        # Ensure image is float32 and normalized
+        if image.dtype != np.float32:
+            image = image.astype(np.float32)
+        
+        # Normalize if not already normalized
+        if image.max() > 1 or image.min() < 0:
+            image = (image - image.min()) / (image.max() - image.min())
+        
+        # Resize using skimage with different interpolation methods
+        try:
+            # Try linear interpolation first
+            resized = sk_transform.resize(
+                image, 
+                target_size, 
+                order=1,  # Bilinear interpolation
+                preserve_range=True,
+                anti_aliasing=True
+            )
+            return resized
+        except Exception as e:
+            print(f"Resize failed with linear interpolation: {e}")
+            try:
+                # Fallback to nearest neighbor
+                resized = sk_transform.resize(
+                    image, 
+                    target_size, 
+                    order=0,  # Nearest neighbor
+                    preserve_range=True
+                )
+                return resized
+            except Exception as e:
+                print(f"Resize failed completely: {e}")
+                raise ValueError(f"Could not resize image to {target_size}")
 
     def __getitem__(self, idx):
         image_path = self.image_paths[idx]
@@ -70,10 +92,9 @@ class BRATSDataset(data.Dataset):
             image = image_nii.get_fdata()
             mask = mask_nii.get_fdata()
 
-            # Debugging: Print shape and type of loaded data
-            print(f"Image path: {image_path}")
-            print(f"Image shape: {image.shape}")
-            print(f"Mask shape: {mask.shape}")
+            # Debugging print
+            print(f"Original image shape: {image.shape}")
+            print(f"Original mask shape: {mask.shape}")
 
             # Handle 4D images (multiple modalities)
             if image.ndim == 4:
@@ -89,42 +110,29 @@ class BRATSDataset(data.Dataset):
                 min_val, max_val = np.min(channel), np.max(channel)
                 normalized_image[:, :, i] = (channel - min_val) / (max_val - min_val + 1e-8)
 
-            # Debugging: Verify normalized image
-            print(f"Normalized image shape: {normalized_image.shape}")
-            print(f"Normalized image dtype: {normalized_image.dtype}")
+            # Resize image and mask
+            resized_image = np.stack([
+                self._robust_resize(normalized_image[:, :, i], self.target_size) 
+                for i in range(normalized_image.shape[2])
+            ], axis=-1)
 
-            # Resize image with additional checks
-            if normalized_image.size == 0:
-                raise ValueError("Normalized image is empty")
+            # Resize mask (use nearest neighbor for segmentation)
+            resized_mask = self._robust_resize(mask, self.target_size)
 
-            # Ensure input is contiguous and has correct data type
-            resized_image = cv2.resize(
-                normalized_image.astype(np.float32), 
-                self.image_size, 
-                interpolation=cv2.INTER_LINEAR
-            )
-
-            # Convert to tensor and reshape to (C, H, W)
+            # Convert to tensors
             image_tensor = torch.tensor(resized_image, dtype=torch.float32).permute(2, 0, 1)
-
-            # Preprocess mask
-            resized_mask = cv2.resize(
-                mask.astype(np.float32), 
-                self.image_size, 
-                interpolation=cv2.INTER_NEAREST
-            )
             mask_tensor = torch.tensor((resized_mask > 0).astype(np.float32)).unsqueeze(0)  # Binary mask
 
             return image_tensor, mask_tensor
 
         except Exception as e:
             print(f"Error processing image {image_path}:")
-            print(f"Full error: {e}")
+            print(f"Full error: {str(e)}")
             raise
 
 # === Load BRATS Dataset ===
 def get_brats_dataloader(data_dir="/home/erezhuberman/data/Task01_BrainTumour", batch_size=1, num_workers=2):
-    trainset = BRATSDataset(data_dir, transform=transform)
+    trainset = BRATSDataset(data_dir)
     return data.DataLoader(trainset, batch_size=batch_size, shuffle=True, num_workers=num_workers)
 
 
