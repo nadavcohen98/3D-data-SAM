@@ -36,25 +36,39 @@ class UNTER(nn.Module):
         self.conv3 = nn.Conv2d(128, 256, kernel_size=3, padding=1)
         self.pool = nn.MaxPool2d(2, 2)
 
-        self.transformer = nn.TransformerEncoder(
-            nn.TransformerEncoderLayer(d_model=256, nhead=8, dim_feedforward=512, dropout=0.1, batch_first=True),
-            num_layers=4
+        # Simplified transformer encoder
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=256,  # Match the channel dimension
+            nhead=8,
+            dim_feedforward=512,
+            dropout=0.1,
+            batch_first=True
         )
+        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=4)
 
         self.upconv1 = nn.ConvTranspose2d(256, 128, kernel_size=2, stride=2)
         self.upconv2 = nn.ConvTranspose2d(128, 64, kernel_size=2, stride=2)
         self.final_conv = nn.Conv2d(64, out_channels, kernel_size=1)
 
     def forward(self, x):
+        # Convolutional layers
         x1 = torch.relu(self.conv1(x))
         x2 = torch.relu(self.conv2(self.pool(x1)))
         x3 = torch.relu(self.conv3(self.pool(x2)))
 
+        # Prepare for transformer
         b, c, h, w = x3.shape
-        x3_flat = x3.view(b, c, h * w).permute(2, 0, 1)
+        
+        # Reshape to (batch, sequence_length, embedding_dim)
+        x3_flat = x3.view(b, c, -1).permute(0, 2, 1)
+        
+        # Apply transformer
         x3_transformed = self.transformer(x3_flat)
-        x3_out = x3_transformed.permute(1, 2, 0).view(b, c, h, w)
+        
+        # Reshape back to (batch, channels, height, width)
+        x3_out = x3_transformed.permute(0, 2, 1).view(b, c, h, w)
 
+        # Upsampling and final convolution
         x = torch.relu(self.upconv1(x3_out))
         x = torch.relu(self.upconv2(x))
         x = self.final_conv(x)
