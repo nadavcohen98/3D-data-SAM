@@ -115,6 +115,7 @@ class BRATSDataset(data.Dataset):
         mask = cv2.resize(mask, self.image_size, interpolation=cv2.INTER_NEAREST)
         mask = torch.tensor(mask, dtype=torch.float32).unsqueeze(0)
 
+        print(f"Final image shape before return: {image.shape}")  # Should always be (3, 128, 128)
         return image, mask
 
 # === Load BRATS Dataset ===
