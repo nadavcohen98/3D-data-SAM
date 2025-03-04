@@ -12,6 +12,10 @@ from tqdm import tqdm
 import nibabel as nib
 from glob import glob
 
+# Set CUDA memory expansion
+import os
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+
 # Check for GPU availability
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -70,7 +74,7 @@ class UNTER(nn.Module):
 
 # === BRATS Dataset Loader ===
 class BRATSDataset(data.Dataset):
-    def __init__(self, data_dir, transform=None, image_size=(240, 240)):
+    def __init__(self, data_dir, transform=None, image_size=(128, 128)):  # 🔥 Resize to 128x128
         self.image_paths = sorted(glob(os.path.join(data_dir, "imagesTr", "*.nii.gz")))
         self.mask_paths = sorted(glob(os.path.join(data_dir, "labelsTr", "*.nii.gz")))
         self.transform = transform
@@ -79,55 +83,38 @@ class BRATSDataset(data.Dataset):
     def __len__(self):
         return len(self.image_paths)
 
-
-
     def __getitem__(self, idx):
         image_path = self.image_paths[idx]
         mask_path = self.mask_paths[idx]
-    
+
         # Load NIfTI images
         image = nib.load(image_path).get_fdata()  # Shape: (H, W, D, C) or (H, W, D)
         mask = nib.load(mask_path).get_fdata()  # Shape: (H, W, D)
-    
+
         # Select a middle slice (2D)
         slice_idx = image.shape[2] // 2
-        image = image[:, :, slice_idx]  # Now (H, W, C) or (H, W)
-        mask = mask[:, :, slice_idx]  # Now (H, W)
-    
+        image = image[:, :, slice_idx]  
+        mask = mask[:, :, slice_idx]  
+
         # Ensure at most 4 channels
         if len(image.shape) == 2:  
-            image = np.expand_dims(image, axis=-1)  # Convert (H, W) → (H, W, 1)
+            image = np.expand_dims(image, axis=-1)  
         elif image.shape[-1] > 4:  
-            print(f"Warning: Reducing channels from {image.shape[-1]} to 4")
             image = image[:, :, :4]
-    
-        # Normalize image
-        image = (image - np.min(image)) / (np.max(image) - np.min(image))  # Normalize to 0-1
-    
-        # Convert (H, W, C) → (C, H, W) for PyTorch
-        image = torch.tensor(image, dtype=torch.float32).permute(2, 0, 1)
-        mask = torch.tensor(mask, dtype=torch.float32).unsqueeze(0)  # Convert (H, W) → (1, H, W)
-    
-        # 🔥 **Fix: Only transform the image, not the mask**
-        if self.transform:
-            image_np = image.permute(1, 2, 0).numpy()  # Convert (C, H, W) → (H, W, C)
-            print(f"Applying transform on shape (after permute): {image_np.shape}")
-    
-            image = self.transform.apply_image(image_np)
-            image = torch.tensor(image, dtype=torch.float32).permute(2, 0, 1)  # Convert back to (C, H, W)
-    
-            # 🚨 **Fix: Do not apply `apply_image()` to masks**
-            # Instead, resize it manually (if necessary)
-            mask_np = mask.numpy().squeeze(0)  # Convert (1, H, W) → (H, W)
-            mask_resized = cv2.resize(mask_np, (image.shape[1], image.shape[2]), interpolation=cv2.INTER_NEAREST)
-            mask = torch.tensor(mask_resized, dtype=torch.float32).unsqueeze(0)  # Convert (H, W) → (1, H, W)
-    
+
+        # Normalize and resize image
+        image = (image - np.min(image)) / (np.max(image) - np.min(image))  # Normalize 0-1
+        image = cv2.resize(image, self.image_size, interpolation=cv2.INTER_LINEAR)
+        image = torch.tensor(image, dtype=torch.float32).permute(2, 0, 1)  
+
+        # Resize and normalize mask
+        mask = cv2.resize(mask, self.image_size, interpolation=cv2.INTER_NEAREST)
+        mask = torch.tensor(mask, dtype=torch.float32).unsqueeze(0)
+
         return image, mask
 
-
-
 # === Load BRATS Dataset ===
-def get_brats_dataloader(data_dir="/home/erezhuberman/data/Task01_BrainTumour", batch_size=4, num_workers=4):
+def get_brats_dataloader(data_dir="/home/erezhuberman/data/Task01_BrainTumour", batch_size=1, num_workers=2):
     trainset = BRATSDataset(data_dir, transform=transform)
     train_loader = data.DataLoader(trainset, batch_size=batch_size, shuffle=True, num_workers=num_workers)
     return train_loader
@@ -138,7 +125,7 @@ train_loader = get_brats_dataloader()
 class PromptEncoder(nn.Module):
     def __init__(self):
         super(PromptEncoder, self).__init__()
-        self.encoder = UNTER(in_channels=4, out_channels=256)  # BRATS has 4 MRI channels
+        self.encoder = UNTER(in_channels=4, out_channels=256)
         self.conv1x1 = nn.Conv2d(256, 256, kernel_size=1)
 
     def forward(self, x):
@@ -149,35 +136,43 @@ class PromptEncoder(nn.Module):
 prompt_encoder = PromptEncoder().to(device)
 optimizer = optim.Adam(prompt_encoder.parameters(), lr=0.0003, weight_decay=1e-4)
 
+# Enable Mixed Precision
+from torch.cuda.amp import autocast, GradScaler
+scaler = GradScaler()
+
 # === Training Loop ===
 def train_one_epoch():
+    torch.cuda.empty_cache()  # Free memory before training
     prompt_encoder.train()
     loss_fn = nn.BCELoss()
+
     for images, masks in tqdm(train_loader):
         images, masks = images.to(device), masks.to(device)
-        prompt_embeddings = prompt_encoder(images)
 
-        # Forward SAM2 with the generated prompt
-        with torch.no_grad():
-            image_embeddings = sam.image_encoder(images)
+        with autocast(device_type="cuda", dtype=torch.float16):  # 🔥 Mixed Precision
+            prompt_embeddings = prompt_encoder(images)
 
-        sparse_embeddings, dense_embeddings = sam.prompt_encoder(
-            points=None, boxes=None, masks=prompt_embeddings
-        )
+            with torch.no_grad():
+                image_embeddings = sam.image_encoder(images)
 
-        masks_pred, _ = sam.mask_decoder(
-            image_embeddings=image_embeddings,
-            image_pe=sam.prompt_encoder.get_dense_pe(),
-            sparse_prompt_embeddings=sparse_embeddings,
-            dense_prompt_embeddings=dense_embeddings,
-            multimask_output=False,
-        )
+            sparse_embeddings, dense_embeddings = sam.prompt_encoder(
+                points=None, boxes=None, masks=prompt_embeddings
+            )
 
-        # Compute Loss
-        loss = loss_fn(masks_pred, masks)
+            masks_pred, _ = sam.mask_decoder(
+                image_embeddings=image_embeddings,
+                image_pe=sam.prompt_encoder.get_dense_pe(),
+                sparse_prompt_embeddings=sparse_embeddings,
+                dense_prompt_embeddings=dense_embeddings,
+                multimask_output=False,
+            )
+
+            loss = loss_fn(masks_pred, masks)
+
         optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
+        scaler.scale(loss).backward()
+        scaler.step(optimizer)
+        scaler.update()
 
     print(f"Training loss: {loss.item()}")
 
