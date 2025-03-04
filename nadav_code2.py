@@ -37,7 +37,7 @@ class UNTER(nn.Module):
         self.pool = nn.MaxPool2d(2, 2)
 
         self.transformer = nn.TransformerEncoder(
-            nn.TransformerEncoderLayer(d_model=256, nhead=8, dim_feedforward=512, dropout=0.1),
+            nn.TransformerEncoderLayer(d_model=256, nhead=8, dim_feedforward=512, dropout=0.1, batch_first=True),
             num_layers=4
         )
 
@@ -92,14 +92,7 @@ class BRATSDataset(data.Dataset):
         image = cv2.resize(image, self.image_size, interpolation=cv2.INTER_LINEAR)  # Resize to 1024x1024
         image = torch.tensor(image, dtype=torch.float32).permute(2, 0, 1)  # Convert to (C, H, W)
 
-        # Ensure shape is (3, 1024, 1024)
-        if image.shape[0] != 3:
-            print(f"⚠️ Warning: Image shape mismatch {image.shape}. Fixing channels.")
-            if image.shape[0] == 1:
-                image = image.repeat(3, 1, 1)
-
         # Preprocess mask
-        # Resize and convert mask to binary segmentation (1 channel)
         mask = mask[:, :, slice_idx]  # Select middle slice
         mask = cv2.resize(mask, self.image_size, interpolation=cv2.INTER_NEAREST)
         mask = (mask > 0).astype(np.float32)  # Binary mask
@@ -150,16 +143,19 @@ def train_one_epoch():
             with torch.no_grad():
                 image_embeddings = sam.image_encoder(images)
 
-            # Convert prompt embeddings to a format SAM can use
-            sparse_embeddings = None
-            dense_embeddings = prompt_embeddings
+            # Create a dummy sparse embedding tensor
+            batch_size = images.size(0)
+            sparse_embeddings = torch.zeros(
+                (batch_size, 0, 256), 
+                device=device
+            )
 
             # Predict masks
             masks_pred, _ = sam.mask_decoder(
                 image_embeddings=image_embeddings,
                 image_pe=sam.prompt_encoder.get_dense_pe(),
                 sparse_prompt_embeddings=sparse_embeddings,
-                dense_prompt_embeddings=dense_embeddings,
+                dense_prompt_embeddings=prompt_embeddings,
                 multimask_output=False,
             )
 
