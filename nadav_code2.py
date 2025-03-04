@@ -3,7 +3,6 @@ import torch.nn as nn
 import torch.optim as optim
 import torch.utils.data as data
 import numpy as np
-import cv2
 import os
 import nibabel as nib
 from glob import glob
@@ -19,7 +18,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # === BRATS Dataset Loader ===
 class BRATSDataset(data.Dataset):
-    def __init__(self, data_dir, target_size=(1024, 1024), transform=None):
+    def __init__(self, data_dir, slice_selection='middle', target_size=(256, 256)):
         # Validate data directory
         if not os.path.exists(data_dir):
             raise ValueError(f"Data directory does not exist: {data_dir}")
@@ -36,48 +35,37 @@ class BRATSDataset(data.Dataset):
             raise ValueError(f"Mismatch in number of images ({len(self.image_paths)}) and masks ({len(self.mask_paths)})")
 
         self.target_size = target_size
-        self.transform = transform
+        self.slice_selection = slice_selection
 
     def __len__(self):
         return len(self.image_paths)
 
-    def _robust_resize(self, image, target_size):
+    def _select_slice(self, volume, slice_selection='middle'):
         """
-        Robust resizing method using skimage for better handling of different input types
+        Select a slice from the 3D volume based on the specified method
         """
-        # Ensure image is float32 and normalized
-        if image.dtype != np.float32:
-            image = image.astype(np.float32)
-        
-        # Normalize if not already normalized
-        if image.max() > 1 or image.min() < 0:
-            image = (image - image.min()) / (image.max() - image.min())
-        
-        # Resize using skimage with different interpolation methods
-        try:
-            # Try linear interpolation first
-            resized = sk_transform.resize(
-                image, 
-                target_size, 
-                order=1,  # Bilinear interpolation
-                preserve_range=True,
-                anti_aliasing=True
-            )
-            return resized
-        except Exception as e:
-            print(f"Resize failed with linear interpolation: {e}")
-            try:
-                # Fallback to nearest neighbor
-                resized = sk_transform.resize(
-                    image, 
-                    target_size, 
-                    order=0,  # Nearest neighbor
-                    preserve_range=True
-                )
-                return resized
-            except Exception as e:
-                print(f"Resize failed completely: {e}")
-                raise ValueError(f"Could not resize image to {target_size}")
+        if slice_selection == 'middle':
+            # Select the middle slice
+            mid_slice = volume.shape[2] // 2
+            return volume[:, :, mid_slice, :]
+        elif slice_selection == 'random':
+            # Select a random slice
+            import random
+            random_slice = random.randint(0, volume.shape[2] - 1)
+            return volume[:, :, random_slice, :]
+        else:
+            raise ValueError(f"Invalid slice selection method: {slice_selection}")
+
+    def _normalize_volume(self, volume):
+        """
+        Normalize each modality separately
+        """
+        normalized_volume = np.zeros_like(volume, dtype=np.float32)
+        for i in range(volume.shape[3]):
+            modality = volume[:, :, :, i]
+            min_val, max_val = np.min(modality), np.max(modality)
+            normalized_volume[:, :, :, i] = (modality - min_val) / (max_val - min_val + 1e-8)
+        return normalized_volume
 
     def __getitem__(self, idx):
         image_path = self.image_paths[idx]
@@ -88,36 +76,35 @@ class BRATSDataset(data.Dataset):
             image_nii = nib.load(image_path)
             mask_nii = nib.load(mask_path)
 
-            # Get image data
-            image = image_nii.get_fdata()
-            mask = mask_nii.get_fdata()
+            # Get image and mask data
+            image_volume = image_nii.get_fdata()
+            mask_volume = mask_nii.get_fdata()
 
-            # Debugging print
-            print(f"Original image shape: {image.shape}")
-            print(f"Original mask shape: {mask.shape}")
+            # Normalize the volume
+            normalized_volume = self._normalize_volume(image_volume)
 
-            # Handle 4D images (multiple modalities)
-            if image.ndim == 4:
-                # Select the first 3 modalities (channels)
-                image = image[:, :, :3]
-            elif image.ndim != 3:
-                raise ValueError(f"Unexpected image dimensions: {image.ndim}")
+            # Select slice and modalities
+            slice_image = self._select_slice(normalized_volume, self.slice_selection)
+            slice_mask = self._select_slice(mask_volume[..., np.newaxis], self.slice_selection)
 
-            # Normalize each channel separately
-            normalized_image = np.zeros_like(image, dtype=np.float32)
-            for i in range(image.shape[2]):
-                channel = image[:, :, i]
-                min_val, max_val = np.min(channel), np.max(channel)
-                normalized_image[:, :, i] = (channel - min_val) / (max_val - min_val + 1e-8)
-
-            # Resize image and mask
+            # Resize image (first 3 modalities)
             resized_image = np.stack([
-                self._robust_resize(normalized_image[:, :, i], self.target_size) 
-                for i in range(normalized_image.shape[2])
+                sk_transform.resize(
+                    slice_image[:, :, i], 
+                    self.target_size, 
+                    order=1,  # Bilinear interpolation
+                    preserve_range=True,
+                    anti_aliasing=True
+                ) for i in range(3)  # Select first 3 modalities
             ], axis=-1)
 
-            # Resize mask (use nearest neighbor for segmentation)
-            resized_mask = self._robust_resize(mask, self.target_size)
+            # Resize mask
+            resized_mask = sk_transform.resize(
+                slice_mask[:, :, 0], 
+                self.target_size, 
+                order=0,  # Nearest neighbor for segmentation
+                preserve_range=True
+            )
 
             # Convert to tensors
             image_tensor = torch.tensor(resized_image, dtype=torch.float32).permute(2, 0, 1)
@@ -135,6 +122,7 @@ def get_brats_dataloader(data_dir="/home/erezhuberman/data/Task01_BrainTumour", 
     trainset = BRATSDataset(data_dir)
     return data.DataLoader(trainset, batch_size=batch_size, shuffle=True, num_workers=num_workers)
 
+# Remainder of your original code stays the same
 
 train_loader = get_brats_dataloader()
 
