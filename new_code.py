@@ -77,36 +77,33 @@ class BRATSDataset(data.Dataset):
         mask_path = self.mask_paths[idx]
 
         # Load NIfTI images
-        image = nib.load(image_path).get_fdata()  # Shape: (240, 240, 3, 4) or (H, W, D, C)
+        image = nib.load(image_path).get_fdata()  # Shape: (240, 240, 3, 4)
         mask = nib.load(mask_path).get_fdata()  # Shape: (240, 240, D)
 
-        # Ensure the image is 4D (H, W, D, C) and has 4 channels
-        if len(image.shape) != 4:
-            raise ValueError(f"Unexpected image shape {image.shape} in {image_path}")
-
-        # Select the middle slice (assuming depth is the 3rd axis)
+        # Select the middle slice
         slice_idx = image.shape[2] // 2  # Select the middle slice
         image = image[:, :, slice_idx, :]  # Shape: (H, W, C)
         
-        # Keep only the first 3 channels (SAM2 expects 3 channels)
+        # Keep only the first 3 channels for SAM
         image = image[:, :, :3]  # Keep first 3 channels
 
-        # Normalize image (0-1 range)
+        # Normalize image
         image = (image - np.min(image)) / (np.max(image) - np.min(image))  # Normalize between 0-1
         image = cv2.resize(image, self.image_size, interpolation=cv2.INTER_LINEAR)  # Resize to 1024x1024
         image = torch.tensor(image, dtype=torch.float32).permute(2, 0, 1)  # Convert to (C, H, W)
 
-        # Ensure 3 channels for SAM
+        # Ensure shape is (3, 1024, 1024)
         if image.shape[0] != 3:
             print(f"⚠️ Warning: Image shape mismatch {image.shape}. Fixing channels.")
             if image.shape[0] == 1:
                 image = image.repeat(3, 1, 1)
 
-        # Resize mask (keep the same size as image)
+        # Resize mask to match image size and convert to single channel (grayscale)
         mask = cv2.resize(mask, self.image_size, interpolation=cv2.INTER_NEAREST)
         mask = torch.tensor(mask, dtype=torch.float32).unsqueeze(0)  # Convert (H, W) to (1, H, W)
 
         print(f"✅ Final image shape before return: {image.shape}")  # Should be (3, 1024, 1024)
+        print(f"✅ Final mask shape before return: {mask.shape}")  # Should be (1, 1024, 1024)
         return image, mask
         
 # === Load BRATS Dataset ===
