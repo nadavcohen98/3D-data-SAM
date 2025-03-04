@@ -29,8 +29,21 @@ transform = ResizeLongestSide(sam.image_encoder.img_size)
 # === BRATS Dataset Loader ===
 class BRATSDataset(data.Dataset):
     def __init__(self, data_dir, transform=None, image_size=(1024, 1024)):
+        # Validate data directory
+        if not os.path.exists(data_dir):
+            raise ValueError(f"Data directory does not exist: {data_dir}")
+
+        # Find image and mask paths
         self.image_paths = sorted(glob(os.path.join(data_dir, "imagesTr", "*.nii.gz")))
         self.mask_paths = sorted(glob(os.path.join(data_dir, "labelsTr", "*.nii.gz")))
+
+        # Validate paths
+        if not self.image_paths or not self.mask_paths:
+            raise ValueError(f"No NIfTI files found in {data_dir}. Check directory structure.")
+
+        if len(self.image_paths) != len(self.mask_paths):
+            raise ValueError(f"Mismatch in number of images ({len(self.image_paths)}) and masks ({len(self.mask_paths)})")
+
         self.transform = transform
         
         # Ensure image_size is a tuple
@@ -48,41 +61,66 @@ class BRATSDataset(data.Dataset):
         image_path = self.image_paths[idx]
         mask_path = self.mask_paths[idx]
 
-        # Load NIfTI images
-        image = nib.load(image_path).get_fdata()  # Shape: (128, 128, 4)
-        mask = nib.load(mask_path).get_fdata()  # Shape: (128, 128)
-
-        # Select the first 3 modalities (channels)
-        image = image[:, :, :3]  # Shape: (128, 128, 3)
-
-        # Normalize each channel separately
-        normalized_image = np.zeros_like(image, dtype=np.float32)
-        for i in range(3):
-            channel = image[:, :, i]
-            min_val, max_val = np.min(channel), np.max(channel)
-            normalized_image[:, :, i] = (channel - min_val) / (max_val - min_val + 1e-8)
-
-        # Ensure normalized_image is a valid numpy array
-        if normalized_image is None or normalized_image.size == 0:
-            raise ValueError(f"Failed to process image: {image_path}")
-
-        # Resize image to match SAM's expected input size
         try:
-            resized_image = cv2.resize(normalized_image, self.image_size, interpolation=cv2.INTER_LINEAR)
-        except cv2.error as e:
-            print(f"Resize error for image {image_path}")
-            print(f"Image shape: {normalized_image.shape}")
-            print(f"Desired size: {self.image_size}")
-            raise e
-        
-        # Convert to tensor and reshape to (C, H, W)
-        image_tensor = torch.tensor(resized_image, dtype=torch.float32).permute(2, 0, 1)
+            # Load NIfTI images
+            image_nii = nib.load(image_path)
+            mask_nii = nib.load(mask_path)
 
-        # Preprocess mask
-        resized_mask = cv2.resize(mask.astype(np.float32), self.image_size, interpolation=cv2.INTER_NEAREST)
-        mask_tensor = torch.tensor((resized_mask > 0).astype(np.float32)).unsqueeze(0)  # Binary mask
+            # Get image data
+            image = image_nii.get_fdata()
+            mask = mask_nii.get_fdata()
 
-        return image_tensor, mask_tensor
+            # Debugging: Print shape and type of loaded data
+            print(f"Image path: {image_path}")
+            print(f"Image shape: {image.shape}")
+            print(f"Mask shape: {mask.shape}")
+
+            # Handle 4D images (multiple modalities)
+            if image.ndim == 4:
+                # Select the first 3 modalities (channels)
+                image = image[:, :, :3]
+            elif image.ndim != 3:
+                raise ValueError(f"Unexpected image dimensions: {image.ndim}")
+
+            # Normalize each channel separately
+            normalized_image = np.zeros_like(image, dtype=np.float32)
+            for i in range(image.shape[2]):
+                channel = image[:, :, i]
+                min_val, max_val = np.min(channel), np.max(channel)
+                normalized_image[:, :, i] = (channel - min_val) / (max_val - min_val + 1e-8)
+
+            # Debugging: Verify normalized image
+            print(f"Normalized image shape: {normalized_image.shape}")
+            print(f"Normalized image dtype: {normalized_image.dtype}")
+
+            # Resize image with additional checks
+            if normalized_image.size == 0:
+                raise ValueError("Normalized image is empty")
+
+            # Ensure input is contiguous and has correct data type
+            resized_image = cv2.resize(
+                normalized_image.astype(np.float32), 
+                self.image_size, 
+                interpolation=cv2.INTER_LINEAR
+            )
+
+            # Convert to tensor and reshape to (C, H, W)
+            image_tensor = torch.tensor(resized_image, dtype=torch.float32).permute(2, 0, 1)
+
+            # Preprocess mask
+            resized_mask = cv2.resize(
+                mask.astype(np.float32), 
+                self.image_size, 
+                interpolation=cv2.INTER_NEAREST
+            )
+            mask_tensor = torch.tensor((resized_mask > 0).astype(np.float32)).unsqueeze(0)  # Binary mask
+
+            return image_tensor, mask_tensor
+
+        except Exception as e:
+            print(f"Error processing image {image_path}:")
+            print(f"Full error: {e}")
+            raise
 
 # === Load BRATS Dataset ===
 def get_brats_dataloader(data_dir="/home/erezhuberman/data/Task01_BrainTumour", batch_size=1, num_workers=2):
