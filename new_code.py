@@ -106,6 +106,10 @@ class BRATSDataset(data.Dataset):
         image = (image - np.min(image)) / (np.max(image) - np.min(image))  # Normalize 0-1
         image = cv2.resize(image, self.image_size, interpolation=cv2.INTER_LINEAR)
         image = torch.tensor(image, dtype=torch.float32).permute(2, 0, 1)  
+        
+        # 🔥 Fix: Keep only first 3 channels for SAM2
+        if image.shape[0] == 4:
+            image = image[:3, :, :]  # Only keep first 3 channels
 
         # Resize and normalize mask
         mask = cv2.resize(mask, self.image_size, interpolation=cv2.INTER_NEAREST)
