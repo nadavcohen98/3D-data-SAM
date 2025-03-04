@@ -81,48 +81,51 @@ class BRATSDataset(data.Dataset):
 
 
 
-    def __getitem__(self, idx):
-        image_path = self.image_paths[idx]
-        mask_path = self.mask_paths[idx]
+def __getitem__(self, idx):
+    image_path = self.image_paths[idx]
+    mask_path = self.mask_paths[idx]
 
-        # Load NIfTI images
-        image = nib.load(image_path).get_fdata()  # Shape: (H, W, D, C) or (H, W, D)
-        mask = nib.load(mask_path).get_fdata()  # Shape: (H, W, D)
+    # Load NIfTI images
+    image = nib.load(image_path).get_fdata()  # Shape: (H, W, D, C) or (H, W, D)
+    mask = nib.load(mask_path).get_fdata()  # Shape: (H, W, D)
 
-        # Debug: Print raw shape
-        print(f"Raw Image Shape: {image.shape}")
+    # Debug: Print raw shape
+    print(f"Raw Image Shape: {image.shape}")
 
-        # Select a middle slice (2D)
-        slice_idx = image.shape[2] // 2
-        image = image[:, :, slice_idx]  # If shape is (H, W, D)
+    # Select a middle slice (2D)
+    slice_idx = image.shape[2] // 2
+    image = image[:, :, slice_idx]  # If shape is (H, W, D)
 
-        # Debug: Print shape after slicing
-        print(f"Image Shape After Slicing: {image.shape}")
-    
-        # **Fix: Ensure correct number of channels**
-        if len(image.shape) == 2:  # If the image is (H, W), expand to (H, W, 1)
-            image = np.expand_dims(image, axis=-1)
-    
-        elif image.shape[-1] > 3:  # If more than 3 channels, keep only the first 3 (RGB)
-            image = image[:, :, :3]
-    
-        # Debug: Print final shape
-        print(f"Final Image Shape: {image.shape}")
-    
-        # Normalize image
-        image = (image - np.min(image)) / (np.max(image) - np.min(image))  # Normalize 0-1
-        image = torch.tensor(image, dtype=torch.float32).permute(2, 0, 1)  # Channels first
-    
-        mask = mask[:, :, slice_idx]  # Shape: (H, W)
-        mask = torch.tensor(mask, dtype=torch.float32).unsqueeze(0)  # Add channel dim
-    
-        if self.transform:
+    # Ensure image has at most 4 channels
+    if len(image.shape) == 2:  # Convert (H, W) to (H, W, 1)
+        image = np.expand_dims(image, axis=-1)
+    elif image.shape[-1] > 4:  # If there are more than 4 channels, keep only first 4
+        print(f"Warning: Reducing channels from {image.shape[-1]} to 4")
+        image = image[:, :, :4]
+
+    # Debug: Print final shape
+    print(f"Final Image Shape Before Transform: {image.shape}")
+
+    # Normalize image
+    image = (image - np.min(image)) / (np.max(image) - np.min(image))  # Normalize 0-1
+    image = torch.tensor(image, dtype=torch.float32).permute(2, 0, 1)  # Channels first (C, H, W)
+
+    # Select corresponding mask slice
+    mask = mask[:, :, slice_idx]  # Shape: (H, W)
+    mask = torch.tensor(mask, dtype=torch.float32).unsqueeze(0)  # Add channel dim
+
+    print(f"Before transform: image shape = {image.shape}, mask shape = {mask.shape}")
+    # Check for incorrect transformation issues
+    if self.transform:
+        if image.shape[0] in [1, 3, 4]:  # Ensure valid channel count
             image = self.transform.apply_image(image.numpy())
             mask = self.transform.apply_image(mask.numpy())
             image = torch.tensor(image, dtype=torch.float32)
             mask = torch.tensor(mask, dtype=torch.float32)
-    
-        return image, mask
+        else:
+            print(f"Skipping transform due to incorrect shape: {image.shape}")
+
+    return image, mask
 
 
 
