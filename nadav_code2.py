@@ -32,7 +32,14 @@ class BRATSDataset(data.Dataset):
         self.image_paths = sorted(glob(os.path.join(data_dir, "imagesTr", "*.nii.gz")))
         self.mask_paths = sorted(glob(os.path.join(data_dir, "labelsTr", "*.nii.gz")))
         self.transform = transform
-        self.image_size = image_size
+        
+        # Ensure image_size is a tuple
+        if isinstance(image_size, int):
+            self.image_size = (image_size, image_size)
+        elif isinstance(image_size, tuple) and len(image_size) == 2:
+            self.image_size = image_size
+        else:
+            raise ValueError("image_size must be an integer or a tuple of two integers")
 
     def __len__(self):
         return len(self.image_paths)
@@ -55,8 +62,18 @@ class BRATSDataset(data.Dataset):
             min_val, max_val = np.min(channel), np.max(channel)
             normalized_image[:, :, i] = (channel - min_val) / (max_val - min_val + 1e-8)
 
+        # Ensure normalized_image is a valid numpy array
+        if normalized_image is None or normalized_image.size == 0:
+            raise ValueError(f"Failed to process image: {image_path}")
+
         # Resize image to match SAM's expected input size
-        resized_image = cv2.resize(normalized_image, self.image_size, interpolation=cv2.INTER_LINEAR)
+        try:
+            resized_image = cv2.resize(normalized_image, self.image_size, interpolation=cv2.INTER_LINEAR)
+        except cv2.error as e:
+            print(f"Resize error for image {image_path}")
+            print(f"Image shape: {normalized_image.shape}")
+            print(f"Desired size: {self.image_size}")
+            raise e
         
         # Convert to tensor and reshape to (C, H, W)
         image_tensor = torch.tensor(resized_image, dtype=torch.float32).permute(2, 0, 1)
@@ -71,6 +88,7 @@ class BRATSDataset(data.Dataset):
 def get_brats_dataloader(data_dir="/home/erezhuberman/data/Task01_BrainTumour", batch_size=1, num_workers=2):
     trainset = BRATSDataset(data_dir, transform=transform)
     return data.DataLoader(trainset, batch_size=batch_size, shuffle=True, num_workers=num_workers)
+
 
 train_loader = get_brats_dataloader()
 
