@@ -136,11 +136,11 @@ class PromptEncoder(nn.Module):
 prompt_encoder = PromptEncoder().to(device)
 optimizer = optim.Adam(prompt_encoder.parameters(), lr=0.0003, weight_decay=1e-4)
 
-# Enable Mixed Precision
-from torch.cuda.amp import autocast, GradScaler
-scaler = GradScaler()
 
 # === Training Loop ===
+from torch.amp import autocast, GradScaler  # ✅ Import from the correct module
+
+scaler = GradScaler("cuda")  # ✅ Updated API
 def train_one_epoch():
     torch.cuda.empty_cache()  # Free memory before training
     prompt_encoder.train()
@@ -149,7 +149,7 @@ def train_one_epoch():
     for images, masks in tqdm(train_loader):
         images, masks = images.to(device), masks.to(device)
 
-        with autocast(device_type="cuda", dtype=torch.float16):  # 🔥 Mixed Precision
+        with autocast("cuda", dtype=torch.float16):  # 🔥 Mixed Precision
             prompt_embeddings = prompt_encoder(images)
 
             with torch.no_grad():
