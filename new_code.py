@@ -122,9 +122,18 @@ class PromptEncoder(nn.Module):
         features = self.encoder(x)
         return self.conv1x1(features)
 
-# ✅ Ensure a fresh model instance
-del prompt_encoder
-torch.cuda.empty_cache()
+# === Define Prompt Encoder (Ensuring 3-channel Input) ===
+class PromptEncoder(nn.Module):
+    def __init__(self):
+        super(PromptEncoder, self).__init__()
+        self.encoder = UNTER(in_channels=3, out_channels=256)  # ✅ Ensure 3-channel input
+        self.conv1x1 = nn.Conv2d(256, 256, kernel_size=1)
+
+    def forward(self, x):
+        features = self.encoder(x)
+        return self.conv1x1(features)
+
+# ✅ Directly initialize the model (no need for `del prompt_encoder`)
 prompt_encoder = PromptEncoder().to(device)
 optimizer = optim.Adam(prompt_encoder.parameters(), lr=0.0003, weight_decay=1e-4)
 scaler = GradScaler("cuda")
