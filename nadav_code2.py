@@ -11,7 +11,7 @@ from torch.amp import autocast, GradScaler
 import skimage.transform as sk_transform
 
 # Segment Anything Model imports
-from segment_anything import sam_model_registry, Sam
+from segment_anything import sam_model_registry
 
 # Set CUDA memory optimization
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
