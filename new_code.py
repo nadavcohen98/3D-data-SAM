@@ -33,7 +33,7 @@ transform = ResizeLongestSide(sam.image_encoder.img_size)
 
 # === UNTER Model Definition ===
 class UNTER(nn.Module):
-    def __init__(self, in_channels=4, out_channels=256):
+    def __init__(self, in_channels=3, out_channels=256):  # 🔥 Change in_channels to 3
         super(UNTER, self).__init__()
 
         # Encoder
@@ -54,24 +54,21 @@ class UNTER(nn.Module):
         self.final_conv = nn.Conv2d(64, out_channels, kernel_size=1)
 
     def forward(self, x):
-        # Encoding Path
         x1 = torch.relu(self.conv1(x))
         x2 = torch.relu(self.conv2(self.pool(x1)))
         x3 = torch.relu(self.conv3(self.pool(x2)))
 
-        # Transformer Processing
         b, c, h, w = x3.shape
-        x3_flat = x3.view(b, c, h * w).permute(2, 0, 1)  # Reshape for transformer: (seq_len, batch, channels)
+        x3_flat = x3.view(b, c, h * w).permute(2, 0, 1)
         x3_transformed = self.transformer(x3_flat)
-        x3_out = x3_transformed.permute(1, 2, 0).view(b, c, h, w)  # Reshape back
+        x3_out = x3_transformed.permute(1, 2, 0).view(b, c, h, w)
 
-        # Decoding Path
         x = torch.relu(self.upconv1(x3_out))
         x = torch.relu(self.upconv2(x))
         x = self.final_conv(x)
 
         return x
-
+        
 # === BRATS Dataset Loader ===
 class BRATSDataset(data.Dataset):
     def __init__(self, data_dir, transform=None, image_size=(128, 128)):  # 🔥 Resize to 128x128
