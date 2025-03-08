@@ -16,7 +16,6 @@ BATCH_SIZE = 4
 LEARNING_RATE = 1e-3
 EPOCHS = 10
 
-
 # ==============================
 # ✅ Step 1: Dataset Loader (Extract Middle Slice of FLAIR)
 # ==============================
@@ -65,20 +64,33 @@ def get_dataloader(root_dir, batch_size=1, num_workers=2):
 
 
 # ==============================
-# ✅ Step 3: Simple CNN Model
+# ✅ Step 3: Updated CNN Model (Auto-adjusting Linear Layer)
 # ==============================
 class SimpleCNN(nn.Module):
-    def __init__(self):
+    def __init__(self, img_size=240):
         super(SimpleCNN, self).__init__()
         self.conv1 = nn.Conv2d(1, 16, kernel_size=3, padding=1)
         self.conv2 = nn.Conv2d(16, 32, kernel_size=3, padding=1)
-        self.fc1 = nn.Linear(32 * 240 * 240, 128)
+
+        # Instead of hardcoding input size, compute dynamically
+        self.flatten_size = None  # Will be computed in `forward()`
+
+        self.fc1 = nn.Linear(1, 128)  # Placeholder, will be replaced dynamically
         self.fc2 = nn.Linear(128, 2)  # Binary classification (tumor vs. no tumor)
 
     def forward(self, x):
         x = F.relu(self.conv1(x))
         x = F.relu(self.conv2(x))
-        x = x.view(x.size(0), -1)  # Flatten
+        
+        # Flatten while keeping batch dimension
+        x = x.view(x.size(0), -1)
+
+        # Dynamically set fc1 input size if not already set
+        if self.flatten_size is None:
+            self.flatten_size = x.shape[1]
+            print(f"🔧 Setting fc1 input size to {self.flatten_size}")
+            self.fc1 = nn.Linear(self.flatten_size, 128).to(x.device)
+
         x = F.relu(self.fc1(x))
         x = self.fc2(x)
         return x
