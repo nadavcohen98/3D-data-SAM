@@ -61,7 +61,7 @@ def get_dataloader(root_dir, batch_size=1, num_workers=2):
     return DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers)
 
 # ==============================
-# ✅ U-Net Architecture
+# ✅ U-Net Architecture with Batch Normalization
 # ==============================
 class UNet(nn.Module):
     def __init__(self, in_channels=1, out_channels=1):
@@ -84,8 +84,10 @@ class UNet(nn.Module):
     def conv_block(self, in_channels, out_channels):
         return nn.Sequential(
             nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1),
+            nn.BatchNorm2d(out_channels),
             nn.ReLU(inplace=True),
             nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1),
+            nn.BatchNorm2d(out_channels),
             nn.ReLU(inplace=True),
         )
     
@@ -161,7 +163,7 @@ def train_model():
             total_loss += loss.item()
             total_dice += dice_coefficient(outputs, labels).item()
             total_iou += iou(outputs, labels).item()
-        print(f"📊 Epoch {epoch+1}/{EPOCHS} - Loss: {total_loss / len(train_loader):.4f}, Dice: {total_dice / len(train_loader):.4f}, IoU: {total_iou / len(train_loader):.4f}")
+        print(f" Epoch {epoch+1}/{EPOCHS} - Loss: {total_loss / len(train_loader):.4f}, Dice coefficient: {total_dice / len(train_loader):.4f}, IoU: {total_iou / len(train_loader):.4f}")
     print("✅ Training complete!")
 
 if __name__ == "__main__":
