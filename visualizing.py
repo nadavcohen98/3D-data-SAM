@@ -21,30 +21,63 @@ DATA_PATH = "/home/erezhuberman/data/Task01_BrainTumour/imagesTr"
 
 # -------------------- Dataset --------------------
 class BraTSDataset(Dataset):
-    def __init__(self, root_dir):
+    def __init__(self, root_dir, normalize=True):
+        """
+        Custom dataset for loading single-file BRATS data.
+        Assumes each `.nii.gz` file contains all modalities.
+        """
         self.root_dir = root_dir
-        self.image_files = sorted([f for f in os.listdir(root_dir) if f.endswith("_0000.nii.gz")])
+        self.image_files = sorted([f for f in os.listdir(root_dir) if f.endswith(".nii.gz")])
+        self.normalize = normalize
+        
+        if len(self.image_files) == 0:
+            raise ValueError(f"No `.nii.gz` files found in {root_dir}. Check your dataset path.")
+
+        print(f"Found {len(self.image_files)} images in {root_dir}")
 
     def __len__(self):
         return len(self.image_files)
 
     def __getitem__(self, idx):
-        img_path = os.path.join(self.root_dir, self.image_files[idx])
-        mask_path = img_path.replace("_0000.nii.gz", ".nii.gz")
+        """
+        Load a single `.nii.gz` file as a 3D volume.
+        Assumes each file contains all modalities (instead of separate FLAIR, T1, etc.).
+        """
+        image_path = os.path.join(self.root_dir, self.image_files[idx])
 
-        # Load image
-        image = nib.load(img_path).get_fdata()
-        image = torch.tensor(image, dtype=torch.float32).unsqueeze(0)  # Add channel dim
+        try:
+            # Load the .nii.gz file
+            img = nib.load(image_path).get_fdata()
 
-        # Load mask
-        mask = nib.load(mask_path).get_fdata()
-        mask = torch.tensor(mask, dtype=torch.float32).unsqueeze(0)  # Add channel dim
+            # Convert to torch tensor
+            img = torch.tensor(img, dtype=torch.float32)
 
-        return image, mask
+            # Normalize (z-score normalization per slice)
+            if self.normalize:
+                img = self.normalize_volume(img)
 
-def get_dataloader():
-    dataset = BraTSDataset(DATA_PATH)
-    return DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=4)
+            # Add a channel dimension to match PyTorch conventions (C, D, H, W)
+            img = img.unsqueeze(0)  # Add channel dim -> (1, D, H, W)
+
+            return img
+        except Exception as e:
+            print(f"Error loading {image_path}: {e}")
+            return torch.zeros((1, 240, 240, 155))  # Return empty tensor in case of failure
+
+    def normalize_volume(self, img):
+        """
+        Normalize each slice using z-score normalization.
+        """
+        for i in range(img.shape[2]):  # Iterate over slices
+            slice_data = img[:, :, i]
+            mean, std = slice_data.mean(), slice_data.std()
+            if std > 0:
+                img[:, :, i] = (slice_data - mean) / std
+        return img
+
+def get_dataloader(root_dir, batch_size=1):
+    dataset = BraTSDataset(root_dir)
+    return DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=4)
 
 # -------------------- Model --------------------
 class AutoSAM2(nn.Module):
