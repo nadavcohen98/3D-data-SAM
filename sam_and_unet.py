@@ -15,7 +15,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
 
 # Define dataset directory
-DATASET_PATH = "/home/erezhuberman/data/"
+DATASET_PATH = "/home/erezhuberman/data/Task01_BrainTumour/imagesTr"
 SAM_CHECKPOINT = "/home/nadavnungi/sam2/sam_vit_h_4b8939.pth"
 
 # Hyperparameters
