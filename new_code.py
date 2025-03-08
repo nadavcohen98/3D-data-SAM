@@ -1,72 +1,63 @@
+import os
 import torch
 import torch.nn as nn
 import torch.optim as optim
-import torch.utils.data as data
+import torch.nn.functional as F
+import torchvision.transforms as transforms
+from torch.utils.data import Dataset, DataLoader
+import nibabel as nib
 import numpy as np
 import cv2
-import os
-import nibabel as nib
 from glob import glob
-from tqdm import tqdm
-from torch.amp import autocast, GradScaler  # ✅ Import correct module
-from segment_anything import sam_model_registry
-from segment_anything.utils.transforms import ResizeLongestSide
+from segment_anything import sam_model_registry, SamPredictor
 
-# Set CUDA memory optimization
-os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+torch.cuda.empty_cache()  # Clear CUDA cache explicitly
+
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-# === Load SAM2 Model ===
-sam_args = {
-    'sam_checkpoint': "../sam2/sam2_vit_h.pth",
-    'model_type': "vit_h",
-    'gpu_id': 0,
-}
-sam = sam_model_registry[sam_args['model_type']](checkpoint=sam_args['sam_checkpoint'])
-sam.to(device)
-transform = ResizeLongestSide(sam.image_encoder.img_size)
+# Define dataset directory
+DATASET_PATH = "/home/erezhuberman/data/Task01_BrainTumour"
+SAM_CHECKPOINT = "/home/nadavnungi/sam2/sam_vit_h_4b8939.pth"
 
-# === UNTER Model Definition ===
-class UNTER(nn.Module):
-    def __init__(self, in_channels=3, out_channels=256):  # ✅ Ensuring 3-channel input
-        super(UNTER, self).__init__()
+# Hyperparameters
+BATCH_SIZE = 1  # Reduce batch size to prevent OOM errors
+LEARNING_RATE = 1e-3
+EPOCHS = 10
+WEIGHT_DECAY = 1e-5
 
-        self.conv1 = nn.Conv2d(in_channels, 64, kernel_size=3, padding=1)
-        self.conv2 = nn.Conv2d(64, 128, kernel_size=3, padding=1)
-        self.conv3 = nn.Conv2d(128, 256, kernel_size=3, padding=1)
-        self.pool = nn.MaxPool2d(2, 2)
+# Load Frozen SAM Model
+sam = sam_model_registry["vit_h"](checkpoint=SAM_CHECKPOINT).to(device)
+sam.eval()  # Freeze the entire SAM model
 
-        self.transformer = nn.TransformerEncoder(
-            nn.TransformerEncoderLayer(d_model=256, nhead=8, dim_feedforward=512, dropout=0.1),
-            num_layers=4
-        )
+# ==============================
+# Loss Functions and Metrics
+# ==============================
+def dice_loss(pred, target, smooth=1e-6):
+    pred = torch.sigmoid(pred)
+    intersection = (pred * target).sum()
+    dice = (2. * intersection + smooth) / (pred.sum() + target.sum() + smooth)
+    return 1 - dice
 
-        self.upconv1 = nn.ConvTranspose2d(256, 128, kernel_size=2, stride=2)
-        self.upconv2 = nn.ConvTranspose2d(128, 64, kernel_size=2, stride=2)
-        self.final_conv = nn.Conv2d(64, out_channels, kernel_size=1)
+def dice_coefficient(pred, target, smooth=1e-6):
+    pred = torch.sigmoid(pred) > 0.5
+    target = target > 0.5
+    intersection = (pred * target).sum()
+    return (2. * intersection + smooth) / (pred.sum() + target.sum() + smooth)
 
-    def forward(self, x):
-        x1 = torch.relu(self.conv1(x))
-        x2 = torch.relu(self.conv2(self.pool(x1)))
-        x3 = torch.relu(self.conv3(self.pool(x2)))
+def iou(pred, target, smooth=1e-6):
+    pred = torch.sigmoid(pred) > 0.5
+    target = target > 0.5
+    intersection = (pred * target).sum()
+    union = pred.sum() + target.sum() - intersection
+    return (intersection + smooth) / (union + smooth)
 
-        b, c, h, w = x3.shape
-        x3_flat = x3.view(b, c, h * w).permute(2, 0, 1)
-        x3_transformed = self.transformer(x3_flat)
-        x3_out = x3_transformed.permute(1, 2, 0).view(b, c, h, w)
-
-        x = torch.relu(self.upconv1(x3_out))
-        x = torch.relu(self.upconv2(x))
-        x = self.final_conv(x)
-
-        return x
-
-# === BRATS Dataset Loader ===
-class BRATSDataset(data.Dataset):
-    def __init__(self, data_dir, transform=None, image_size=(1024, 1024)):
+# ==============================
+# Dataset Loader
+# ==============================
+class BRATSDataset(Dataset):
+    def __init__(self, data_dir, image_size=(1024, 1024)):
         self.image_paths = sorted(glob(os.path.join(data_dir, "imagesTr", "*.nii.gz")))
         self.mask_paths = sorted(glob(os.path.join(data_dir, "labelsTr", "*.nii.gz")))
-        self.transform = transform
         self.image_size = image_size
 
     def __len__(self):
@@ -77,109 +68,113 @@ class BRATSDataset(data.Dataset):
         mask_path = self.mask_paths[idx]
 
         # Load NIfTI images
-        image = nib.load(image_path).get_fdata()  # Shape: (240, 240, 3, 4)
+        image = nib.load(image_path).get_fdata()  # Shape: (240, 240, D, 4)
         mask = nib.load(mask_path).get_fdata()  # Shape: (240, 240, D)
 
         # Select the middle slice
-        slice_idx = image.shape[2] // 2  # Select the middle slice
-        image = image[:, :, slice_idx, :]  # Shape: (H, W, C)
-        
-        # Keep only the first 3 channels for SAM
-        image = image[:, :, :3]  # Keep first 3 channels
+        slice_idx = image.shape[2] // 2  # Middle slice
+        image = image[:, :, slice_idx, :3]  # Keep first 3 channels
 
         # Normalize image
-        image = (image - np.min(image)) / (np.max(image) - np.min(image))  # Normalize between 0-1
-        image = cv2.resize(image, self.image_size, interpolation=cv2.INTER_LINEAR)  # Resize to 1024x1024
-        image = torch.tensor(image, dtype=torch.float32).permute(2, 0, 1)  # Convert to (C, H, W)
+        image = (image - np.min(image)) / (np.max(image) - np.min(image) + 1e-8)
+        image = cv2.resize(image, self.image_size, interpolation=cv2.INTER_LINEAR)
+        image = torch.tensor(image, dtype=torch.float32).permute(2, 0, 1)
 
-        # Ensure shape is (3, 1024, 1024)
-        if image.shape[0] != 3:
-            print(f"⚠️ Warning: Image shape mismatch {image.shape}. Fixing channels.")
-            if image.shape[0] == 1:
-                image = image.repeat(3, 1, 1)
+        # Resize mask and convert to single channel
+        mask = cv2.resize(mask[:, :, slice_idx], self.image_size, interpolation=cv2.INTER_NEAREST)
+        mask = torch.tensor(mask, dtype=torch.float32).unsqueeze(0)
 
-        # Resize mask to match image size and convert to single channel (grayscale)
-        mask = cv2.resize(mask, self.image_size, interpolation=cv2.INTER_NEAREST)
-        mask = torch.tensor(mask, dtype=torch.float32).unsqueeze(0)  # Convert (H, W) to (1, H, W)
-
-        print(f"✅ Final image shape before return: {image.shape}")  # Should be (3, 1024, 1024)
-        print(f"✅ Final mask shape before return: {mask.shape}")  # Should be (1, 1024, 1024)
         return image, mask
         
-# === Load BRATS Dataset ===
-def get_brats_dataloader(data_dir="/home/erezhuberman/data/Task01_BrainTumour", batch_size=1, num_workers=2):
-    trainset = BRATSDataset(data_dir, transform=transform)
-    return data.DataLoader(trainset, batch_size=batch_size, shuffle=True, num_workers=num_workers)
+# ==============================
+# U-Net Encoder as Prompt Encoder
+# ==============================
+class UNetPromptEncoder(nn.Module):
+    def __init__(self, in_channels=4, out_channels=256):
+        super(UNetPromptEncoder, self).__init__()
+        self.enc1 = self.conv_block(in_channels, 64)
+        self.enc2 = self.conv_block(64, 128)
+        self.enc3 = self.conv_block(128, 256)
+        self.enc4 = self.conv_block(256, 512)
+        self.bottleneck = self.conv_block(512, 1024)
+        self.final_conv = nn.Conv2d(1024, out_channels, kernel_size=1)
 
-train_loader = get_brats_dataloader()
-
-# === Prompt Encoder (Ensuring 3-channel Input) ===
-class PromptEncoder(nn.Module):
-    def __init__(self):
-        super(PromptEncoder, self).__init__()
-        self.encoder = UNTER(in_channels=3, out_channels=256)  # ✅ Fixed in_channels=3
-        self.conv1x1 = nn.Conv2d(256, 256, kernel_size=1)
+    def conv_block(self, in_channels, out_channels):
+        return nn.Sequential(
+            nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU(inplace=True),
+            nn.Dropout(p=0.3)
+        )
 
     def forward(self, x):
-        features = self.encoder(x)
-        return self.conv1x1(features)
+        enc1 = self.enc1(x)
+        enc2 = self.enc2(F.max_pool2d(enc1, 2))
+        enc3 = self.enc3(F.max_pool2d(enc2, 2))
+        enc4 = self.enc4(F.max_pool2d(enc3, 2))
+        bottleneck = self.bottleneck(F.max_pool2d(enc4, 2))
+        x = self.final_conv(bottleneck)
+        x = F.interpolate(x, size=(64, 64), mode='bilinear', align_corners=False)
+        return x
 
-# === Define Prompt Encoder (Ensuring 3-channel Input) ===
-class PromptEncoder(nn.Module):
-    def __init__(self):
-        super(PromptEncoder, self).__init__()
-        self.encoder = UNTER(in_channels=3, out_channels=256)  # ✅ Ensure 3-channel input
-        self.conv1x1 = nn.Conv2d(256, 256, kernel_size=1)
+# Initialize the prompt encoder
+prompt_encoder = UNetPromptEncoder().to(device)
 
-    def forward(self, x):
-        features = self.encoder(x)
-        return self.conv1x1(features)
+# ==============================
+# Training Loop
+# ==============================
+def train_model():
+    train_loader = DataLoader(BRATSDataset(DATASET_PATH), batch_size=BATCH_SIZE, shuffle=True)
+    optimizer = optim.AdamW(sam.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
 
-# ✅ Directly initialize the model (no need for `del prompt_encoder`)
-prompt_encoder = PromptEncoder().to(device)
-optimizer = optim.Adam(prompt_encoder.parameters(), lr=0.0003, weight_decay=1e-4)
-scaler = GradScaler("cuda")
+    for epoch in range(EPOCHS):
+        sam.train()
+        total_loss, total_dice, total_iou = 0, 0, 0
+        num_batches = len(train_loader)
 
-# === Training Loop ===
-def train_one_epoch():
-    torch.cuda.empty_cache()
-    prompt_encoder.train()
-    loss_fn = nn.BCELoss()
+        for images, masks in train_loader:
+            images, masks = images.to(device), masks.to(device)
+            optimizer.zero_grad()
 
-    for images, masks in tqdm(train_loader):
-        images, masks = images.to(device), masks.to(device)
-
-        print(f"🔍 Input image shape: {images.shape}")  # Debugging check
-
-        with autocast("cuda", dtype=torch.float16):
-            prompt_embeddings = prompt_encoder(images)
+            # Resize images for SAM
+            images_resized = F.interpolate(images, size=(1024, 1024), mode='bilinear', align_corners=False)
 
             with torch.no_grad():
-                image_embeddings = sam.image_encoder(images)
+                image_embeddings = sam.image_encoder(images_resized)
+                image_pe = sam.prompt_encoder.get_dense_pe()
+                sparse_prompt_embeddings = torch.zeros((BATCH_SIZE, 1, sam.prompt_encoder.embed_dim), device=device)
 
-            sparse_embeddings, dense_embeddings = sam.prompt_encoder(
-                points=None, boxes=None, masks=prompt_embeddings
-            )
-
-            masks_pred, _ = sam.mask_decoder(
+            sam_output, _ = sam.mask_decoder(
                 image_embeddings=image_embeddings,
-                image_pe=sam.prompt_encoder.get_dense_pe(),
-                sparse_prompt_embeddings=sparse_embeddings,
-                dense_prompt_embeddings=dense_embeddings,
-                multimask_output=False,
+                image_pe=image_pe,
+                sparse_prompt_embeddings=sparse_prompt_embeddings,
+                dense_prompt_embeddings=None,
+                multimask_output=False
             )
 
-            loss = loss_fn(masks_pred, masks)
+            sam_output_resized = F.interpolate(sam_output, size=masks.shape[2:], mode="bilinear", align_corners=False)
 
-        optimizer.zero_grad()
-        scaler.scale(loss).backward()
-        scaler.step(optimizer)
-        scaler.update()
+            loss = dice_loss(sam_output_resized, masks)
+            dice_score = dice_coefficient(sam_output_resized, masks).item()
+            iou_score = iou(sam_output_resized, masks).item()
 
-    print(f"Training loss: {loss.item()}")
+            loss.backward()
+            optimizer.step()
 
-# === Run Training ===
-num_epochs = 20
-for epoch in range(num_epochs):
-    print(f"Epoch {epoch+1}/{num_epochs}")
-    train_one_epoch()
+            total_loss += loss.item()
+            total_dice += dice_score
+            total_iou += iou_score
+
+        avg_loss = total_loss / num_batches
+        avg_dice = total_dice / num_batches
+        avg_iou = total_iou / num_batches
+
+        print(f"Epoch {epoch+1}/{EPOCHS} - Loss: {avg_loss:.4f}, Dice: {avg_dice:.4f}, IoU: {avg_iou:.4f}")
+
+    print("\nTraining complete!")
+
+if __name__ == "__main__":
+    train_model()
