@@ -17,7 +17,7 @@ print(f"Using device: {DEVICE}")
 LR = 3e-4
 BATCH_SIZE = 1
 EPOCHS = 20
-DATA_PATH = "/home/erezhuberman/data/Task01_BrainTumour"
+DATA_PATH = "/home/erezhuberman/data/Task01_BrainTumour/imagesTr"
 
 # -------------------- Dataset --------------------
 class BraTSDataset(Dataset):
