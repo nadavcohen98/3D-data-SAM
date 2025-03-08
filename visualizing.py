@@ -94,7 +94,7 @@ def train_model():
     Main training function.
     """
     # Set dataset path
-    dataset_path = "/home/erezhuberman/data/Task01_BrainTumour"
+    dataset_path = "/home/erezhuberman/data/Task01_BrainTumour/imagesTr"
 
     # Get DataLoader
     train_loader = get_dataloader(dataset_path, batch_size=4)
