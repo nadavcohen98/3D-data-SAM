@@ -114,7 +114,7 @@ def iou(pred, target, smooth=1e-6):
 # ==============================
 def train_model():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"🚀 Using device: {device}")
+    print(f" Using device: {device}")
 
     train_loader = get_dataloader(DATASET_PATH, batch_size=BATCH_SIZE)
     model = UNet().to(device)
@@ -140,7 +140,7 @@ def train_model():
             total_dice += dice_coefficient(outputs, labels).item()
             total_iou += iou(outputs, labels).item()
 
-        print(f"📊 Epoch {epoch+1}/{EPOCHS} - Loss: {total_loss / len(train_loader):.4f}, Dice: {total_dice / len(train_loader):.4f}, IoU: {total_iou / len(train_loader):.4f}")
+        print(f" Epoch {epoch+1}/{EPOCHS} - Loss: {total_loss / len(train_loader):.4f}, Dice: {total_dice / len(train_loader):.4f}, IoU: {total_iou / len(train_loader):.4f}")
     
     print("✅ Training complete!")
 
