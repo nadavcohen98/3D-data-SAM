@@ -22,37 +22,43 @@ EPOCHS = 10
 class BraTSDataset(Dataset):
     def __init__(self, root_dir):
         self.root_dir = root_dir
-        self.file_list = sorted([f for f in os.listdir(root_dir) if f.endswith('.nii.gz')])
-        
+        self.file_list = sorted([
+            f for f in os.listdir(root_dir) if f.endswith('.nii.gz') and not f.startswith("._")
+        ])
+
         if len(self.file_list) == 0:
-            raise ValueError(f"❌ No NIfTI files found in {root_dir}")
+            raise ValueError(f"❌ No valid NIfTI files found in {root_dir}")
 
     def __len__(self):
         return len(self.file_list)
 
     def __getitem__(self, idx):
         file_path = os.path.join(self.root_dir, self.file_list[idx])
-        image = nib.load(file_path).get_fdata()  # Shape: [H, W, D] or [Modalities, H, W, D]
-        
-        # If the image has multiple modalities (4D), select only **FLAIR** modality (Index 0)
+
+        try:
+            image = nib.load(file_path).get_fdata()  # Shape: [H, W, D] or [Modalities, H, W, D]
+        except Exception as e:
+            print(f"❌ Error loading file {file_path}: {e}")
+            return torch.zeros((1, 240, 240))  # Return a dummy tensor to avoid crash
+
+        # If the image has multiple modalities (4D), select only **FLAIR** (Index 0)
         if len(image.shape) == 4:
             image = image[0]  # Select FLAIR (Change to 1, 2, or 3 for T1, T1CE, T2)
 
         # Normalize image
         image = (image - np.min(image)) / (np.max(image) - np.min(image) + 1e-8)
-        
+
         # Convert to PyTorch tensor
-        image = torch.tensor(image, dtype=torch.float32)  # Shape: [H, W, D]
-        
+        image = torch.tensor(image, dtype=torch.float32)
+
         # Extract **middle slice** from depth axis
         middle_idx = image.shape[2] // 2
         image = image[:, :, middle_idx]  # Shape: [H, W]
-        
+
         # Add channel dimension for CNNs: [1, H, W]
         image = image.unsqueeze(0)
-        
-        return image
 
+        return image
 
 # ==============================
 # ✅ Step 2: DataLoader
