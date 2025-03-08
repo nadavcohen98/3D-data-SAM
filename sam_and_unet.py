@@ -10,14 +10,13 @@ import numpy as np
 import matplotlib.pyplot as plt
 from segment_anything import sam_model_registry, SamPredictor
 
-torch.mps.empty_cache()  # Clear MPS cache explicitly
-
-# Ensure use of Mac GPU if available
-device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
+# Ensure use of GPU if available
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print(f"Using device: {device}")
 
 # Define dataset directory
-DATASET_PATH = "/Users/nadavcohen/Desktop/Universuty/deep_learning/brats20-dataset-training-validation/BraTS2020_TrainingData/MICCAI_BraTS2020_TrainingData"
-SAM_CHECKPOINT = "/Users/nadavcohen/Desktop/Universuty/deep_learning/project/sam_vit_h_4b8939.pth"
+DATASET_PATH = "/home/erezhuberman/data/"
+SAM_CHECKPOINT = "/home/nadavnungi/sam2/sam_vit_h_4b8939.pth"
 
 # Hyperparameters
 BATCH_SIZE = 1  # Reduce batch size to prevent OOM errors on Mac
