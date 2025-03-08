@@ -18,7 +18,7 @@ EPOCHS = 10
 
 
 # ==============================
-# ✅ Step 1: Dataset Loader (Extract Middle Slice)
+# ✅ Step 1: Dataset Loader (Extract Middle Slice of FLAIR)
 # ==============================
 class BraTSDataset(Dataset):
     def __init__(self, root_dir):
@@ -33,13 +33,17 @@ class BraTSDataset(Dataset):
 
     def __getitem__(self, idx):
         file_path = os.path.join(self.root_dir, self.file_list[idx])
-        image = nib.load(file_path).get_fdata()  # Shape: [H, W, D]
+        image = nib.load(file_path).get_fdata()  # Shape: [H, W, D] or [Modalities, H, W, D]
         
+        # If the image has multiple modalities (4D), select only **FLAIR** modality (Index 0)
+        if len(image.shape) == 4:
+            image = image[0]  # Select FLAIR (Change to 1, 2, or 3 for T1, T1CE, T2)
+
         # Normalize image
         image = (image - np.min(image)) / (np.max(image) - np.min(image) + 1e-8)
         
         # Convert to PyTorch tensor
-        image = torch.tensor(image, dtype=torch.float32)  # [H, W, D]
+        image = torch.tensor(image, dtype=torch.float32)  # Shape: [H, W, D]
         
         # Extract **middle slice** from depth axis
         middle_idx = image.shape[2] // 2
