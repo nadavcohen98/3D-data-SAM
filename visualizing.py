@@ -9,7 +9,7 @@ import matplotlib.pyplot as plt
 from torch.utils.data import Dataset, DataLoader
 
 # Define dataset directory
-DATASET_PATH = "/home/nadavnungi/3D-data-SAM/3D-data-SAM"
+DATASET_PATH = "/home/erezhuberman/data/Task01_BrainTumour/imagesTr"
 
 # Hyperparameters
 BATCH_SIZE = 4
