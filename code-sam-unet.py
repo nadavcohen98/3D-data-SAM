@@ -1516,7 +1516,7 @@ def validate(model, val_loader, criterion, device, epoch):
             
 
         # Calculate average metrics
-        avg_loss = total_loss / len(train_loader)
+        avg_loss = total_loss / len(val_loader)
         avg_metrics = {
             'mean_dice': np.mean([m['mean'] for m in all_metrics]) if all_metrics else 0.0,
             'mean_iou': np.mean([m['mean_iou'] for m in all_metrics]) if all_metrics else 0.0,
