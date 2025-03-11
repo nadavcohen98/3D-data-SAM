@@ -1790,10 +1790,22 @@ def train_model(data_path, batch_size=1, epochs=20, learning_rate=1e-3,
         history['train_dice'].append(train_metrics['mean'])
         
         # Validate
-        val_loss, val_metrics = validate(
-            model, val_loader, criterion, device, epoch
-        )
+        try:
+            val_loss, val_metrics = validate(model, val_loader, criterion, device, epoch)
+            print(f"Validation metrics: {val_metrics}")  # Debugging
+            history['val_loss'].append(val_loss)
         
+            if 'mean' in val_metrics:
+                history['val_dice'].append(val_metrics['mean'])
+            else:
+                print("Warning: 'mean' key missing in validation metrics!")
+                history['val_dice'].append(0.0)  # Assign default value
+        
+        except Exception as e:
+            print(f"Error during validation: {e}")
+            history['val_loss'].append(float('inf'))
+            history['val_dice'].append(0.0)
+                
         # Update history
         history['val_loss'].append(val_loss)
         history['val_dice'].append(val_metrics['mean'])
@@ -1825,7 +1837,6 @@ def train_model(data_path, batch_size=1, epochs=20, learning_rate=1e-3,
             }, model_path)
             print(f"Saved new best model with Dice score: {best_dice:.4f}")
             print(f"Model saved at: {os.path.abspath(model_path)}")  # PRINT THE SAVED MODEL PATH
-            counter = 0  # Reset early stopping counter
             counter = 0  # Reset early stopping counter
         else:
             counter += 1
