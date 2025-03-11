@@ -5,6 +5,7 @@ import random
 import matplotlib.pyplot as plt
 import nibabel as nib
 import torch.nn.functional as F
+from code_sam_unet import AutoSAM2  
 
 
 def load_nifti_image(filepath):
