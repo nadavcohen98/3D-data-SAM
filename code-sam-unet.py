@@ -1808,7 +1808,7 @@ def train_model(data_path, batch_size=1, epochs=20, learning_rate=1e-3,
                 
         # Update history
         history['val_loss'].append(val_loss)
-        history['val_dice'].append(val_metrics['mean'])
+        history['val_dice'].append(val_metrics.get('mean_dice', 0.0))  
         
         # Get current learning rate
         current_lr = optimizer.param_groups[0]['lr']
