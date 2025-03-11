@@ -1155,6 +1155,9 @@ from datetime import datetime, timedelta
 import random
 import torch.nn.functional as F
 
+# Import our modules
+from model import AutoSAM2
+from dataset import get_brats_dataloader
 
 def calculate_dice_score(y_pred, y_true):
     """
@@ -1867,7 +1870,7 @@ def train_model(data_path, batch_size=1, epochs=20, learning_rate=1e-3,
 
 def main():
     parser = argparse.ArgumentParser(description="Train AutoSAM2 for brain tumor segmentation")
-    parser.add_argument('--data_path', type=str, default="./data/Task01_BrainTumour",
+    parser.add_argument('--data_path', type=str, default="/home/erezhuberman/data/Task01_BrainTumour",
                     help='Path to the dataset directory')
     parser.add_argument('--epochs', type=int, default=30,
                     help='Number of epochs to train')
