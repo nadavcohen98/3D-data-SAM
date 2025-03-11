@@ -7,6 +7,8 @@ from torch.utils.data import Dataset, DataLoader
 import torch.nn.functional as F
 import random
 from tqdm import tqdm
+import argparse
+import torch
 
 def preprocess_brats_data(data, normalize=True, clip_percentile=True):
     """
@@ -1360,7 +1362,7 @@ def preprocess_batch(batch, device=None):
 
 def train_epoch(model, train_loader, optimizer, criterion, device, epoch, scheduler=None):
     """
-    Fixed train_epoch function to ensure Dice scores are properly updated
+    Training epoch function with proper logging of Dice Loss, Dice Score, IoU, and BCE Loss.
     """
     model.train()
     total_loss = 0
@@ -1385,30 +1387,44 @@ def train_epoch(model, train_loader, optimizer, criterion, device, epoch, schedu
             # Forward pass
             outputs = model(images)
             
-            # Calculate loss
-            loss = criterion(outputs, masks)
+            # Compute BCE Loss and Dice Loss
+            bce_loss = nn.BCEWithLogitsLoss()(outputs, masks)
+            dice_loss = DiceLoss()(outputs, masks)
+
+            # Compute combined loss
+            loss = 0.7 * dice_loss + 0.3 * bce_loss
             
-            # Calculate metrics for EVERY batch, not just the first one
-            with torch.no_grad():
-                metrics = calculate_dice_score(outputs.detach(), masks)
-                all_metrics.append(metrics)
+            # Compute IoU
+            iou_metrics = calculate_iou(outputs, masks)
+
+            # Compute Dice Score
+            dice_metrics = calculate_dice_score(outputs.detach(), masks)
             
+            # Store metrics
+            all_metrics.append({
+                'bce_loss': bce_loss.item(),
+                'dice_loss': dice_loss.item(),
+                'mean_dice': dice_metrics['mean'],
+                'mean_iou': iou_metrics['mean_iou']
+            })
+
             # Backward and optimize
             loss.backward()
             
-            # Gradient clipping to prevent exploding gradients
+            # Gradient clipping
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            
             optimizer.step()
 
-            # Update learning rate within epoch if using OneCycleLR
+            # Learning rate scheduling
             if scheduler is not None and isinstance(scheduler, torch.optim.lr_scheduler.OneCycleLR):
                 scheduler.step()
 
-            # Update progress bar with CURRENT batch metrics, not first batch metrics
+            # Update progress bar
             pbar.set_postfix({
                 'loss': f"{loss.item():.4f}",
-                'dice': f"{metrics['mean']:.4f}"  # Current batch metrics
+                'dice': f"{dice_metrics['mean']:.4f}",
+                'iou': f"{iou_metrics['mean_iou']:.4f}",
+                'bce': f"{bce_loss.item():.4f}"
             })
                 
             # Visualize first batch
@@ -1436,19 +1452,18 @@ def train_epoch(model, train_loader, optimizer, criterion, device, epoch, schedu
     
     # Calculate average metrics
     avg_loss = total_loss / len(train_loader)
-    avg_metrics = {'mean': np.mean([m['mean'] for m in all_metrics]) if all_metrics else 0.0}
-    
-    # Add per-class metrics if available
-    if all_metrics:
-        for key in all_metrics[0]:
-            if key != 'mean':
-                avg_metrics[key] = np.mean([m[key] for m in all_metrics])
-    
+    avg_metrics = {
+        'mean_dice': np.mean([m['mean_dice'] for m in all_metrics]) if all_metrics else 0.0,
+        'mean_iou': np.mean([m['mean_iou'] for m in all_metrics]) if all_metrics else 0.0,
+        'bce_loss': np.mean([m['bce_loss'] for m in all_metrics]) if all_metrics else 0.0,
+        'dice_loss': np.mean([m['dice_loss'] for m in all_metrics]) if all_metrics else 0.0
+    }
+
     return avg_loss, avg_metrics
 
 def validate(model, val_loader, criterion, device, epoch):
     """
-    Validate the model
+    Validate the model while logging Dice Loss, Dice Score, IoU, and BCE Loss.
     """
     model.eval()
     total_loss = 0
@@ -1456,7 +1471,6 @@ def validate(model, val_loader, criterion, device, epoch):
     
     # Progress bar
     pbar = tqdm(val_loader, desc=f"Epoch {epoch+1} Validation")
-    
     
     with torch.no_grad():
         for batch_idx, batch in enumerate(pbar):
@@ -1472,21 +1486,26 @@ def validate(model, val_loader, criterion, device, epoch):
                 # Forward pass
                 outputs = model(images)
                 
-                # Calculate BCE Loss
+                # Compute BCE Loss and Dice Loss
                 bce_loss = nn.BCEWithLogitsLoss()(outputs, masks)
-
-                # Calculate Dice Loss
                 dice_loss = DiceLoss()(outputs, masks)
 
-                # Combine Losses
+                # Compute combined loss
                 loss = 0.7 * dice_loss + 0.3 * bce_loss
                 
-                # Compute metrics (Dice and IoU)
-                dice_metrics = calculate_dice_score(outputs, masks)
+                # Compute IoU
                 iou_metrics = calculate_iou(outputs, masks)
+
+                # Compute Dice Score
+                dice_metrics = calculate_dice_score(outputs, masks)
                 
                 # Store metrics
-                all_metrics.append({**dice_metrics, **iou_metrics, 'bce_loss': bce_loss.item()})
+                all_metrics.append({
+                    'bce_loss': bce_loss.item(),
+                    'dice_loss': dice_loss.item(),
+                    'mean_dice': dice_metrics['mean'],
+                    'mean_iou': iou_metrics['mean_iou']
+                })
                                 
                 # Update progress bar
                 pbar.set_postfix({
@@ -1514,23 +1533,17 @@ def validate(model, val_loader, criterion, device, epoch):
                     print(f"\nError in validation batch {batch_idx}: {str(e)}")
                     raise e
             
-
         # Calculate average metrics
         avg_loss = total_loss / len(val_loader)
         avg_metrics = {
-            'mean_dice': np.mean([m['mean'] for m in all_metrics]) if all_metrics else 0.0,
+            'mean_dice': np.mean([m['mean_dice'] for m in all_metrics]) if all_metrics else 0.0,
             'mean_iou': np.mean([m['mean_iou'] for m in all_metrics]) if all_metrics else 0.0,
-            'bce_loss': np.mean([m['bce_loss'] for m in all_metrics]) if all_metrics else 0.0
+            'bce_loss': np.mean([m['bce_loss'] for m in all_metrics]) if all_metrics else 0.0,
+            'dice_loss': np.mean([m['dice_loss'] for m in all_metrics]) if all_metrics else 0.0
         }
 
-        # Add per-class metrics if available
-        if all_metrics:
-            for key in all_metrics[0]:
-                if key not in ['mean', 'mean_iou', 'bce_loss']:
-                    avg_metrics[key] = np.mean([m[key] for m in all_metrics])
-
         return avg_loss, avg_metrics
-
+        
 def visualize_batch(images, masks, outputs, epoch, prefix=""):
     """
     Visualize a batch of images, masks, and predictions
@@ -1652,6 +1665,7 @@ def train_model(data_path, batch_size=1, epochs=20, learning_rate=1e-3,
                target_shape=(64, 128, 128)):
     """
     Optimized train function with better learning rate schedule
+    Including IoU and BCE loss in history.
     """
     # Set device
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -1671,9 +1685,7 @@ def train_model(data_path, batch_size=1, epochs=20, learning_rate=1e-3,
     
     # Initialize AutoSAM2 model
     print("Initializing AutoSAM2 for multi-class segmentation")
-    model = AutoSAM2(
-        num_classes=4  # Background + 3 tumor classes
-    ).to(device)
+    model = AutoSAM2(num_classes=4).to(device)
     
     # Check if model file exists to resume training
     model_path = "checkpoints/best_autosam2_model.pth"
@@ -1693,19 +1705,16 @@ def train_model(data_path, batch_size=1, epochs=20, learning_rate=1e-3,
             start_epoch = 0
             best_dice = 0.0
     else:
-        if reset and os.path.exists(model_path):
-            print(f"Reset flag is set. Ignoring existing checkpoint and starting from epoch 0.")
-        else:
-            print("No existing checkpoint found. Starting from epoch 0.")
+        print("No existing checkpoint found. Starting from epoch 0.")
     
-    # Define criterion - combined loss for better convergence
+    # Define loss criterion
     criterion = CombinedLoss(dice_weight=0.7, bce_weight=0.3)
     
-    # Define optimizer with higher learning rate
+    # Define optimizer
     optimizer = optim.AdamW(
         model.encoder.parameters(),
         lr=learning_rate,
-        weight_decay=1e-4  # Increased weight decay for better regularization
+        weight_decay=1e-4
     )
     
     # Load optimizer state if resuming
@@ -1720,52 +1729,37 @@ def train_model(data_path, batch_size=1, epochs=20, learning_rate=1e-3,
     max_samples = 64 if test_run else None
     
     train_loader = get_brats_dataloader(
-        data_path, 
-        batch_size=batch_size, 
-        train=True,
-        normalize=True, 
-        max_samples=max_samples,  
-        num_workers=4,
-        filter_empty=False,
-        use_augmentation=True,  # Enable augmentation
-        target_shape=target_shape,
-        cache_data=False,
-        verbose=True
+        data_path, batch_size=batch_size, train=True,
+        normalize=True, max_samples=max_samples, num_workers=4,
+        filter_empty=False, use_augmentation=True,
+        target_shape=target_shape, cache_data=False, verbose=True
     )
 
     val_loader = get_brats_dataloader(
-        data_path, 
-        batch_size=batch_size, 
-        train=False,
-        normalize=True, 
-        max_samples=max_samples,  
-        num_workers=4,
-        filter_empty=False,
-        use_augmentation=False,
-        target_shape=target_shape,
-        cache_data=False,
-        verbose=True
+        data_path, batch_size=batch_size, train=False,
+        normalize=True, max_samples=max_samples, num_workers=4,
+        filter_empty=False, use_augmentation=False,
+        target_shape=target_shape, cache_data=False, verbose=True
     )
     
-    # Set up OneCycle learning rate scheduler 
-    # This is one of the recommended changes - provides better convergence
+    # Set up OneCycle learning rate scheduler
     steps_per_epoch = len(train_loader)
     scheduler = torch.optim.lr_scheduler.OneCycleLR(
         optimizer,
         max_lr=learning_rate,
         steps_per_epoch=steps_per_epoch,
         epochs=epochs,
-        pct_start=0.3,  # Warm up for 30% of training
-        div_factor=25,  # Initial LR is max_lr/25
-        final_div_factor=1000  # Final LR is max_lr/1000
+        pct_start=0.3,
+        div_factor=25,
+        final_div_factor=1000
     )
     
-    # Initialize history
+    # Initialize history with Dice, IoU, and BCE loss
     history = {
-        'train_loss': [],
-        'val_loss': [],
-        'train_dice': [],
-        'val_dice': [],
+        'train_loss': [], 'val_loss': [],
+        'train_dice': [], 'val_dice': [],
+        'train_iou': [], 'val_iou': [],
+        'train_bce': [], 'val_bce': [],
         'lr': []
     }
     
@@ -1781,35 +1775,31 @@ def train_model(data_path, batch_size=1, epochs=20, learning_rate=1e-3,
         print(f"Epoch {epoch+1}/{epochs}")
         
         # Train
-        train_loss, train_metrics = train_epoch(
-            model, train_loader, optimizer, criterion, device, epoch, scheduler
-        )
+        train_loss, train_metrics = train_epoch(model, train_loader, optimizer, criterion, device, epoch, scheduler)
         
         # Update history
         history['train_loss'].append(train_loss)
-        history['train_dice'].append(train_metrics['mean'])
+        history['train_dice'].append(train_metrics.get('mean_dice', 0.0))
+        history['train_iou'].append(train_metrics.get('mean_iou', 0.0))
+        history['train_bce'].append(train_metrics.get('bce_loss', 0.0))
         
         # Validate
         try:
             val_loss, val_metrics = validate(model, val_loader, criterion, device, epoch)
             print(f"Validation metrics: {val_metrics}")  # Debugging
+
             history['val_loss'].append(val_loss)
-        
-            if 'mean' in val_metrics:
-                history['val_dice'].append(val_metrics['mean'])
-            else:
-                print("Warning: 'mean' key missing in validation metrics!")
-                history['val_dice'].append(0.0)  # Assign default value
-        
+            history['val_dice'].append(val_metrics.get('mean_dice', 0.0))
+            history['val_iou'].append(val_metrics.get('mean_iou', 0.0))
+            history['val_bce'].append(val_metrics.get('bce_loss', 0.0))
+
         except Exception as e:
             print(f"Error during validation: {e}")
             history['val_loss'].append(float('inf'))
             history['val_dice'].append(0.0)
+            history['val_iou'].append(0.0)
+            history['val_bce'].append(0.0)
                 
-        # Update history
-        history['val_loss'].append(val_loss)
-        history['val_dice'].append(val_metrics.get('mean_dice', 0.0))  
-        
         # Get current learning rate
         current_lr = optimizer.param_groups[0]['lr']
         history['lr'].append(current_lr)
@@ -1821,13 +1811,13 @@ def train_model(data_path, batch_size=1, epochs=20, learning_rate=1e-3,
         remaining_time = max(0, estimated_total_time - elapsed_time)
         
         # Print metrics
-        print(f"Epoch {epoch+1}: Train Loss = {train_loss:.4f}, Train Dice = {train_metrics['mean']:.4f}")
-        print(f"Epoch {epoch+1}: Val Loss = {val_loss:.4f}, Val Dice = {val_metrics['mean']:.4f}")
+        print(f"Epoch {epoch+1}: Train Dice = {train_metrics.get('mean_dice', 0.0):.4f}, IoU = {train_metrics.get('mean_iou', 0.0):.4f}, BCE = {train_metrics.get('bce_loss', 0.0):.4f}")
+        print(f"Epoch {epoch+1}: Val Dice = {val_metrics.get('mean_dice', 0.0):.4f}, IoU = {val_metrics.get('mean_iou', 0.0):.4f}, BCE = {val_metrics.get('bce_loss', 0.0):.4f}")
         print(f"Epoch Time: {timedelta(seconds=int(epoch_time))}, Remaining: {timedelta(seconds=int(remaining_time))}")
         
         # Save best model based on mean Dice score
-        if val_metrics['mean'] > best_dice:
-            best_dice = val_metrics['mean']
+        if val_metrics.get('mean_dice', 0.0) > best_dice:
+            best_dice = val_metrics.get('mean_dice', 0.0)
             torch.save({
                 'epoch': epoch,
                 'model_state_dict': model.state_dict(),
@@ -1836,11 +1826,6 @@ def train_model(data_path, batch_size=1, epochs=20, learning_rate=1e-3,
                 'best_dice': best_dice,
             }, model_path)
             print(f"Saved new best model with Dice score: {best_dice:.4f}")
-            print(f"Model saved at: {os.path.abspath(model_path)}")  # PRINT THE SAVED MODEL PATH
-            counter = 0  # Reset early stopping counter
-        else:
-            counter += 1
-            print(f"No improvement in Dice score for {counter} epochs")
         
         # Save checkpoint every 5 epochs
         if epoch % 5 == 0 or epoch == epochs - 1:
@@ -1854,7 +1839,7 @@ def train_model(data_path, batch_size=1, epochs=20, learning_rate=1e-3,
             # Save training history
             save_training_history(history, f"training_history_epoch_{epoch}.png")
         
-        # Check for early stopping
+        # Early stopping
         if counter >= patience:
             print(f"Early stopping triggered after {epoch+1} epochs")
             break
@@ -1867,62 +1852,74 @@ def train_model(data_path, batch_size=1, epochs=20, learning_rate=1e-3,
     # Save final training history
     save_training_history(history, "final_training_history.png")
     print(f"Training complete! Best Dice score: {best_dice:.4f}")
-    print(f"Best trained model saved at: {os.path.abspath(model_path)}")
-    
-    # Load best model for further use
-    best_checkpoint = torch.load(model_path, map_location=device)
-    model.load_state_dict(best_checkpoint['model_state_dict'])
-    best_metrics = best_checkpoint.get('val_metrics', None)
-    
-    return model, history, best_metrics
+
+    return model, history, val_metrics
 
 def main():
     parser = argparse.ArgumentParser(description="Train AutoSAM2 for brain tumor segmentation")
     parser.add_argument('--data_path', type=str, default="/home/erezhuberman/data/Task01_BrainTumour",
-                    help='Path to the dataset directory')
+                        help='Path to the dataset directory')
     parser.add_argument('--epochs', type=int, default=15,
-                    help='Number of epochs to train')
+                        help='Number of epochs to train')
     parser.add_argument('--batch_size', type=int, default=1,
-                    help='Batch size for training')
-    parser.add_argument('--lr', type=float, default=1e-3,  # Increased learning rate
-                    help='Learning rate')
+                        help='Batch size for training')
+    parser.add_argument('--lr', type=float, default=1e-3,  
+                        help='Learning rate')
     parser.add_argument('--test_run', action='store_true',
-                    help='Run with limited samples for testing')
-    parser.add_argument('--reset', action='store_true', default=True,
-                    help='Reset training from scratch, ignoring checkpoints')
+                        help='Run with limited samples for testing')
+    parser.add_argument('--reset', action='store_true', default=False,
+                        help='Reset training from scratch, ignoring checkpoints')
     parser.add_argument('--no_mixed_precision', action='store_true',
-                    help='Disable mixed precision training')
+                        help='Disable mixed precision training')
     parser.add_argument('--memory_limit', type=float, default=0.9,
-                    help='Memory limit for GPU (0.0-1.0)')
+                        help='Memory limit for GPU (0.0-1.0)')
     parser.add_argument('--target_shape', type=str, default="64,128,128",
-                    help='Target shape for resizing (depth,height,width)')
+                        help='Target shape for resizing (depth,height,width)')
     
     args = parser.parse_args()
     
-    # Set memory limit for GPU
-    if torch.cuda.is_available():
-        torch.cuda.set_per_process_memory_fraction(args.memory_limit)
+    # Set memory limit for GPU if available
+    if torch.cuda.is_available() and torch.cuda.device_count() > 0:
+        try:
+            torch.cuda.set_per_process_memory_fraction(args.memory_limit)
+            print(f"Set GPU memory fraction to {args.memory_limit * 100:.1f}%")
+        except Exception as e:
+            print(f"Warning: Could not set GPU memory fraction: {e}")
+
+    # Parse target shape argument
+    try:
+        target_shape = tuple(map(int, args.target_shape.split(',')))
+        if len(target_shape) != 3:
+            raise ValueError("Target shape must have exactly 3 dimensions (depth, height, width).")
+    except ValueError as e:
+        print(f"Error parsing target shape: {e}")
+        return  # Exit early if parsing fails
     
-    # Parse target shape if provided
-    target_shape = tuple(map(int, args.target_shape.split(',')))
     print(f"Using target shape: {target_shape}")
-    
+
     # Train the model
-    model, history, best_metrics = train_model(
-        data_path=args.data_path,
-        batch_size=args.batch_size,
-        epochs=args.epochs,
-        learning_rate=args.lr,
-        use_mixed_precision=not args.no_mixed_precision,
-        test_run=args.test_run,
-        reset=args.reset,
-        target_shape=target_shape
-    )
-    
-    # Print final metrics
-    print("Final best metrics:")
-    for key, value in best_metrics.items():
-        print(f"{key}: {value:.4f}")
+    try:
+        model, history, best_metrics = train_model(
+            data_path=args.data_path,
+            batch_size=args.batch_size,
+            epochs=args.epochs,
+            learning_rate=args.lr,
+            use_mixed_precision=not args.no_mixed_precision,
+            test_run=args.test_run,
+            reset=args.reset,
+            target_shape=target_shape
+        )
+    except Exception as e:
+        print(f"Error during training: {e}")
+        return  # Exit if training fails
+
+    # Print final metrics safely
+    if best_metrics:
+        print("\nFinal best metrics:")
+        for key, value in best_metrics.items():
+            print(f"{key}: {value:.4f}")
+    else:
+        print("\nNo final metrics were returned. Training may have failed.")
 
 if __name__ == "__main__":
     main()
