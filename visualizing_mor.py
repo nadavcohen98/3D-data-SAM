@@ -61,7 +61,7 @@ def infer_and_visualize(model_path, data_path, num_samples=10):
     print(f"Loading model from {model_path}")
     model = AutoSAM2(num_classes=4).to(device)
     checkpoint = torch.load(model_path, map_location=device, weights_only=False)
-    model.load_state_dict(checkpoint['model_state_dict'])
+    model.load_state_dict(checkpoint['model_state_dict'], strict=False)
     model.eval()
     
     # Get all test images
