@@ -5,7 +5,7 @@ import random
 import matplotlib.pyplot as plt
 import nibabel as nib
 import torch.nn.functional as F
-from model import AutoSAM2  # Import trained model
+
 
 def load_nifti_image(filepath):
     """Load a NIfTI image and return as a NumPy array."""
