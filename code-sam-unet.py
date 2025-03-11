@@ -373,8 +373,9 @@ class MultiscaleEncoder(nn.Module):
             nn.InstanceNorm3d(base_channels),
             nn.LeakyReLU(inplace=True),
             nn.Conv3d(base_channels, base_channels, kernel_size=3, padding=1),
-            nn.InstanceNorm3d(base_channels),
-            nn.LeakyReLU(inplace=True)
+            nn.BatchNorm3d(base_channels),
+            nn.LeakyReLU(inplace=True),
+            nn.Dropout3d(0.4)
         )
         # First pooling - reduce dimensions by factor of 2
         self.pool1 = nn.MaxPool3d(kernel_size=2, stride=2)
@@ -1306,22 +1307,21 @@ def calculate_iou(y_pred, y_true, threshold=0.5, eps=1e-6):
 
 # Combined loss for better convergence
 class CombinedLoss(nn.Module):
-    def __init__(self, dice_weight=0.7, bce_weight=0.3):
+    def __init__(self, dice_weight=0.6, bce_weight=0.2, focal_weight=0.2):
         super().__init__()
         self.dice_weight = dice_weight
         self.bce_weight = bce_weight
+        self.focal_weight = focal_weight
         self.dice_loss = DiceLoss()
-        self.bce_loss = nn.BCEWithLogitsLoss()
-        
+        self.bce_loss = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([5.0]).cuda())  # Higher weight for tumors
+        self.focal_loss = nn.CrossEntropyLoss()
+
     def forward(self, y_pred, y_true):
-        # Apply sigmoid to logits for BCE loss
         bce = self.bce_loss(y_pred, y_true)
-        
-        # Dice loss expects raw logits
         dice = self.dice_loss(y_pred, y_true)
-        
-        # Weighted sum
-        return self.dice_weight * dice + self.bce_weight * bce
+        focal = self.focal_loss(y_pred, y_true.argmax(dim=1))
+
+        return self.dice_weight * dice + self.bce_weight * bce + self.focal_weight * focal
 
 def preprocess_batch(batch, device=None):
     """
@@ -1714,7 +1714,7 @@ def train_model(data_path, batch_size=1, epochs=20, learning_rate=1e-3,
     optimizer = optim.AdamW(
         model.encoder.parameters(),
         lr=learning_rate,
-        weight_decay=1e-4
+        weight_decay=5e-4
     )
     
     # Load optimizer state if resuming
