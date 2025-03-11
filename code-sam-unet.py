@@ -1869,7 +1869,7 @@ def main():
     parser = argparse.ArgumentParser(description="Train AutoSAM2 for brain tumor segmentation")
     parser.add_argument('--data_path', type=str, default="/home/erezhuberman/data/Task01_BrainTumour",
                     help='Path to the dataset directory')
-    parser.add_argument('--epochs', type=int, default=30,
+    parser.add_argument('--epochs', type=int, default=15,
                     help='Number of epochs to train')
     parser.add_argument('--batch_size', type=int, default=1,
                     help='Batch size for training')
