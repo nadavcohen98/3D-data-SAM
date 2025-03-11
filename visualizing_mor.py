@@ -3,14 +3,30 @@ import torch
 import numpy as np
 import random
 import matplotlib.pyplot as plt
-from dataset import get_brats_dataloader  # Importing dataloader from dataset.py
-from model import AutoSAM2  # Importing model from model.py
+import nibabel as nib
 import torch.nn.functional as F
+from model import AutoSAM2  # Import trained model
+
+def load_nifti_image(filepath):
+    """Load a NIfTI image and return as a NumPy array."""
+    image = nib.load(filepath).get_fdata()
+    return image
+
+def preprocess_image(image):
+    """Preprocess the MRI image (normalize FLAIR modality)."""
+    flair = image[..., 0]  # Extract FLAIR (assuming it's the first channel)
+    mean, std = np.mean(flair[flair > 0]), np.std(flair[flair > 0])
+    flair_norm = (flair - mean) / (std + 1e-8)
+    flair_norm[flair == 0] = 0  # Preserve background
+    return torch.tensor(flair_norm, dtype=torch.float32).unsqueeze(0).unsqueeze(0)  # [B, C, D, H, W]
+
+def preprocess_mask(mask):
+    """Preprocess the mask (convert multi-class to binary)."""
+    mask_bin = (mask > 0).astype(np.float32)
+    return torch.tensor(mask_bin, dtype=torch.float32).unsqueeze(0).unsqueeze(0)  # [B, C, D, H, W]
 
 def visualize_results(flair, ground_truth, prediction, save_path=None):
-    """
-    Visualize the FLAIR MRI, ground truth segmentation, and model prediction.
-    """
+    """Visualize the FLAIR MRI, ground truth segmentation, and model prediction."""
     fig, axes = plt.subplots(1, 3, figsize=(12, 4))
     
     # FLAIR Image
@@ -36,10 +52,8 @@ def visualize_results(flair, ground_truth, prediction, save_path=None):
         plt.show()
     plt.close()
 
-def infer_and_visualize(model_path, data_path, num_samples=10, batch_size=1, target_shape=(64, 128, 128)):
-    """
-    Loads the trained model, selects random test samples, and visualizes results.
-    """
+def infer_and_visualize(model_path, data_path, num_samples=10):
+    """Loads the trained model, selects random test samples, and visualizes results."""
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
     # Load model
@@ -49,35 +63,44 @@ def infer_and_visualize(model_path, data_path, num_samples=10, batch_size=1, tar
     model.load_state_dict(checkpoint['model_state_dict'])
     model.eval()
     
-    # Get test data loader
-    test_loader = get_brats_dataloader(
-        data_path, batch_size=batch_size, train=False, target_shape=target_shape
-    )
+    # Get all test images
+    images_dir = os.path.join(data_path, "imagesTs")
+    labels_dir = os.path.join(data_path, "labelsTs")
     
-    # Randomly select 10 samples
-    selected_indices = random.sample(range(len(test_loader.dataset)), num_samples)
+    image_files = sorted([f for f in os.listdir(images_dir) if f.endswith('.nii.gz')])
+    mask_files = sorted([f for f in os.listdir(labels_dir) if f.endswith('.nii.gz')])
     
-    for idx in selected_indices:
-        image, mask = test_loader.dataset[idx]
-        image, mask = image.unsqueeze(0).to(device), mask.unsqueeze(0).to(device)
+    # Select 10 random samples
+    selected_files = random.sample(list(zip(image_files, mask_files)), num_samples)
+    
+    for img_file, mask_file in selected_files:
+        img_path = os.path.join(images_dir, img_file)
+        mask_path = os.path.join(labels_dir, mask_file)
+        
+        # Load and preprocess
+        image = load_nifti_image(img_path)
+        mask = load_nifti_image(mask_path)
+        
+        flair = preprocess_image(image).to(device)  # Preprocess FLAIR
+        mask_tensor = preprocess_mask(mask).to(device)  # Preprocess ground truth mask
         
         with torch.no_grad():
-            prediction = model(image)
+            prediction = model(flair)
             prediction = F.softmax(prediction, dim=1)  # Convert logits to probabilities
             predicted_mask = (prediction > 0.5).float()
         
-        # Convert tensors to numpy arrays
-        flair = image[0, 0].cpu().numpy()  # Extract FLAIR modality
-        ground_truth = mask[0, 1:].cpu().numpy().sum(axis=0)  # Sum all tumor classes
-        predicted_seg = predicted_mask[0, 1:].cpu().numpy().sum(axis=0)  # Sum all classes
+        # Convert tensors to numpy arrays for visualization
+        flair_np = flair[0, 0, flair.shape[2] // 2].cpu().numpy()  # Middle slice
+        ground_truth_np = mask_tensor[0, 0, mask_tensor.shape[2] // 2].cpu().numpy()
+        predicted_seg_np = predicted_mask[0, 1, predicted_mask.shape[2] // 2].cpu().numpy()  # Tumor class
         
-        # Visualize
-        save_path = f"results/test_sample_{idx}.png"
-        visualize_results(flair, ground_truth, predicted_seg, save_path)
+        # Save visualization
+        save_path = f"results/{img_file.replace('.nii.gz', '.png')}"
+        visualize_results(flair_np, ground_truth_np, predicted_seg_np, save_path)
     
     print("Inference and visualization complete!")
 
 if __name__ == "__main__":
     MODEL_PATH = "checkpoints/best_autosam2_model.pth"
-    DATA_PATH = "/home/erezhuberman/data/Task01_BrainTumour"  # Change to your dataset path
+    DATA_PATH = "/home/erezhuberman/data/Task01_BrainTumour"  # Change this to your dataset path
     infer_and_visualize(MODEL_PATH, DATA_PATH)
