@@ -65,8 +65,8 @@ def infer_and_visualize(model_path, data_path, num_samples=10):
     model.eval()
     
     # Get all test images
-    images_dir = os.path.join(data_path, "imagesTs")
-    labels_dir = os.path.join(data_path, "labelsTs")
+    images_dir = os.path.join(data_path, "imagesTr")
+    labels_dir = os.path.join(data_path, "labelsTr")
     
     image_files = sorted([f for f in os.listdir(images_dir) if f.endswith('.nii.gz')])
     mask_files = sorted([f for f in os.listdir(labels_dir) if f.endswith('.nii.gz')])
