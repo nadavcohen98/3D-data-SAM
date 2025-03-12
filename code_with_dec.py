@@ -571,73 +571,73 @@ class AutoSAM2(nn.Module):
             self.sam2 = None
     
     def forward(self, x, visualize=False):
-    """
-    Forward pass through AutoSAM2 with proper SAM2 integration
-    """
-    batch_size, channels, depth, height, width = x.shape
-    
-    # Get features from 3D UNet encoder
-    encoder_features = self.encoder(x)
-    
-    # Generate rich features with mini-decoder
-    rich_features = self.mini_decoder(encoder_features)
-    
-    # Initialize output volume
-    output_masks = torch.zeros((batch_size, self.num_classes, depth, height, width), device=x.device)
-    
-    # Process each slice with SAM2
-    if self.has_sam2 and self.sam2 is not None:
-        for d in range(depth):
-            # Get features for this slice
-            slice_features = rich_features[0, :, d]  # [3, H, W]
-            
-            # Convert to RGB image for SAM2
-            rgb_image = self.slice_generator.generate_rgb_slice(slice_features)
-            
-            try:
-                # Set image in SAM2
-                self.sam2.set_image(rgb_image)
-                
-                # Generate masks - use center point as prompt
-                center_point = np.array([[width // 2, height // 2]])
-                masks, scores, _ = self.sam2.predict(
-                    point_coords=center_point,
-                    point_labels=np.array([1]),  # Foreground
-                    multimask_output=True
-                )
-                
-                # Use mask with highest score
-                if len(scores) > 0:
-                    best_idx = np.argmax(scores)
-                    mask = masks[best_idx].astype(np.float32)
-                    
-                    # Add to output volume - assign to first class
-                    output_masks[0, 1, d] = torch.tensor(mask, device=x.device)
-            except Exception as e:
-                print(f"Error processing slice {d} with SAM2: {e}")
-                # Continue with next slice
-    
-    # If SAM2 failed or is not available, use backup approach
-    if torch.sum(output_masks) == 0:
-        print("SAM2 processing failed, using backup approach")
-        # Ensure rich_features are upsampled to match input dimensions
-        rich_features_up = F.interpolate(
-            rich_features,
-            size=(depth, height, width),
-            mode='trilinear',
-            align_corners=False
-        )
+        """
+        Forward pass through AutoSAM2 with proper SAM2 integration
+        """
+        batch_size, channels, depth, height, width = x.shape
         
-        # Project to output classes
-        output_masks = self.output_conv(rich_features_up[:, :1])
-        output_masks = torch.sigmoid(output_masks)
-    
-    # Visualize if requested
-    if visualize and depth > 0:
-        mid_slice = min(depth // 2, depth - 1)
-        self._visualize_slice(x, output_masks, mid_slice)
-    
-    return output_masks
+        # Get features from 3D UNet encoder
+        encoder_features = self.encoder(x)
+        
+        # Generate rich features with mini-decoder
+        rich_features = self.mini_decoder(encoder_features)
+        
+        # Initialize output volume
+        output_masks = torch.zeros((batch_size, self.num_classes, depth, height, width), device=x.device)
+        
+        # Process each slice with SAM2
+        if self.has_sam2 and self.sam2 is not None:
+            for d in range(depth):
+                # Get features for this slice
+                slice_features = rich_features[0, :, d]  # [3, H, W]
+                
+                # Convert to RGB image for SAM2
+                rgb_image = self.slice_generator.generate_rgb_slice(slice_features)
+                
+                try:
+                    # Set image in SAM2
+                    self.sam2.set_image(rgb_image)
+                    
+                    # Generate masks - use center point as prompt
+                    center_point = np.array([[width // 2, height // 2]])
+                    masks, scores, _ = self.sam2.predict(
+                        point_coords=center_point,
+                        point_labels=np.array([1]),  # Foreground
+                        multimask_output=True
+                    )
+                    
+                    # Use mask with highest score
+                    if len(scores) > 0:
+                        best_idx = np.argmax(scores)
+                        mask = masks[best_idx].astype(np.float32)
+                        
+                        # Add to output volume - assign to first class
+                        output_masks[0, 1, d] = torch.tensor(mask, device=x.device)
+                except Exception as e:
+                    print(f"Error processing slice {d} with SAM2: {e}")
+                    # Continue with next slice
+        
+        # If SAM2 failed or is not available, use backup approach
+        if torch.sum(output_masks) == 0:
+            print("SAM2 processing failed, using backup approach")
+            # Ensure rich_features are upsampled to match input dimensions
+            rich_features_up = F.interpolate(
+                rich_features,
+                size=(depth, height, width),
+                mode='trilinear',
+                align_corners=False
+            )
+            
+            # Project to output classes
+            output_masks = self.output_conv(rich_features_up[:, :1])
+            output_masks = torch.sigmoid(output_masks)
+        
+        # Visualize if requested
+        if visualize and depth > 0:
+            mid_slice = min(depth // 2, depth - 1)
+            self._visualize_slice(x, output_masks, mid_slice)
+        
+        return output_masks
     
     def _visualize_slice(self, volume, masks, slice_idx):
         """
@@ -708,7 +708,6 @@ class AutoSAM2(nn.Module):
         plt.tight_layout()
         plt.savefig(f"results/slice_{slice_idx}_viz.png")
         plt.close()
-
 
 #train.py - Enhanced version with optimizations
 import os
