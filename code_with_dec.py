@@ -339,7 +339,8 @@ def get_brats_dataloader(root_dir, batch_size=1, train=True, normalize=True, max
         print(f"Created {'training' if train else 'validation'} dataloader with {len(loader)} batches")
     
     return loader   
-#model.py
+
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -429,105 +430,56 @@ class MultiscaleEncoder(nn.Module):
         
         return [x1, x2, x3, x4]
 
-class InterSliceAttention(nn.Module):
+class UpBlockSkip(nn.Module):
     """
-    Attention module that enhances connections between neighboring slices
+    Upsampling block with skip connection, similar to AutoSAM's implementation
+    but adapted for 3D medical data
     """
-    def __init__(self, channels, num_heads=4):
+    def __init__(self, in_channels, out_channels, func='relu', drop=0):
         super().__init__()
-        self.channels = channels
-        self.num_heads = num_heads
-        
-        # Use 1D convolution along depth dimension for efficiency
-        self.depth_conv = nn.Conv3d(
-            channels, channels, 
-            kernel_size=(3, 1, 1), 
-            padding=(1, 0, 0),
-            groups=channels//4  # Group conv for efficiency
+        self.up = nn.ConvTranspose3d(in_channels, out_channels, kernel_size=2, stride=2)
+        self.conv = nn.Sequential(
+            nn.Conv3d(out_channels*2, out_channels, kernel_size=3, padding=1),
+            nn.InstanceNorm3d(out_channels),
+            nn.ReLU(inplace=True) if func == 'relu' else nn.LeakyReLU(0.2, inplace=True),
+            nn.Dropout3d(p=drop) if drop > 0 else nn.Identity(),
+            nn.Conv3d(out_channels, out_channels, kernel_size=3, padding=1),
+            nn.InstanceNorm3d(out_channels),
+            nn.ReLU(inplace=True) if func == 'relu' else nn.LeakyReLU(0.2, inplace=True),
+            nn.Dropout3d(p=drop) if drop > 0 else nn.Identity()
         )
-        
-        self.norm = nn.InstanceNorm3d(channels)
-        self.activation = nn.LeakyReLU(inplace=True)
     
-    def forward(self, x):
-        # Apply depth-wise convolution to capture inter-slice relationships
-        residual = x
-        x = self.depth_conv(x)
-        x = self.norm(x)
-        x = self.activation(x)
-        
-        # Skip connection
-        x = x + residual
-        
-        return x
+    def forward(self, x, skip):
+        x = self.up(x)
+        x = torch.cat([x, skip], dim=1)
+        return self.conv(x)
 
 class MiniDecoder(nn.Module):
     """
-    Lightweight decoder that processes 3D features and produces segmentation masks
+    Mini-decoder following AutoSAM's SmallDecoder architecture
+    but adapted for 3D medical data
     """
-    def __init__(self, full_features, out_channels=4):
+    def __init__(self, full_features, out_channels=256):
         super().__init__()
-        
-        # Feature dimensions from encoder
-        self.full_features = full_features  # [base_ch, base_ch*2, base_ch*4, base_ch*8]
-        
-        # First upsampling block
-        self.up1 = nn.Sequential(
-            nn.Conv3d(full_features[3], full_features[2], kernel_size=3, padding=1),
-            nn.InstanceNorm3d(full_features[2]),
-            nn.LeakyReLU(inplace=True)
-        )
-        
-        # Inter-slice attention after first upsampling
-        self.attn1 = InterSliceAttention(full_features[2])
-        
-        # Second upsampling block
-        self.up2 = nn.Sequential(
-            nn.Conv3d(full_features[2], full_features[1], kernel_size=3, padding=1),
-            nn.InstanceNorm3d(full_features[1]),
-            nn.LeakyReLU(inplace=True)
-        )
-        
-        # Inter-slice attention after second upsampling
-        self.attn2 = InterSliceAttention(full_features[1])
-        
-        # Third upsampling to get back to original resolution
-        self.up3 = nn.Sequential(
-            nn.Conv3d(full_features[1], full_features[0], kernel_size=3, padding=1),
-            nn.InstanceNorm3d(full_features[0]),
-            nn.LeakyReLU(inplace=True)
-        )
-        
-        # Final projection to get segmentation masks
-        self.final = nn.Conv3d(full_features[0], out_channels, kernel_size=1)
+        # Follow AutoSAM's small decoder design
+        self.up1 = UpBlockSkip(full_features[3], full_features[2],
+                               func='relu', drop=0)
+        self.up2 = UpBlockSkip(full_features[2], full_features[1],
+                               func='relu', drop=0)
+        self.final = nn.Conv3d(full_features[1], out_channels, kernel_size=3, padding=1)
     
     def forward(self, features):
-        # Get bottleneck features from encoder
-        x = features[3]
-        
-        # First upsampling with interpolation for better quality
-        x = F.interpolate(x, scale_factor=2, mode='trilinear', align_corners=False)
-        x = self.up1(x)
-        x = self.attn1(x)
-        
-        # Second upsampling with interpolation
-        x = F.interpolate(x, scale_factor=2, mode='trilinear', align_corners=False)
-        x = self.up2(x)
-        x = self.attn2(x)
-        
-        # Third upsampling to get back to input resolution
-        x = F.interpolate(x, scale_factor=2, mode='trilinear', align_corners=False)
-        x = self.up3(x)
-        
-        # Final projection layer to get segmentation logits
-        x = self.final(x)
-        
+        # Connection pattern similar to AutoSAM
+        x = self.up1(features[3], features[2])
+        x = self.up2(x, features[1])
+        x = torch.tanh(self.final(x))  # Apply tanh as in AutoSAM
         return x
 
 class AutoSAM2(nn.Module):
     """
     Adaptation of AutoSAM for 3D medical imaging using SAM2
-    This implementation directly uses the mini-decoder outputs as embeddings
+    This implementation follows the AutoSAM approach by using a custom encoder
+    and feeding its outputs to SAM2's mask decoder
     """
     def __init__(self, num_classes=4):
         super().__init__()
@@ -540,17 +492,118 @@ class AutoSAM2(nn.Module):
         # Create 3D UNet encoder
         self.encoder = MultiscaleEncoder(in_channels=4, base_channels=base_channels)
         
-        # Create mini-decoder for generating embeddings
-        self.mini_decoder = MiniDecoder(full_features, out_channels=num_classes)
+        # Create mini-decoder similar to AutoSAM's design
+        self.mini_decoder = MiniDecoder(full_features, out_channels=256)
         
-        # Try to initialize SAM2 only for visualization purposes
+        # Initialize SAM2
         try:
-            self.sam2_predictor = SAM2ImagePredictor.from_pretrained("facebook/sam2-hiera-large")
+            self.sam2 = SAM2ImagePredictor.from_pretrained("facebook/sam2-hiera-large")
+            
+            # Print model structure for debugging
+            print("\nSAM2 Model Structure:")
+            for name, module in self.sam2.model.named_children():
+                print(f"- {name}: {type(module)}")
+            
+            # Get methods
+            methods = [method for method in dir(self.sam2.model) 
+                      if callable(getattr(self.sam2.model, method)) and not method.startswith('_')]
+            print(f"Available methods: {methods}")
+            
+            # Freeze SAM2 weights
+            for param in self.sam2.model.parameters():
+                param.requires_grad = False
+                
             self.has_sam2 = True
-            print("Initialized SAM2 model successfully")
+            print("SAM2 initialized successfully")
+            
         except Exception as e:
             print(f"Warning: Could not initialize SAM2: {e}")
             self.has_sam2 = False
+            self.sam2 = None
+        
+        # Projection to output classes if SAM2 not available
+        self.backup_conv = nn.Conv3d(256, num_classes, kernel_size=1)
+    
+    def process_slice_with_sam2(self, embedding_slice, batch_idx=0, slice_idx=0):
+        """
+        Process a single slice embedding with SAM2's mask decoder
+        Following the pattern from sam_call example
+        
+        Args:
+            embedding_slice: Embedding for a single slice [C, H, W]
+            batch_idx: Batch index
+            slice_idx: Slice index
+            
+        Returns:
+            Mask prediction for the slice
+        """
+        if not self.has_sam2 or self.sam2 is None:
+            # Return empty prediction if SAM2 not available
+            return None
+        
+        try:
+            # Follow the pattern from sam_call
+            with torch.no_grad():
+                # Get SAM2 model
+                sam2_model = self.sam2.model
+                
+                # Add batch dimension to embeddings
+                image_embeddings = embedding_slice.unsqueeze(0)  # [1, C, H, W]
+                
+                # Create dummy point prompts (not used, but might be needed by SAM2)
+                point_coords = torch.zeros((1, 1, 2), device=embedding_slice.device)
+                point_labels = torch.ones((1, 1), device=embedding_slice.device)
+                
+                # Set up prompts
+                sparse_embeddings = None
+                dense_embeddings = None
+                
+                # Try to get position encoding if available
+                image_pe = None
+                try:
+                    if hasattr(sam2_model, 'prompt_encoder') and hasattr(sam2_model.prompt_encoder, 'get_dense_pe'):
+                        image_pe = sam2_model.prompt_encoder.get_dense_pe()
+                except:
+                    print("Could not get positional encoding, will try without it")
+                
+                # Try direct mask decoder call if available
+                if hasattr(sam2_model, 'mask_decoder'):
+                    # Call mask decoder directly like in sam_call
+                    masks = sam2_model.mask_decoder(
+                        image_embeddings=image_embeddings,
+                        image_pe=image_pe,
+                        sparse_prompt_embeddings=sparse_embeddings,
+                        dense_prompt_embeddings=dense_embeddings,
+                        multimask_output=False
+                    )
+                    
+                    # Extract masks based on return type
+                    if isinstance(masks, tuple):
+                        # SAM returns (masks, iou_predictions)
+                        mask_predictions = masks[0]
+                    else:
+                        mask_predictions = masks
+                        
+                    # Apply sigmoid if needed
+                    if torch.min(mask_predictions) < 0 or torch.max(mask_predictions) > 1:
+                        mask_predictions = torch.sigmoid(mask_predictions)
+                    
+                    return mask_predictions
+                else:
+                    # Fallback to predict method
+                    print("No mask_decoder found, using predict method")
+                    masks, _, _ = self.sam2.predict(
+                        image_embeddings=image_embeddings,
+                        point_coords=point_coords,
+                        point_labels=point_labels,
+                        multimask_output=False
+                    )
+                    return masks
+                
+        except Exception as e:
+            print(f"Error in SAM2 processing for batch {batch_idx}, slice {slice_idx}: {e}")
+            # Return None on error
+            return None
     
     def forward(self, x, visualize=False):
         """
@@ -568,16 +621,57 @@ class AutoSAM2(nn.Module):
         # Get features from 3D UNet encoder
         encoder_features = self.encoder(x)
         
-        # Generate segmentation logits directly using mini-decoder
-        # This bypasses SAM2 completely for now
-        volume_logits = self.mini_decoder(encoder_features)
+        # Generate embeddings with mini-decoder (like AutoSAM)
+        embeddings = self.mini_decoder(encoder_features)
         
-        # Apply sigmoid to get probability maps
-        volume_masks = torch.sigmoid(volume_logits)
+        # If SAM2 is not available, use backup decoder
+        if not self.has_sam2 or self.sam2 is None:
+            print("SAM2 not available, using backup decoder")
+            # Use a simple 1x1 conv to get class predictions
+            volume_masks = self.backup_conv(embeddings)
+            # Apply sigmoid to get probability maps
+            volume_masks = torch.sigmoid(volume_masks)
+            return volume_masks
+        
+        # Process each slice with SAM2's mask decoder
+        all_masks = []
+        
+        for d in range(depth):
+            # Process batch for this slice
+            batch_masks = []
+            
+            for b in range(batch_size):
+                # Extract embedding for this slice and batch
+                slice_embedding = embeddings[b, :, d]  # [C, H, W]
+                
+                # Process with SAM2
+                mask = self.process_slice_with_sam2(slice_embedding, b, d)
+                
+                # Handle case where SAM2 processing fails
+                if mask is None:
+                    # Use backup decoder for this slice
+                    backup_mask = self.backup_conv(embeddings[b:b+1, :, d:d+1])
+                    backup_mask = torch.sigmoid(backup_mask)
+                    mask = backup_mask.squeeze(2)  # Remove depth dimension
+                
+                batch_masks.append(mask)
+            
+            # Stack batch masks for this slice
+            if batch_masks and all(m is not None for m in batch_masks):
+                slice_masks = torch.cat(batch_masks, dim=0)
+                all_masks.append(slice_masks)
+            else:
+                # Create empty masks if processing failed
+                empty_masks = torch.zeros((batch_size, self.num_classes, height, width), 
+                                          device=x.device)
+                all_masks.append(empty_masks)
+        
+        # Stack all slices to get the volume
+        volume_masks = torch.stack(all_masks, dim=2)  # [B, C, D, H, W]
         
         # Optional visualization
         if visualize and depth > 0:
-            mid_slice = min(depth // 2, depth - 1)  # Prevent index out of bounds
+            mid_slice = min(depth // 2, depth - 1)
             self._visualize_slice(x, volume_masks, mid_slice)
         
         return volume_masks
@@ -627,23 +721,20 @@ class AutoSAM2(nn.Module):
         overlay[..., 2] = slice_norm
         
         # Add colored segmentation masks
-        if mask_slice.shape[0] >= 2:  # Skip background class
-            # Class 1 (e.g., Edema): Yellow
-            overlay[mask_slice[1] > 0.5, 0] = 1.0  # Red
-            overlay[mask_slice[1] > 0.5, 1] = 1.0  # Green
-            overlay[mask_slice[1] > 0.5, 2] = 0.0  # No blue
-        
-        if mask_slice.shape[0] >= 3:
-            # Class 2 (e.g., Non-enhancing tumor): Green
-            overlay[mask_slice[2] > 0.5, 0] = 0.0  # No red
-            overlay[mask_slice[2] > 0.5, 1] = 1.0  # Green
-            overlay[mask_slice[2] > 0.5, 2] = 0.0  # No blue
-        
-        if mask_slice.shape[0] >= 4:
-            # Class 3 (e.g., Enhancing tumor): Red
-            overlay[mask_slice[3] > 0.5, 0] = 1.0  # Red
-            overlay[mask_slice[3] > 0.5, 1] = 0.0  # No green
-            overlay[mask_slice[3] > 0.5, 2] = 0.0  # No blue
+        for c in range(1, min(mask_slice.shape[0], 4)):
+            # Skip background class (0)
+            if c == 1:  # Class 1 (e.g., Edema): Yellow
+                overlay[mask_slice[c] > 0.5, 0] = 1.0  # Red
+                overlay[mask_slice[c] > 0.5, 1] = 1.0  # Green
+                overlay[mask_slice[c] > 0.5, 2] = 0.0  # No blue
+            elif c == 2:  # Class 2 (e.g., Non-enhancing tumor): Green
+                overlay[mask_slice[c] > 0.5, 0] = 0.0  # No red
+                overlay[mask_slice[c] > 0.5, 1] = 1.0  # Green
+                overlay[mask_slice[c] > 0.5, 2] = 0.0  # No blue
+            elif c == 3:  # Class 3 (e.g., Enhancing tumor): Red
+                overlay[mask_slice[c] > 0.5, 0] = 1.0  # Red
+                overlay[mask_slice[c] > 0.5, 1] = 0.0  # No green
+                overlay[mask_slice[c] > 0.5, 2] = 0.0  # No blue
         
         # Plot segmentation overlay
         axes[1].imshow(overlay)
@@ -654,7 +745,6 @@ class AutoSAM2(nn.Module):
         plt.tight_layout()
         plt.savefig(f"results/slice_{slice_idx}_viz.png")
         plt.close()
-
 
 #train.py - Enhanced version with optimizations
 import os
