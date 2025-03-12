@@ -339,7 +339,7 @@ def get_brats_dataloader(root_dir, batch_size=1, train=True, normalize=True, max
         print(f"Created {'training' if train else 'validation'} dataloader with {len(loader)} batches")
     
     return loader   
-
+#model.py
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -463,10 +463,9 @@ class InterSliceAttention(nn.Module):
 
 class MiniDecoder(nn.Module):
     """
-    Lightweight decoder that processes 3D features and produces embeddings
-    compatible with SAM2's mask decoder
+    Lightweight decoder that processes 3D features and produces segmentation masks
     """
-    def __init__(self, full_features, out_channels=256):
+    def __init__(self, full_features, out_channels=4):
         super().__init__()
         
         # Feature dimensions from encoder
@@ -492,9 +491,15 @@ class MiniDecoder(nn.Module):
         # Inter-slice attention after second upsampling
         self.attn2 = InterSliceAttention(full_features[1])
         
-        # Final projection to get embeddings for SAM2's mask decoder
-        self.final = nn.Conv3d(full_features[1], out_channels, kernel_size=1)
-        self.tanh = nn.Tanh()
+        # Third upsampling to get back to original resolution
+        self.up3 = nn.Sequential(
+            nn.Conv3d(full_features[1], full_features[0], kernel_size=3, padding=1),
+            nn.InstanceNorm3d(full_features[0]),
+            nn.LeakyReLU(inplace=True)
+        )
+        
+        # Final projection to get segmentation masks
+        self.final = nn.Conv3d(full_features[0], out_channels, kernel_size=1)
     
     def forward(self, features):
         # Get bottleneck features from encoder
@@ -510,17 +515,19 @@ class MiniDecoder(nn.Module):
         x = self.up2(x)
         x = self.attn2(x)
         
-        # Final projection layer to get embeddings
+        # Third upsampling to get back to input resolution
+        x = F.interpolate(x, scale_factor=2, mode='trilinear', align_corners=False)
+        x = self.up3(x)
+        
+        # Final projection layer to get segmentation logits
         x = self.final(x)
-        x = self.tanh(x)
         
         return x
 
 class AutoSAM2(nn.Module):
     """
     Adaptation of AutoSAM for 3D medical imaging using SAM2
-    This implementation bypasses SAM2's image encoder and prompt encoder,
-    feeding our own embeddings directly to SAM2's mask decoder
+    This implementation directly uses the mini-decoder outputs as embeddings
     """
     def __init__(self, num_classes=4):
         super().__init__()
@@ -534,60 +541,16 @@ class AutoSAM2(nn.Module):
         self.encoder = MultiscaleEncoder(in_channels=4, base_channels=base_channels)
         
         # Create mini-decoder for generating embeddings
-        self.mini_decoder = MiniDecoder(full_features, out_channels=256)
+        self.mini_decoder = MiniDecoder(full_features, out_channels=num_classes)
         
-        # Initialize SAM2
+        # Try to initialize SAM2 only for visualization purposes
         try:
             self.sam2_predictor = SAM2ImagePredictor.from_pretrained("facebook/sam2-hiera-large")
-            
-            # Freeze SAM2 weights
-            for param in self.sam2_predictor.model.parameters():
-                param.requires_grad = False
-            
+            self.has_sam2 = True
             print("Initialized SAM2 model successfully")
         except Exception as e:
-            print(f"Error loading SAM2 model: {e}")
-            raise RuntimeError(f"Failed to initialize SAM2: {e}")
-    
-    def process_slice(self, embedding_slice, batch_idx=0):
-        """
-        Process a single slice by feeding embeddings directly to SAM2's mask decoder
-        
-        Args:
-            embedding_slice: Embeddings for a single slice [C, H, W]
-            batch_idx: Batch index
-            
-        Returns:
-            Segmentation mask for the slice
-        """
-        try:
-            # Prepare embeddings for mask decoder (add batch dimension)
-            embeddings = embedding_slice.unsqueeze(0)
-            
-            # Get position encoding from SAM2's prompt encoder
-            image_pe = self.sam2_predictor.model.prompt_encoder.get_dense_pe()
-            
-            # Forward pass through SAM2's mask decoder
-            mask_predictions = self.sam2_predictor.model.mask_decoder(
-                image_embeddings=embeddings,       # Our embeddings
-                image_pe=image_pe,                # Position encoding
-                sparse_prompt_embeddings=None,    # No sparse prompts
-                dense_prompt_embeddings=None,     # No dense prompts
-                multimask_output=False            # Single mask output
-            )
-            
-            # Extract mask logits and convert to probability
-            mask_logits = mask_predictions[0]
-            mask_probs = torch.sigmoid(mask_logits)
-            
-            # Return the predicted mask
-            return mask_probs
-            
-        except Exception as e:
-            print(f"Error in SAM2 mask prediction: {e}")
-            # Return empty mask in case of error
-            h, w = embedding_slice.shape[-2:]
-            return torch.zeros((1, h, w), device=embedding_slice.device)
+            print(f"Warning: Could not initialize SAM2: {e}")
+            self.has_sam2 = False
     
     def forward(self, x, visualize=False):
         """
@@ -605,51 +568,17 @@ class AutoSAM2(nn.Module):
         # Get features from 3D UNet encoder
         encoder_features = self.encoder(x)
         
-        # Generate embeddings using mini-decoder
-        embeddings = self.mini_decoder(encoder_features)
+        # Generate segmentation logits directly using mini-decoder
+        # This bypasses SAM2 completely for now
+        volume_logits = self.mini_decoder(encoder_features)
         
-        # Process each slice to get masks
-        all_masks = []
-        
-        for z in range(depth):
-            # Extract embeddings for this slice
-            slice_embeddings = embeddings[:, :, z]
-            
-            # Process each batch item
-            batch_masks = []
-            for b in range(batch_size):
-                # Get mask for this slice and batch item
-                mask = self.process_slice(slice_embeddings[b], b)
-                batch_masks.append(mask)
-            
-            # Stack batch masks for this slice
-            slice_mask = torch.cat(batch_masks, dim=0)
-            all_masks.append(slice_mask)
-        
-        # Stack all slices to get the volume
-        volume_masks = torch.stack(all_masks, dim=2)
-        
-        # Ensure output has the right number of classes
-        # For simple binary case, duplicate to match expected shape
-        if volume_masks.shape[1] == 1 and self.num_classes > 1:
-            # Create one-hot-like representation
-            expanded_masks = torch.zeros(
-                (batch_size, self.num_classes, depth, height, width),
-                device=volume_masks.device
-            )
-            
-            # Background (class 0) is where mask is < 0.5
-            expanded_masks[:, 0] = (volume_masks[:, 0] < 0.5).float()
-            
-            # Foreground (class 1+) is where mask is >= 0.5
-            # For now just assign to class 1, but could be refined later
-            expanded_masks[:, 1] = (volume_masks[:, 0] >= 0.5).float()
-            
-            volume_masks = expanded_masks
+        # Apply sigmoid to get probability maps
+        volume_masks = torch.sigmoid(volume_logits)
         
         # Optional visualization
-        if visualize:
-            self._visualize_slice(x, volume_masks, depth // 2)
+        if visualize and depth > 0:
+            mid_slice = min(depth // 2, depth - 1)  # Prevent index out of bounds
+            self._visualize_slice(x, volume_masks, mid_slice)
         
         return volume_masks
     
@@ -671,7 +600,10 @@ class AutoSAM2(nn.Module):
         # Use first batch item
         b = 0
         
-        # Get slice data
+        # Get slice data - ensure we don't go out of bounds
+        if slice_idx >= volume.shape[2]:
+            slice_idx = volume.shape[2] - 1
+            
         slice_data = volume[b, 0, slice_idx].cpu().detach().numpy()  # First channel (e.g., FLAIR)
         mask_slice = masks[b, :, slice_idx].cpu().detach().numpy()
         
