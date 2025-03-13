@@ -538,43 +538,43 @@ class AutoSAM2(nn.Module):
         
         return None
     
-def forward(self, x, visualize=False):
-    batch_size, channels, depth, height, width = x.shape
-    
-    # Run encoder to get features and probability maps
-    encoder_output = self.encoder(x)
-    encoder_features = encoder_output['features']
-    prob_maps = encoder_output['prob_maps']
-    
-    # Resize probability maps to match input dimensions
-    resized_prob_maps = F.interpolate(
-        prob_maps, 
-        size=(depth, height, width),
-        mode='trilinear', 
-        align_corners=False
-    )
-    
-    # Initialize output tensor
-    output_masks = torch.zeros_like(resized_prob_maps)
-    
-    # Determine which slices to process
-    slice_stride = 8 if self.training else 4  # Every 8th during training, every 4th during eval
-    key_slices = list(range(0, depth, slice_stride))
-    
-    # Process selected slices with SAM2
-    for slice_idx in key_slices:
-        if slice_idx < depth:  # Safety check
-            slice_masks = self.process_slice_with_sam2(
-                x, resized_prob_maps, encoder_features, slice_idx
-            )
-            output_masks[:, :, slice_idx] = slice_masks
-    
-    # For remaining slices, use the encoder's probability maps
-    for z in range(depth):
-        if z not in key_slices:
-            output_masks[:, :, z] = resized_prob_maps[:, :, z]
-    
-    return output_masks
+    def forward(self, x, visualize=False):
+        batch_size, channels, depth, height, width = x.shape
+        
+        # Run encoder to get features and probability maps
+        encoder_output = self.encoder(x)
+        encoder_features = encoder_output['features']
+        prob_maps = encoder_output['prob_maps']
+        
+        # Resize probability maps to match input dimensions
+        resized_prob_maps = F.interpolate(
+            prob_maps, 
+            size=(depth, height, width),
+            mode='trilinear', 
+            align_corners=False
+        )
+        
+        # Initialize output tensor
+        output_masks = torch.zeros_like(resized_prob_maps)
+        
+        # Determine which slices to process
+        slice_stride = 8 if self.training else 4  # Every 8th during training, every 4th during eval
+        key_slices = list(range(0, depth, slice_stride))
+        
+        # Process selected slices with SAM2
+        for slice_idx in key_slices:
+            if slice_idx < depth:  # Safety check
+                slice_masks = self.process_slice_with_sam2(
+                    x, resized_prob_maps, encoder_features, slice_idx
+                )
+                output_masks[:, :, slice_idx] = slice_masks
+        
+        # For remaining slices, use the encoder's probability maps
+        for z in range(depth):
+            if z not in key_slices:
+                output_masks[:, :, z] = resized_prob_maps[:, :, z]
+        
+        return output_masks
 
 #train.py - Enhanced version with optimizations
 import os
