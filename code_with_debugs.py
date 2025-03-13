@@ -432,6 +432,18 @@ class MiniDecoder(nn.Module):
         
         # First upsampling with skip connection
         x = self.up1(bottleneck)
+        
+        # Fix size mismatch by interpolating to match x2's spatial dimensions
+        if x.shape[2:] != x2.shape[2:]:
+            print(f"Size mismatch in decoder: {x.shape} vs {x2.shape}, interpolating...")
+            x = F.interpolate(
+                x,
+                size=x2.shape[2:],
+                mode='trilinear',
+                align_corners=False
+            )
+            
+        # Now concatenate
         x = torch.cat([x, x2], dim=1)
         x = self.conv1(x)
         
@@ -440,7 +452,6 @@ class MiniDecoder(nn.Module):
         x = self.tanh(x)
         
         return x
-
 class AutoSAM2(nn.Module):
     """
     AutoSAM2 model for 3D medical image segmentation
