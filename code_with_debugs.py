@@ -213,7 +213,6 @@ class BraTSDataset(Dataset):
                 self.data_cache[idx] = (image, mask)
             
             return image, mask
-    print(f"DEBUG: Image shape: {image.shape}, Mask shape: {mask.shape}")
         except Exception as e:
             if self.verbose:
                 print(f"Error loading image {self.image_files[idx]}: {e}")
@@ -948,7 +947,6 @@ def train_epoch(model, train_loader, optimizer, criterion, device, epoch, schedu
             
             # Forward pass
             outputs = model(images)
-    print(f"DEBUG: Model input shape: {images.shape}")
             
             # Compute BCE Loss and Dice Loss
             bce_loss = nn.BCEWithLogitsLoss()(outputs, masks)
@@ -1048,7 +1046,6 @@ def validate(model, val_loader, criterion, device, epoch):
                 
                 # Forward pass
                 outputs = model(images)
-    print(f"DEBUG: Model input shape: {images.shape}")
                 
                 # Compute BCE Loss and Dice Loss
                 bce_loss = nn.BCEWithLogitsLoss()(outputs, masks)
@@ -1348,7 +1345,6 @@ def train_model(data_path, batch_size=1, epochs=20, learning_rate=1e-3,
         # Validate
         try:
             val_loss, val_metrics = validate(model, val_loader, criterion, device, epoch)
-    print(f"DEBUG: Validation loss: {val_loss}, Val Dice: {val_metrics.get('mean_dice', 0.0)}")
             print(f"Validation metrics: {val_metrics}")  # Debugging
 
             history['val_loss'].append(val_loss)
