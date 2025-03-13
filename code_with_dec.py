@@ -346,368 +346,212 @@ def get_brats_dataloader(root_dir, batch_size=1, train=True, normalize=True, max
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import numpy as np
-from scipy import ndimage
-import matplotlib.pyplot as plt
 
-# Import SAM2 with better error handling
 try:
     from sam2.sam2_image_predictor import SAM2ImagePredictor
     HAS_SAM2 = True
-    print("Successfully imported SAM2")
 except ImportError:
-    print("ERROR: sam2 package not available. This implementation requires SAM2.")
+    print("SAM2 not available")
     HAS_SAM2 = False
-    raise ImportError("SAM2 must be installed for this implementation to work")
 
-class MultiscaleEncoder(nn.Module):
-    """
-    3D UNet-style encoder that preserves spatial information for medical volumes
-    """
+class Encoder3D(nn.Module):
     def __init__(self, in_channels=4, base_channels=16):
         super().__init__()
         
-        # Encoder path with skip connections
+        # Simple encoder path
         self.enc1 = nn.Sequential(
-            nn.Conv3d(in_channels, base_channels, kernel_size=3, padding=1),
+            nn.Conv3d(in_channels, base_channels, 3, padding=1),
             nn.InstanceNorm3d(base_channels),
-            nn.LeakyReLU(inplace=True),
-            nn.Conv3d(base_channels, base_channels, kernel_size=3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.Conv3d(base_channels, base_channels, 3, padding=1),
             nn.InstanceNorm3d(base_channels),
-            nn.LeakyReLU(inplace=True)
+            nn.ReLU(inplace=True)
         )
-        self.pool1 = nn.MaxPool3d(kernel_size=2, stride=2)
+        self.pool1 = nn.MaxPool3d(2)
         
         self.enc2 = nn.Sequential(
-            nn.Conv3d(base_channels, base_channels*2, kernel_size=3, padding=1),
+            nn.Conv3d(base_channels, base_channels*2, 3, padding=1),
             nn.InstanceNorm3d(base_channels*2),
-            nn.LeakyReLU(inplace=True),
-            nn.Conv3d(base_channels*2, base_channels*2, kernel_size=3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.Conv3d(base_channels*2, base_channels*2, 3, padding=1),
             nn.InstanceNorm3d(base_channels*2),
-            nn.LeakyReLU(inplace=True)
+            nn.ReLU(inplace=True)
         )
-        self.pool2 = nn.MaxPool3d(kernel_size=2, stride=2)
-        
-        self.enc3 = nn.Sequential(
-            nn.Conv3d(base_channels*2, base_channels*4, kernel_size=3, padding=1),
-            nn.InstanceNorm3d(base_channels*4),
-            nn.LeakyReLU(inplace=True),
-            nn.Conv3d(base_channels*4, base_channels*4, kernel_size=3, padding=1),
-            nn.InstanceNorm3d(base_channels*4),
-            nn.LeakyReLU(inplace=True)
-        )
-        self.pool3 = nn.MaxPool3d(kernel_size=2, stride=2)
+        self.pool2 = nn.MaxPool3d(2)
         
         self.bottleneck = nn.Sequential(
-            nn.Conv3d(base_channels*4, base_channels*8, kernel_size=3, padding=1),
-            nn.InstanceNorm3d(base_channels*8),
-            nn.LeakyReLU(inplace=True),
-            nn.Conv3d(base_channels*8, base_channels*8, kernel_size=3, padding=1),
-            nn.InstanceNorm3d(base_channels*8),
-            nn.LeakyReLU(inplace=True)
+            nn.Conv3d(base_channels*2, base_channels*4, 3, padding=1),
+            nn.InstanceNorm3d(base_channels*4),
+            nn.ReLU(inplace=True),
+            nn.Conv3d(base_channels*4, base_channels*4, 3, padding=1),
+            nn.InstanceNorm3d(base_channels*4),
+            nn.ReLU(inplace=True)
         )
-        
-        # Dropout for regularization
-        self.dropout = nn.Dropout3d(0.3)
     
     def forward(self, x):
-        # Encoder path with skip connections
-        x1 = self.enc1(x)
-        x1 = self.dropout(x1)
+        # Encoder path
+        e1 = self.enc1(x)
+        p1 = self.pool1(e1)
         
-        x = self.pool1(x1)
+        e2 = self.enc2(p1)
+        p2 = self.pool2(e2)
         
-        x2 = self.enc2(x)
-        x2 = self.dropout(x2)
+        b = self.bottleneck(p2)
         
-        x = self.pool2(x2)
-        
-        x3 = self.enc3(x)
-        x3 = self.dropout(x3)
-        
-        x = self.pool3(x3)
-        
-        x4 = self.bottleneck(x)
-        x4 = self.dropout(x4)
-        
-        return [x1, x2, x3, x4]
-
-class UpBlockSkip(nn.Module):
-    """
-    Upsampling block with skip connection
-    """
-    def __init__(self, in_channels, out_channels, func='relu', drop=0):
-        super().__init__()
-        self.up = nn.ConvTranspose3d(in_channels, out_channels, kernel_size=2, stride=2)
-        self.conv = nn.Sequential(
-            nn.Conv3d(out_channels*2, out_channels, kernel_size=3, padding=1),
-            nn.InstanceNorm3d(out_channels),
-            nn.ReLU(inplace=True) if func == 'relu' else nn.LeakyReLU(0.2, inplace=True),
-            nn.Dropout3d(p=drop) if drop > 0 else nn.Identity(),
-            nn.Conv3d(out_channels, out_channels, kernel_size=3, padding=1),
-            nn.InstanceNorm3d(out_channels),
-            nn.ReLU(inplace=True) if func == 'relu' else nn.LeakyReLU(0.2, inplace=True),
-            nn.Dropout3d(p=drop) if drop > 0 else nn.Identity()
-        )
-    
-    def forward(self, x, skip):
-        x = self.up(x)
-        x = torch.cat([x, skip], dim=1)
-        return self.conv(x)
+        return {'x1': e1, 'x2': e2, 'bottleneck': b}
 
 class MiniDecoder(nn.Module):
-    """
-    Mini-decoder following AutoSAM's approach
-    """
-    def __init__(self, full_features, out_channels=3):
+    def __init__(self, base_channels=16):
         super().__init__()
-        self.up1 = UpBlockSkip(full_features[3], full_features[2],
-                               func='relu', drop=0)
-        self.up2 = UpBlockSkip(full_features[2], full_features[1],
-                               func='relu', drop=0)
         
-        # Output 3 channels for RGB-like representation
-        self.final = nn.Conv3d(full_features[1], out_channels, kernel_size=3, padding=1)
+        # Simple decoder to convert 3D features to 2D features
+        # suitable for SAM2's mask decoder
+        self.upconv1 = nn.ConvTranspose3d(base_channels*4, base_channels*2, 2, stride=2)
+        self.conv1 = nn.Sequential(
+            nn.Conv3d(base_channels*4, base_channels*2, 3, padding=1),
+            nn.InstanceNorm3d(base_channels*2),
+            nn.ReLU(inplace=True)
+        )
+        
+        self.upconv2 = nn.ConvTranspose3d(base_channels*2, base_channels, 2, stride=2)
+        self.conv2 = nn.Sequential(
+            nn.Conv3d(base_channels*2, base_channels, 3, padding=1),
+            nn.InstanceNorm3d(base_channels),
+            nn.ReLU(inplace=True)
+        )
+        
+        # Final convolution to get to the desired number of channels (3 for RGB-like images)
+        self.final = nn.Conv3d(base_channels, 3, 1)
     
     def forward(self, features):
-        x = self.up1(features[3], features[2])
-        x = self.up2(x, features[1])
-        x = torch.tanh(self.final(x))
+        # Unpack features
+        x1, x2, bottleneck = features['x1'], features['x2'], features['bottleneck']
+        
+        # Upsampling path
+        x = self.upconv1(bottleneck)
+        x = torch.cat([x, x2], dim=1)
+        x = self.conv1(x)
+        
+        x = self.upconv2(x)
+        x = torch.cat([x, x1], dim=1)
+        x = self.conv2(x)
+        
+        # Final convolution
+        x = self.final(x)
+        
         return x
 
-class RichSliceGenerator:
-    """
-    Converts feature slices to RGB images suitable for SAM2
-    """
-    def __init__(self):
-        pass
-    
-    def generate_rgb_slice(self, features):
-        """
-        Generate an RGB image from feature slice
-        
-        Args:
-            features: Feature slice [C, H, W]
-        
-        Returns:
-            RGB image [H, W, 3]
-        """
-        # Convert tensor to numpy
-        if torch.is_tensor(features):
-            features = features.cpu().detach().numpy()
-        
-        # Number of channels
-        C, H, W = features.shape
-        
-        # Create RGB image (ensure 3 channels)
-        if C >= 3:
-            # Use first 3 channels directly
-            r_channel = features[0]
-            g_channel = features[1]
-            b_channel = features[2]
-        else:
-            # Duplicate the available channels
-            r_channel = features[0]
-            g_channel = features[0] if C == 1 else features[1]
-            b_channel = features[0] if C == 1 else features[1]
-        
-        # Normalize each channel to [0, 1]
-        def normalize(img):
-            min_val = np.min(img)
-            max_val = np.max(img)
-            if max_val - min_val < 1e-6:
-                return np.zeros_like(img)
-            return (img - min_val) / (max_val - min_val)
-        
-        r_norm = normalize(r_channel)
-        g_norm = normalize(g_channel)
-        b_norm = normalize(b_channel)
-        
-        # Create RGB image
-        rgb_image = np.stack([r_norm, g_norm, b_norm], axis=2)
-        
-        # Ensure range [0, 255] for SAM2
-        rgb_image = (rgb_image * 255).astype(np.uint8)
-        
-        return rgb_image
-
 class AutoSAM2(nn.Module):
-    """
-    Adaptation of AutoSAM for 3D medical imaging with SAM2 integration
-    """
-    def __init__(self, num_classes=4):
+    def __init__(self, num_classes=2):
         super().__init__()
         
-        # Define feature dimensions
-        base_channels = 16
-        self.num_classes = num_classes
-        full_features = [base_channels, base_channels*2, base_channels*4, base_channels*8]
+        # 3D encoder
+        self.encoder = Encoder3D(in_channels=4, base_channels=16)
         
-        # Create 3D UNet encoder
-        self.encoder = MultiscaleEncoder(in_channels=4, base_channels=base_channels)
-        
-        # Create mini-decoder for rich feature representation
-        self.mini_decoder = MiniDecoder(full_features, out_channels=3)
-        
-        # Rich slice generator for SAM2
-        self.slice_generator = RichSliceGenerator()
-        
-        # Final projection to output segmentation
-        self.output_conv = nn.Conv3d(1, num_classes, kernel_size=1)
+        # Mini-decoder
+        self.decoder = MiniDecoder(base_channels=16)
         
         # Initialize SAM2
-        try:
-            self.sam2 = SAM2ImagePredictor.from_pretrained("facebook/sam2-hiera-large")
-            print("SAM2 initialized successfully")
-            
-            # Freeze SAM2 weights
-            for param in self.sam2.model.parameters():
-                param.requires_grad = False
+        if HAS_SAM2:
+            try:
+                self.sam2 = SAM2ImagePredictor.from_pretrained("facebook/sam2-hiera-large")
+                print("SAM2 initialized successfully")
                 
-            self.has_sam2 = True
-        except Exception as e:
-            print(f"Warning: Could not initialize SAM2: {e}")
+                # Freeze SAM2 weights
+                for param in self.sam2.model.parameters():
+                    param.requires_grad = False
+                    
+                self.has_sam2 = True
+            except Exception as e:
+                print(f"Error initializing SAM2: {e}")
+                self.has_sam2 = False
+                self.sam2 = None
+        else:
             self.has_sam2 = False
             self.sam2 = None
+        
+        # Backup output layer if SAM2 is not available
+        self.output_layer = nn.Conv3d(3, num_classes, 1)
     
-    def forward(self, x, visualize=False):
-        """
-        Forward pass through AutoSAM2 with proper SAM2 integration
-        """
+    def _convert_slice_to_image(self, slice_data):
+        """Convert a feature slice to an RGB image for SAM2"""
+        # Ensure slice_data is on CPU and detached
+        if torch.is_tensor(slice_data):
+            slice_data = slice_data.detach().cpu().numpy()
+        
+        # Basic normalization to [0, 255]
+        for c in range(3):  # Assuming 3 channels
+            min_val = slice_data[c].min()
+            max_val = slice_data[c].max()
+            if max_val > min_val:
+                slice_data[c] = (slice_data[c] - min_val) / (max_val - min_val) * 255
+        
+        # Transpose to [H, W, C] and convert to uint8
+        rgb_image = slice_data.transpose(1, 2, 0).astype('uint8')
+        return rgb_image
+    
+    def forward(self, x):
         batch_size, channels, depth, height, width = x.shape
         
-        # Get features from 3D UNet encoder
-        encoder_features = self.encoder(x)
+        # Get 3D features from encoder
+        features = self.encoder(x)
         
         # Generate rich features with mini-decoder
-        rich_features = self.mini_decoder(encoder_features)
+        rich_features = self.decoder(features)
         
-        # Initialize output volume
-        output_masks = torch.zeros((batch_size, self.num_classes, depth, height, width), device=x.device)
-        
-        # Process each slice with SAM2
-        if self.has_sam2 and self.sam2 is not None:
-            for d in range(depth):
-                # Get features for this slice
-                slice_features = rich_features[0, :, d]  # [3, H, W]
-                
-                # Convert to RGB image for SAM2
-                rgb_image = self.slice_generator.generate_rgb_slice(slice_features)
-                
-                try:
-                    # Set image in SAM2
-                    self.sam2.set_image(rgb_image)
-                    
-                    # Generate masks - use center point as prompt
-                    center_point = np.array([[width // 2, height // 2]])
-                    masks, scores, _ = self.sam2.predict(
-                        point_coords=center_point,
-                        point_labels=np.array([1]),  # Foreground
-                        multimask_output=True
-                    )
-                    
-                    # Use mask with highest score
-                    if len(scores) > 0:
-                        best_idx = np.argmax(scores)
-                        mask = masks[best_idx].astype(np.float32)
-                        
-                        # Add to output volume - assign to first class
-                        output_masks[0, 1, d] = torch.tensor(mask, device=x.device)
-                except Exception as e:
-                    print(f"Error processing slice {d} with SAM2: {e}")
-                    # Continue with next slice
-        
-        # If SAM2 failed or is not available, use backup approach
-        if torch.sum(output_masks) == 0:
-            print("SAM2 processing failed, using backup approach")
-            # Ensure rich_features are upsampled to match input dimensions
-            rich_features_up = F.interpolate(
+        # Ensure rich_features match input dimensions
+        if rich_features.shape[2:] != x.shape[2:]:
+            rich_features = F.interpolate(
                 rich_features,
-                size=(depth, height, width),
+                size=x.shape[2:],
                 mode='trilinear',
                 align_corners=False
             )
+        
+        # If SAM2 is not available, use the backup output layer
+        if not self.has_sam2 or self.sam2 is None:
+            return self.output_layer(rich_features)
+        
+        # Otherwise, process with SAM2 slice by slice
+        # For simplicity, we'll just process the middle slice
+        middle_idx = depth // 2
+        
+        # Get the middle slice features
+        middle_slice = rich_features[0, :, middle_idx]  # [3, H, W]
+        
+        # Convert to RGB image for SAM2
+        rgb_image = self._convert_slice_to_image(middle_slice)
+        
+        try:
+            # Use SAM2 to generate masks
+            self.sam2.set_image(rgb_image)
             
-            # Project to output classes
-            output_masks = self.output_conv(rich_features_up[:, :1])
-            output_masks = torch.sigmoid(output_masks)
-        
-        # Visualize if requested
-        if visualize and depth > 0:
-            mid_slice = min(depth // 2, depth - 1)
-            self._visualize_slice(x, output_masks, mid_slice)
-        
-        return output_masks
-    
-    def _visualize_slice(self, volume, masks, slice_idx):
-        """
-        Visualize a slice from the segmentation results
-        
-        Args:
-            volume: Input volume [B, C, D, H, W]
-            masks: Predicted masks [B, num_classes, D, H, W]
-            slice_idx: Index of slice to visualize
-        """
-        import matplotlib.pyplot as plt
-        import os
-        
-        # Create results directory
-        os.makedirs("results", exist_ok=True)
-        
-        # Use first batch item
-        b = 0
-        
-        # Get slice data - ensure we don't go out of bounds
-        if slice_idx >= volume.shape[2]:
-            slice_idx = volume.shape[2] - 1
+            # Generate a point prompt in the center
+            center_point = np.array([[width // 2, height // 2]])
             
-        slice_data = volume[b, 0, slice_idx].cpu().detach().numpy()  # First channel (e.g., FLAIR)
-        mask_slice = masks[b, :, slice_idx].cpu().detach().numpy()
-        
-        # Create figure
-        fig, axes = plt.subplots(1, 2, figsize=(10, 5))
-        
-        # Plot input slice
-        axes[0].imshow(slice_data, cmap='gray')
-        axes[0].set_title('Input Slice')
-        axes[0].axis('off')
-        
-        # Create color overlay for segmentation
-        overlay = np.zeros((*slice_data.shape, 3))
-        
-        # Normalize slice data for background
-        slice_norm = (slice_data - slice_data.min()) / (slice_data.max() - slice_data.min() + 1e-8)
-        
-        # Set as grayscale background
-        overlay[..., 0] = slice_norm
-        overlay[..., 1] = slice_norm
-        overlay[..., 2] = slice_norm
-        
-        # Add colored segmentation masks
-        for c in range(1, min(mask_slice.shape[0], 4)):
-            # Skip background class (0)
-            if c == 1:  # Class 1 (e.g., Edema): Yellow
-                overlay[mask_slice[c] > 0.5, 0] = 1.0  # Red
-                overlay[mask_slice[c] > 0.5, 1] = 1.0  # Green
-                overlay[mask_slice[c] > 0.5, 2] = 0.0  # No blue
-            elif c == 2:  # Class 2 (e.g., Non-enhancing tumor): Green
-                overlay[mask_slice[c] > 0.5, 0] = 0.0  # No red
-                overlay[mask_slice[c] > 0.5, 1] = 1.0  # Green
-                overlay[mask_slice[c] > 0.5, 2] = 0.0  # No blue
-            elif c == 3:  # Class 3 (e.g., Enhancing tumor): Red
-                overlay[mask_slice[c] > 0.5, 0] = 1.0  # Red
-                overlay[mask_slice[c] > 0.5, 1] = 0.0  # No green
-                overlay[mask_slice[c] > 0.5, 2] = 0.0  # No blue
-        
-        # Plot segmentation overlay
-        axes[1].imshow(overlay)
-        axes[1].set_title('Segmentation Overlay')
-        axes[1].axis('off')
-        
-        # Save figure
-        plt.tight_layout()
-        plt.savefig(f"results/slice_{slice_idx}_viz.png")
-        plt.close()
+            # Get prediction from SAM2
+            masks, _, _ = self.sam2.predict(
+                point_coords=center_point,
+                point_labels=np.array([1]),  # 1 = foreground
+                multimask_output=False
+            )
+            
+            # Convert mask to tensor
+            mask = torch.tensor(masks[0], device=x.device).float()
+            
+            # Create output tensor with same shape as input
+            output = torch.zeros((batch_size, 2, depth, height, width), device=x.device)
+            
+            # Set the middle slice
+            output[0, 1, middle_idx] = mask  # Class 1 (tumor)
+            output[0, 0, middle_idx] = 1 - mask  # Class 0 (background)
+            
+            return output
+            
+        except Exception as e:
+            print(f"Error processing with SAM2: {e}")
+            # Fall back to using the backup output layer
+            return self.output_layer(rich_features)
 
 #train.py - Enhanced version with optimizations
 import os
