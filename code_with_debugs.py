@@ -421,6 +421,12 @@ class MiniDecoder(nn.Module):
         
         # First upsampling with skip connection
         x = self.up1(bottleneck)
+        
+        # Check if dimensions match and resize if necessary
+        if x.shape[2:] != x2.shape[2:]:
+            x = F.interpolate(x, size=x2.shape[2:], mode='trilinear', align_corners=False)
+        
+        # Concatenate along channel dimension
         x = torch.cat([x, x2], dim=1)
         x = self.conv1(x)
         
@@ -616,12 +622,11 @@ class AutoSAM2(nn.Module):
         # Initialize output tensor
         output_masks = torch.zeros_like(seg_probs)
         
-        # Determine slice processing stride based on volume depth
-        # This ensures we adapt to the actual volume size
-        slice_stride = min(8, max(depth // 4, 1))  # At least 4 slices, but no more than every 8th
-        
-        # Generate safe key slice indices - NEVER go out of bounds
-        key_slices = list(range(0, depth, slice_stride))
+        # Determine slice processing based on depth
+        # For original BraTS dimensions (155 slices), select ~10 evenly spaced slices
+        num_slices = min(10, depth)
+        step = max(1, depth // num_slices)
+        key_slices = list(range(0, depth, step))[:num_slices]  # Ensure we get at most num_slices
         
         # Only use SAM2 if it's available
         if self.has_sam2 and self.sam2_predictor is not None:
@@ -632,6 +637,10 @@ class AutoSAM2(nn.Module):
                 # Process key slices with SAM2
                 for slice_idx in key_slices:
                     try:
+                        # Skip if slice_idx is out of bounds (safety check)
+                        if slice_idx >= depth:
+                            continue
+                            
                         # Get slice data
                         emb_slice = embeddings[b, :, slice_idx].detach().cpu()
                         prob_slice = seg_probs[b, :, slice_idx]
@@ -684,22 +693,15 @@ class AutoSAM2(nn.Module):
             # During training, we need to mix SAM2 results with segmentation head
             # to ensure gradient flow through the network
             if self.training:
-                # During training, use a blend of SAM2 output and segmentation head
-                # with more weight to SAM2 to guide learning while allowing gradients
-                blend_weight = 0.7
-                blended_output = blend_weight * output_masks + (1 - blend_weight) * seg_probs
-                
-                # Return logits for loss computation
-                return seg_output  # Return raw logits for proper loss calculation
+                # Return raw logits for loss computation and better gradient flow
+                return seg_output
             else:
                 # During evaluation, return probabilities directly
                 return output_masks
-    print(f"DEBUG: Output mask shape: {output_masks.shape}")
         else:
             # If SAM2 not available, return segmentation head output
             print("Warning: SAM2 not available, using segmentation head output only")
             return seg_output
-
 
 #train.py - Enhanced version with optimizations
 import os
