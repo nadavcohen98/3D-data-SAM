@@ -525,137 +525,6 @@ class AutoSAM2(nn.Module):
         image = np.transpose(image, (1, 2, 0)).astype(np.uint8)
         return image
     
-    def _find_tumor_points(self, prob_maps, height, width, threshold=0.5, max_points=3):
-        """
-        Find points corresponding to different tumor regions based on probability maps
-        
-        Args:
-            prob_maps: Probability maps [C, H, W]
-            height, width: Dimensions of the slice
-            threshold: Probability threshold
-            max_points: Maximum number of points per class
-            
-        Returns:
-            points, labels: Arrays of point coordinates and labels
-        """
-        points = []
-        labels = []
-        
-        # Add center point for stability
-        points.append([width // 2, height // 2])
-        labels.append(1)  # Foreground
-        
-        # Convert to numpy
-        prob_np = prob_maps.detach().cpu().numpy()
-        
-        # Create tumor region masks
-        wt_mask = prob_np[1] > threshold  # Whole tumor (class 1)
-        tc_mask = prob_np[2] > threshold  # Tumor core (class 2)
-        et_mask = prob_np[3] > threshold  # Enhancing tumor (class 3)
-        
-        # Process each tumor region
-        for region_idx, mask in enumerate([wt_mask, tc_mask, et_mask], 1):
-            if np.any(mask):
-                # Find connected components
-                labeled, num_features = ndimage.label(mask)
-                
-                # Skip if no components
-                if num_features == 0:
-                    continue
-                    
-                # Calculate component sizes
-                sizes = ndimage.sum(mask, labeled, range(1, num_features+1))
-                
-                # Sort components by size (descending)
-                sorted_indices = np.argsort(-sizes)
-                
-                # Add points from largest components
-                for i in range(min(num_features, max_points)):
-                    component_idx = sorted_indices[i] + 1
-                    component = labeled == component_idx
-                    
-                    # Only consider components with sufficient size
-                    if sizes[sorted_indices[i]] < 10:
-                        continue
-                        
-                    # Find center of mass
-                    cy, cx = ndimage.center_of_mass(component)
-                    
-                    # Add point
-                    points.append([int(cx), int(cy)])
-                    labels.append(1)  # All tumor points are foreground
-        
-        # Add background points
-        # Use corners and edge midpoints
-        bg_points = [
-            [10, 10],                   # Top-left
-            [width-10, 10],             # Top-right
-            [10, height-10],            # Bottom-left
-            [width-10, height-10],      # Bottom-right
-            [width//2, 10],             # Top middle
-            [width//2, height-10],      # Bottom middle
-            [10, height//2],            # Left middle
-            [width-10, height//2]       # Right middle
-        ]
-        
-        for point in bg_points:
-            # Check if point is actually in background
-            x, y = point[0], point[1]
-            if 0 <= y < height and 0 <= x < width:
-                if not (wt_mask[y, x] or tc_mask[y, x] or et_mask[y, x]):
-                    points.append(point)
-                    labels.append(0)  # Background
-        
-        return np.array(points), np.array(labels)
-    
-    def _distribute_tumor_classes(self, foreground_mask, prob_maps):
-        """
-        Distribute the foreground mask into different tumor classes
-        based on probability maps
-
-        Args:
-            foreground_mask: Binary foreground mask [H, W]
-            prob_maps: Probability maps for each class [C, H, W]
-            
-        Returns:
-            Multi-class mask [C, H, W]
-        """
-        # Get dimensions
-        num_classes, height, width = prob_maps.shape
-        
-        # Initialize output mask
-        output_mask = torch.zeros_like(prob_maps)
-        
-        # Background is inverse of foreground
-        output_mask[0] = 1 - foreground_mask
-        
-        # First get the summed tumor probability for normalization
-        tumor_prob_sum = torch.clamp(
-            prob_maps[1] + prob_maps[2] + prob_maps[3], 
-            min=1e-6
-        )
-        
-        # Distribute foreground to classes 1-3
-        for c in range(1, num_classes):
-            # Calculate normalized probability for this class
-            # This creates a distribution summing to 1 across tumor classes
-            class_weight = prob_maps[c] / tumor_prob_sum
-            
-            # Apply class weight to foreground mask
-            output_mask[c] = foreground_mask * class_weight
-        
-        # Apply nested tumor structure constraints
-        # Enhancing tumor (ET) is subset of Tumor Core (TC) is subset of Whole Tumor (WT)
-        # Class 3 (ET) ⊆ Class 2 (TC) ⊆ Class 1 (WT)
-        
-        # First ensure ET is a subset of TC
-        output_mask[2] = torch.max(output_mask[2], output_mask[3])
-        
-        # Then ensure TC is a subset of WT
-        output_mask[1] = torch.max(output_mask[1], output_mask[2])
-        
-        return output_mask
-    
     def _process_slice_with_sam2(self, embeddings_slice, prob_slice, device):
         """
         Process a single slice with SAM2 for multi-class segmentation
@@ -679,13 +548,23 @@ class AutoSAM2(nn.Module):
             # Set image in SAM2
             self.sam2_predictor.set_image(rgb_image)
             
-            # Find points for different tumor regions
-            points, labels = self._find_tumor_points(prob_slice, height, width)
+            # Create points for foreground and background
+            # Use center point for simplicity and stability
+            center_point = np.array([[width // 2, height // 2]])
+            center_label = np.array([1])  # 1 = foreground
             
-            # Skip if no points found
-            if len(points) == 0:
-                # Use segmentation head output
-                return F.softmax(prob_slice, dim=0)
+            # Add background points at the corners
+            bg_points = np.array([
+                [10, 10], 
+                [width-10, 10], 
+                [10, height-10], 
+                [width-10, height-10]
+            ])
+            bg_labels = np.zeros(len(bg_points))  # 0 = background
+            
+            # Combine points
+            points = np.vstack([center_point, bg_points])
+            labels = np.concatenate([center_label, bg_labels])
             
             # Get predictions from SAM2
             masks, scores, _ = self.sam2_predictor.predict(
@@ -700,18 +579,39 @@ class AutoSAM2(nn.Module):
                 best_idx = np.argmax(scores)
                 foreground_mask = torch.tensor(masks[best_idx], dtype=torch.float32, device=device)
                 
-                # Distribute foreground mask to different classes
-                output_mask = self._distribute_tumor_classes(foreground_mask, prob_slice)
+                # Background is inverse of foreground
+                output_mask[0] = 1 - foreground_mask
+                
+                # Convert probability maps to tensor on same device
+                prob_device = torch.tensor(prob_slice.detach().cpu().numpy(), device=device)
+                
+                # Distribute foreground to classes 1-3 based on probability distribution
+                # First calculate summed probability for all tumor classes
+                tumor_prob_sum = torch.clamp(
+                    prob_device[1] + prob_device[2] + prob_device[3],
+                    min=1e-6
+                )
+                
+                # Then distribute foreground mask based on class probabilities
+                for c in range(1, self.num_classes):
+                    class_weight = prob_device[c] / tumor_prob_sum
+                    output_mask[c] = foreground_mask * class_weight
+                
+                # Apply hierarchical constraints:
+                # ET ⊆ TC ⊆ WT (class 3 ⊆ class 2 ⊆ class 1)
+                output_mask[1] = torch.max(output_mask[1], output_mask[2])  # WT includes TC
+                output_mask[1] = torch.max(output_mask[1], output_mask[3])  # WT includes ET
+                output_mask[2] = torch.max(output_mask[2], output_mask[3])  # TC includes ET
                 
                 return output_mask
             else:
-                # Fallback to segmentation head output
-                return F.softmax(prob_slice, dim=0)
+                # Return probabilities if SAM2 fails
+                return torch.tensor(prob_slice.detach().cpu().numpy(), device=device)
             
         except Exception as e:
             print(f"Error in SAM2 processing: {e}")
-            # Fallback to segmentation head output
-            return F.softmax(prob_slice, dim=0)
+            # Return probabilities if SAM2 fails
+            return torch.tensor(prob_slice.detach().cpu().numpy(), device=device)
     
     def forward(self, x):
         """
@@ -734,28 +634,32 @@ class AutoSAM2(nn.Module):
         
         # Generate auxiliary segmentation with segmentation head
         seg_output = self.seg_head(embeddings)
-        seg_probs = F.softmax(seg_output, dim=1)
+        seg_probs = torch.softmax(seg_output, dim=1)
         
         # Initialize output tensor
         output_masks = torch.zeros_like(seg_probs)
         
         # Determine which slices to process with SAM2
-        # Use every 8th slice during training to save time, every 4th during inference
+        # Use every 8th slice during training, every 4th during inference
         slice_stride = 8 if self.training else 4
-        key_slices = list(range(0, depth, slice_stride))
-        key_slices = [s for s in key_slices if s < depth]
+        
+        # IMPORTANT: Make sure slice indices are in bounds
+        max_idx = depth - 1
+        key_slices = [i for i in range(0, depth, slice_stride) if i <= max_idx]
         
         # Only use SAM2 if it's available
         if self.has_sam2 and self.sam2_predictor is not None:
-            # Process key slices with SAM2
+            # Track which slices were processed
             processed_slices = {}
             
             for b in range(batch_size):
+                # Process key slices with SAM2
                 for slice_idx in key_slices:
-                    if slice_idx >= depth:
-                        continue
-                    
                     try:
+                        # Safety check (should be redundant now)
+                        if slice_idx >= depth:
+                            continue
+                            
                         # Get slice data
                         emb_slice = embeddings[b, :, slice_idx].detach().cpu()
                         prob_slice = seg_probs[b, :, slice_idx]
@@ -774,52 +678,52 @@ class AutoSAM2(nn.Module):
                         # Use segmentation head output
                         output_masks[b, :, slice_idx] = seg_probs[b, :, slice_idx]
                 
-                # Fill in non-processed slices using interpolation
+                # Fill in non-key slices with interpolation
                 for slice_idx in range(depth):
-                    if (b, slice_idx) not in processed_slices:
-                        # Find nearest processed slices
-                        prev_slice = None
-                        next_slice = None
-                        
-                        for s in key_slices:
-                            if s < slice_idx and (b, s) in processed_slices:
-                                prev_slice = s
-                            if s > slice_idx and (b, s) in processed_slices:
-                                next_slice = s
-                                break
-                        
-                        # Interpolate if we have both prev and next
-                        if prev_slice is not None and next_slice is not None:
-                            # Linear interpolation
-                            weight = (slice_idx - prev_slice) / (next_slice - prev_slice)
-                            output_masks[b, :, slice_idx] = (1 - weight) * output_masks[b, :, prev_slice] + weight * output_masks[b, :, next_slice]
-                        # Use nearest if we only have one
-                        elif prev_slice is not None:
-                            output_masks[b, :, slice_idx] = output_masks[b, :, prev_slice]
-                        elif next_slice is not None:
-                            output_masks[b, :, slice_idx] = output_masks[b, :, next_slice]
-                        else:
-                            # Use segmentation head output if no processed slices
-                            output_masks[b, :, slice_idx] = seg_probs[b, :, slice_idx]
+                    # Skip already processed slices
+                    if (b, slice_idx) in processed_slices:
+                        continue
+                    
+                    # Find nearest processed slices
+                    prev_slice = None
+                    next_slice = None
+                    
+                    for s in key_slices:
+                        if s < slice_idx and (b, s) in processed_slices:
+                            prev_slice = s
+                        if s > slice_idx and (b, s) in processed_slices:
+                            next_slice = s
+                            break
+                    
+                    # Interpolate if we have both prev and next
+                    if prev_slice is not None and next_slice is not None:
+                        # Linear interpolation
+                        weight = (slice_idx - prev_slice) / (next_slice - prev_slice)
+                        output_masks[b, :, slice_idx] = (1 - weight) * output_masks[b, :, prev_slice] + weight * output_masks[b, :, next_slice]
+                    # Use nearest if we only have one
+                    elif prev_slice is not None:
+                        output_masks[b, :, slice_idx] = output_masks[b, :, prev_slice]
+                    elif next_slice is not None:
+                        output_masks[b, :, slice_idx] = output_masks[b, :, next_slice]
+                    else:
+                        # Use segmentation head output if no processed slices
+                        output_masks[b, :, slice_idx] = seg_probs[b, :, slice_idx]
             
-            # During training, we need to mix SAM2 results with segmentation head output
-            # to ensure gradient flow while still learning useful embeddings for SAM2
+            # During training, we need to mix SAM2 results with segmentation head
+            # to ensure gradient flow through the network
             if self.training:
-                # Blend SAM2 output with segmentation head output to allow gradient flow
-                # Use 70% SAM2 output and 30% segmentation head
-                blended_output = 0.7 * output_masks + 0.3 * seg_probs
+                # During training, use a blend of SAM2 output and segmentation head
+                # with more weight to SAM2 to guide learning while allowing gradients
+                blend_weight = 0.7
+                blended_output = blend_weight * output_masks + (1 - blend_weight) * seg_probs
                 
-                # Convert back to logits for training with standard loss functions
-                # Add a small epsilon to avoid log(0)
-                epsilon = 1e-6
-                blended_logits = torch.log((blended_output + epsilon) / (1 - blended_output + epsilon))
-                
-                return blended_logits
+                # Return logits for loss computation
+                return torch.log(blended_output + 1e-6)
             else:
-                # During validation, just return the probability maps
+                # During evaluation, return probabilities directly
                 return output_masks
         else:
-            # No SAM2 available, use segmentation head output
+            # If SAM2 not available, return segmentation head output
             print("Warning: SAM2 not available, using segmentation head output only")
             return seg_output
 
