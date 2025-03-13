@@ -582,19 +582,22 @@ class AutoSAM2(nn.Module):
                 # Background is inverse of foreground
                 output_mask[0] = 1 - foreground_mask
                 
-                # Convert probability maps to tensor on same device
-                prob_device = torch.tensor(prob_slice.detach().cpu().numpy(), device=device)
+                # Convert probability maps to tensor on same device if needed
+                if not isinstance(prob_slice, torch.Tensor):
+                    prob_tensor = torch.tensor(prob_slice, device=device)
+                else:
+                    prob_tensor = prob_slice.to(device)
                 
                 # Distribute foreground to classes 1-3 based on probability distribution
                 # First calculate summed probability for all tumor classes
                 tumor_prob_sum = torch.clamp(
-                    prob_device[1] + prob_device[2] + prob_device[3],
+                    prob_tensor[1] + prob_tensor[2] + prob_tensor[3], 
                     min=1e-6
                 )
                 
                 # Then distribute foreground mask based on class probabilities
                 for c in range(1, self.num_classes):
-                    class_weight = prob_device[c] / tumor_prob_sum
+                    class_weight = prob_tensor[c] / tumor_prob_sum
                     output_mask[c] = foreground_mask * class_weight
                 
                 # Apply hierarchical constraints:
@@ -606,12 +609,12 @@ class AutoSAM2(nn.Module):
                 return output_mask
             else:
                 # Return probabilities if SAM2 fails
-                return torch.tensor(prob_slice.detach().cpu().numpy(), device=device)
+                return prob_slice
             
         except Exception as e:
             print(f"Error in SAM2 processing: {e}")
             # Return probabilities if SAM2 fails
-            return torch.tensor(prob_slice.detach().cpu().numpy(), device=device)
+            return prob_slice
     
     def forward(self, x):
         """
@@ -639,16 +642,12 @@ class AutoSAM2(nn.Module):
         # Initialize output tensor
         output_masks = torch.zeros_like(seg_probs)
         
-        # Determine which slices to process with SAM2
-        # Use every 8th slice during training, every 4th during inference
-        slice_stride = 8 if self.training else 4
+        # Determine slice processing stride based on volume depth
+        # This ensures we adapt to the actual volume size
+        slice_stride = min(8, max(depth // 4, 1))  # At least 4 slices, but no more than every 8th
         
-        depth = x.shape[2]
-        key_slices = []
-        for i in range(0, depth, slice_stride):
-            end = min(i + slice_stride, depth)
-            mid = (i + end) // 2
-            key_slices.append(mid)
+        # Generate safe key slice indices - NEVER go out of bounds
+        key_slices = list(range(0, depth, slice_stride))
         
         # Only use SAM2 if it's available
         if self.has_sam2 and self.sam2_predictor is not None:
@@ -659,10 +658,6 @@ class AutoSAM2(nn.Module):
                 # Process key slices with SAM2
                 for slice_idx in key_slices:
                     try:
-                        # Safety check (should be redundant now)
-                        if slice_idx >= depth:
-                            continue
-                            
                         # Get slice data
                         emb_slice = embeddings[b, :, slice_idx].detach().cpu()
                         prob_slice = seg_probs[b, :, slice_idx]
@@ -721,7 +716,7 @@ class AutoSAM2(nn.Module):
                 blended_output = blend_weight * output_masks + (1 - blend_weight) * seg_probs
                 
                 # Return logits for loss computation
-                return torch.log(blended_output + 1e-6)
+                return seg_output  # Return raw logits for proper loss calculation
             else:
                 # During evaluation, return probabilities directly
                 return output_masks
