@@ -643,9 +643,12 @@ class AutoSAM2(nn.Module):
         # Use every 8th slice during training, every 4th during inference
         slice_stride = 8 if self.training else 4
         
-        # IMPORTANT: Make sure slice indices are in bounds
-        max_idx = depth - 1
-        key_slices = [i for i in range(0, depth, slice_stride) if i <= max_idx]
+        depth = x.shape[2]
+        key_slices = []
+        for i in range(0, depth, slice_stride):
+            end = min(i + slice_stride, depth)
+            mid = (i + end) // 2
+            key_slices.append(mid)
         
         # Only use SAM2 if it's available
         if self.has_sam2 and self.sam2_predictor is not None:
