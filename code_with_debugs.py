@@ -452,123 +452,12 @@ class MiniDecoder(nn.Module):
         x = self.tanh(x)
         
         return x
+
 class AutoSAM2(nn.Module):
     """
     AutoSAM2 model for 3D medical image segmentation
     Using SAM2 for both training and validation
     """
-def forward(self, x):
-    """
-    Forward pass with selective slice processing - only 1 in 10 slices
-    """
-    forward_start_time = time.time()
-    
-    batch_size, channels, depth, height, width = x.shape
-    
-    # Only print dimensions in test mode or first batch
-    if not self.training or (hasattr(self, 'first_batch') and not self.first_batch):
-        print(f"Input dimensions: batch_size={batch_size}, channels={channels}, depth={depth}, height={height}, width={width}")
-        if hasattr(self, 'first_batch'):
-            self.first_batch = False
-    
-    # Get features from encoder
-    encoder_start_time = time.time()
-    encoder_features = self.encoder(x)
-    encoder_time = time.time() - encoder_start_time
-    
-    # Get embeddings from mini-decoder
-    decoder_start_time = time.time()
-    embeddings = self.mini_decoder(encoder_features)
-    decoder_time = time.time() - decoder_start_time
-    
-    # Ensure dimensions match for output
-    if embeddings.shape[2:] != x.shape[2:]:
-        embeddings = F.interpolate(
-            embeddings, 
-            size=x.shape[2:],
-            mode='trilinear',
-            align_corners=False
-        )
-    
-    # Generate segmentation outputs using fallback
-    seg_head_start_time = time.time()
-    seg_output = self.seg_head(embeddings)
-    seg_head_time = time.time() - seg_head_start_time
-    
-    # Apply sigmoid to get probabilities - create a new tensor, don't modify in-place
-    output = torch.sigmoid(seg_output.clone())
-    
-    # Process with SAM2 if available - ONLY for selected slices
-    sam_processing_time = 0
-    if self.has_sam2 and self.sam2 is not None:
-        sam_start_time = time.time()
-        
-        # Calculate step size to get approximately 15 slices
-        step = max(1, depth // 15)
-        
-        # Select slices at regular intervals
-        key_slices = list(range(0, depth, step))[:15]  # No more than 15 slices
-        
-        # Only print this info for the first batch
-        if not hasattr(self, 'first_forward_done') or not self.first_forward_done:
-            print(f"Processing {len(key_slices)} out of {depth} slices with step {step}")
-            self.first_forward_done = True
-        
-        # Create a new output tensor to avoid modifying the original one
-        output_with_sam = output.clone()
-        
-        # Process only the selected slices with SAM2
-        for d in key_slices:
-            slice_start_time = time.time()
-            
-            # For each batch item
-            for b in range(batch_size):
-                try:
-                    # Get slice embedding
-                    slice_embedding = embeddings[b, :, d].detach().cpu()
-                    
-                    # Process with SAM2
-                    mask = self._process_with_sam2(slice_embedding, x.device)
-                    
-                    # If SAM2 produced a valid mask
-                    if mask is not None:
-                        # Assign to output - avoid modifying tensors in-place
-                        output_with_sam[b, 1, d] = mask
-                        output_with_sam[b, 0, d] = 1 - mask
-                except Exception as e:
-                    # Only log errors, not routine processing
-                    print(f"Error processing slice {d} with SAM2: {e}")
-            
-        sam_processing_time = time.time() - sam_start_time
-        
-        # Use the SAM-processed output
-        output = output_with_sam
-    
-    # In training mode, mix with fallback to preserve gradient flow
-    if self.training:
-        # Balance between SAM output and fallback
-        alpha = 0.5
-        
-        # Apply sigmoid to segment output for mixing
-        sig_output = torch.sigmoid(seg_output)
-        
-        # Mix outputs while preserving gradients - create a new tensor
-        mixed_output = alpha * output + (1 - alpha) * sig_output
-        
-        # Only print timing information for the first few batches or in verbose mode
-        if not hasattr(self, 'timing_count'):
-            self.timing_count = 0
-        
-        if self.timing_count < 3:  # Only show timing for first 3 batches
-            total_time = time.time() - forward_start_time
-            print(f"Forward pass: {total_time:.2f}s (SAM={sam_processing_time:.2f}s)")
-            self.timing_count += 1
-        
-        return mixed_output
-    else:
-        # In evaluation mode, just return the output
-        return output
-
     def __init__(self, num_classes=4):
         super().__init__()
         
@@ -612,6 +501,7 @@ def forward(self, x):
         self.first_forward_done = False
         self.first_batch = True
         self.timing_count = 0
+    
     def _process_with_sam2(self, features_slice, device):
         """
         Process a single slice with SAM2 using a simple center point prompt
@@ -729,8 +619,6 @@ def forward(self, x):
             
             # Process only the selected slices with SAM2
             for d in key_slices:
-                slice_start_time = time.time()
-                
                 # For each batch item
                 for b in range(batch_size):
                     try:
@@ -748,7 +636,7 @@ def forward(self, x):
                     except Exception as e:
                         # Only log errors, not routine processing
                         print(f"Error processing slice {d} with SAM2: {e}")
-                
+            
             sam_processing_time = time.time() - sam_start_time
             
             # Use the SAM-processed output
@@ -778,7 +666,6 @@ def forward(self, x):
         else:
             # In evaluation mode, just return the output
             return output
-
 
 # Helper function to convert model output to BraTS format if needed
 def convert_to_brats_classes(prediction, threshold=0.5):
@@ -824,6 +711,10 @@ def convert_to_brats_classes(prediction, threshold=0.5):
     brats_output[et > 0.5] = 4       # ET
     
     return brats_output
+
+
+
+
 #train.py - Enhanced version with optimizations
 import os
 import torch
