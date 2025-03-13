@@ -337,12 +337,11 @@ def get_brats_dataloader(root_dir, batch_size=1, train=True, normalize=True, max
 
 
 #model.py
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
-import random
+import time
 
 # Import SAM2 with error handling
 try:
@@ -486,192 +485,81 @@ class AutoSAM2(nn.Module):
             nn.Conv3d(16, num_classes, kernel_size=1)
         )
     
-    def handle_variable_dimensions(self, x):
+    def _process_with_sam2(self, features_slice, device):
         """
-        Handle variable input dimensions that can occur when not resizing data
+        Process a single slice with SAM2 using a simple center point prompt
         
         Args:
-            x: Input tensor [B, C, D, H, W]
+            features_slice: The slice embedding from mini-decoder
+            device: The device to put the output tensor on
         
         Returns:
-            processed tensor, was_padded flag, and padding values
-        """
-        batch_size, channels, depth, height, width = x.shape
-        
-        # Ensure spatial dimensions aren't too small for processing
-        min_spatial_dim = 16  # Minimum dimension for processing
-        
-        # Check if padding is needed
-        needs_padding = depth < min_spatial_dim or height < min_spatial_dim or width < min_spatial_dim
-        
-        if needs_padding:
-            print(f"Warning: Small dimension detected - Depth: {depth}, Height: {height}, Width: {width}")
-            print("Applying padding to ensure minimal dimensions")
-            
-            # Calculate required padding for each dimension
-            pad_depth = max(0, min_spatial_dim - depth)
-            pad_height = max(0, min_spatial_dim - height)
-            pad_width = max(0, min_spatial_dim - width)
-            
-            # Create new tensor with padding
-            if pad_depth > 0 or pad_height > 0 or pad_width > 0:
-                # Set padding for each dimension (left, right, top, bottom, front, back)
-                padding = (
-                    pad_width // 2, pad_width - pad_width // 2,
-                    pad_height // 2, pad_height - pad_height // 2,
-                    pad_depth // 2, pad_depth - pad_depth // 2
-                )
-                
-                # Apply padding
-                padded_x = F.pad(x, padding, mode='constant', value=0)
-                print(f"Padded dimensions: {padded_x.shape}")
-                return padded_x, True, padding
-        
-        # If no padding needed
-        return x, False, None
-    
-    def _convert_features_to_image(self, features_slice):
-        """Convert feature slice to RGB image for SAM2"""
-        # Ensure features_slice is numpy array
-        if torch.is_tensor(features_slice):
-            features_slice = features_slice.detach().cpu().numpy()
-        
-        # Normalize each channel to [0, 255]
-        image = np.zeros_like(features_slice)
-        for c in range(features_slice.shape[0]):
-            channel = features_slice[c]
-            min_val = np.min(channel)
-            max_val = np.max(channel)
-            
-            # Avoid division by zero
-            if max_val > min_val:
-                image[c] = (channel - min_val) / (max_val - min_val) * 255
-        
-        # Convert to [H, W, C] format and uint8 type
-        image = np.transpose(image, (1, 2, 0)).astype(np.uint8)
-        return image
-    
-    def _generate_prompting_points(self, height, width, num_points=5):
-        """
-        Generate multiple prompting points in a grid pattern to improve SAM2 results
-        
-        Args:
-            height: Image height
-            width: Image width
-            num_points: Number of prompt points to generate
-            
-        Returns:
-            Array of point coordinates and labels
-        """
-        points = []
-        labels = []
-        
-        # Center point is always included
-        center_x, center_y = width // 2, height // 2
-        points.append([center_x, center_y])
-        labels.append(1)  # 1 = foreground
-        
-        # If only one point is requested, return just the center
-        if num_points <= 1:
-            return np.array(points), np.array(labels)
-        
-        # Divide image into grid and select additional points
-        grid_size = int(np.ceil(np.sqrt(num_points - 1)))
-        x_step = width // (grid_size + 1)
-        y_step = height // (grid_size + 1)
-        
-        # Create points in grid
-        for i in range(1, grid_size + 1):
-            for j in range(1, grid_size + 1):
-                if len(points) < num_points:
-                    x = j * x_step
-                    y = i * y_step
-                    
-                    # Add some noise to avoid exact grid points
-                    x += random.randint(-x_step//10, x_step//10) if x_step > 10 else 0
-                    y += random.randint(-y_step//10, y_step//10) if y_step > 10 else 0
-                    
-                    # Ensure points are within image boundaries
-                    x = max(0, min(width-1, x))
-                    y = max(0, min(height-1, y))
-                    
-                    points.append([x, y])
-                    labels.append(1)  # 1 = foreground
-        
-        return np.array(points), np.array(labels)
-    
-    def _process_with_sam2(self, slice_embedding, device, num_prompts=5):
-        """
-        Process a single slice with SAM2 using multiple prompt points
-        
-        Args:
-            slice_embedding: Embedding features from the encoder
-            device: Computation device (CPU/GPU)
-            num_prompts: Number of prompt points to use
-        
-        Returns:
-            Binary mask or None if processing failed
+            Binary mask or None if processing fails
         """
         try:
             # Convert to RGB image
-            rgb_image = self._convert_features_to_image(slice_embedding)
-            height, width = rgb_image.shape[:2]
+            if torch.is_tensor(features_slice):
+                features_slice = features_slice.detach().cpu().numpy()
             
-            # Debug print
-            print(f"Processing slice with SAM2, image shape: {rgb_image.shape}")
+            # Normalize to 0-255 for each channel
+            image = np.zeros_like(features_slice)
+            for c in range(features_slice.shape[0]):
+                channel = features_slice[c]
+                min_val = np.min(channel)
+                max_val = np.max(channel)
+                
+                # Avoid division by zero
+                if max_val > min_val:
+                    image[c] = (channel - min_val) / (max_val - min_val) * 255
+            
+            # Convert to [H, W, C] format and uint8 type
+            image = np.transpose(image, (1, 2, 0)).astype(np.uint8)
             
             # Set image in SAM2
-            self.sam2.set_image(rgb_image)
+            height, width = image.shape[:2]
+            self.sam2.set_image(image)
             
-            # Generate prompt points
-            point_coords, point_labels = self._generate_prompting_points(
-                height, width, num_points=num_prompts
-            )
+            # Use center point as prompt
+            center_point = np.array([[width // 2, height // 2]])
             
-            print(f"Using {len(point_coords)} prompt points")
-            
-            # Predict masks
+            # Predict
             masks, scores, _ = self.sam2.predict(
-                point_coords=point_coords,
-                point_labels=point_labels,
+                point_coords=center_point,
+                point_labels=np.array([1]),  # 1 = foreground
                 multimask_output=True
             )
             
             # Get best mask
-            if len(masks) > 0 and len(scores) > 0:
+            if len(masks) > 0:
                 best_idx = np.argmax(scores)
-                print(f"Best mask score: {scores[best_idx]:.4f}")
                 mask = torch.tensor(masks[best_idx], device=device).float()
                 return mask
-            else:
-                print("SAM2 didn't return any masks")
-                return None
-        
+            
+            return None
         except Exception as e:
             print(f"Error in SAM2 processing: {e}")
             return None
     
     def forward(self, x):
         """
-        Forward pass with multi-slice processing
-        
-        Args:
-            x: Input tensor [B, C, D, H, W]
+        Forward pass with selective slice processing - only 1 in 10 slices
         """
-        # Handle variable dimensions
-        x, was_padded, padding = self.handle_variable_dimensions(x)
+        forward_start_time = time.time()
         
         batch_size, channels, depth, height, width = x.shape
+        
+        # Print dimensions for debugging
         print(f"Input dimensions: batch_size={batch_size}, channels={channels}, depth={depth}, height={height}, width={width}")
         
         # Get features from encoder
+        encoder_start_time = time.time()
         encoder_features = self.encoder(x)
+        encoder_time = time.time() - encoder_start_time
         
         # Get embeddings from mini-decoder
+        decoder_start_time = time.time()
         embeddings = self.mini_decoder(encoder_features)
-        
-        # Debug - check embedding dimensions
-        print(f"Embeddings dimensions: {embeddings.shape}")
+        decoder_time = time.time() - decoder_start_time
         
         # Ensure dimensions match for output
         if embeddings.shape[2:] != x.shape[2:]:
@@ -681,33 +569,32 @@ class AutoSAM2(nn.Module):
                 mode='trilinear',
                 align_corners=False
             )
-            print(f"Interpolated embeddings dimensions: {embeddings.shape}")
         
         # Generate segmentation outputs using fallback
+        seg_head_start_time = time.time()
         seg_output = self.seg_head(embeddings)
+        seg_head_time = time.time() - seg_head_start_time
         
-        # Create tensor for final output
-        output = torch.zeros_like(seg_output)
+        # Create tensor for final output - start with sigmoid of seg_output
+        output = torch.sigmoid(seg_output)
         
-        # Process with SAM2 if available
+        # Process with SAM2 if available - ONLY for selected slices
+        sam_processing_time = 0
         if self.has_sam2 and self.sam2 is not None:
-            # Select 15 slices with spacing of approximately 10
-            num_slices = min(15, depth)  # No more than actual depth
+            sam_start_time = time.time()
             
-            if depth < 15:
-                # If fewer than 15 slices, process all of them
-                step = 1
-            else:
-                # Otherwise, set a step to give us about 15 slices
-                step = max(1, depth // 15)
+            # Calculate step size to get approximately 15 slices
+            step = max(1, depth // 15)
             
-            # Calculate the list of slices to process
-            key_slices = list(range(0, depth, step))[:num_slices]
+            # Select slices at regular intervals
+            key_slices = list(range(0, depth, step))[:15]  # No more than 15 slices
             
-            print(f"Processing {len(key_slices)} slices with step {step}: {key_slices}")
+            print(f"Processing {len(key_slices)} out of {depth} slices with step {step}")
             
-            # Process each selected slice
-            for d_idx, d in enumerate(key_slices):
+            # Process only the selected slices with SAM2
+            for d in key_slices:
+                slice_start_time = time.time()
+                
                 # For each batch item
                 for b in range(batch_size):
                     try:
@@ -715,106 +602,25 @@ class AutoSAM2(nn.Module):
                         slice_embedding = embeddings[b, :, d].detach().cpu()
                         
                         # Process with SAM2
-                        mask = self._process_with_sam2(slice_embedding, x.device, num_prompts=5)
+                        mask = self._process_with_sam2(slice_embedding, x.device)
                         
                         # If SAM2 produced a valid mask
                         if mask is not None:
                             # Assign to output
                             output[b, 1, d] = mask
                             output[b, 0, d] = 1 - mask
-                        else:
-                            # Use fallback segmentation for this slice
-                            output[b, :, d] = torch.sigmoid(seg_output[b, :, d])
                     except Exception as e:
                         print(f"Error processing slice {d} with SAM2: {e}")
-                        # Use fallback segmentation for this slice
-                        output[b, :, d] = torch.sigmoid(seg_output[b, :, d])
-            
-            # Process unprocessed slices - linear interpolation
-            print("Filling in non-processed slices...")
-            
-            # For each batch item
-            for b in range(batch_size):
-                # For each class
-                for c in range(self.num_classes):
-                    # Interpolate for other slices
-                    for d in range(depth):
-                        if d not in key_slices:
-                            # Find closest processed slices
-                            processed_slices = np.array(key_slices)
-                            distances = np.abs(processed_slices - d)
-                            closest_idx = np.argmin(distances)
-                            
-                            # If before first or after last slice, copy nearest
-                            if d < key_slices[0] or d > key_slices[-1]:
-                                nearest_slice = key_slices[closest_idx]
-                                output[b, c, d] = output[b, c, nearest_slice]
-                            else:
-                                # Otherwise, interpolate between two nearest slices
-                                # Find previous and next slice
-                                prev_slice_idx = np.max(np.where(processed_slices <= d)[0])
-                                next_slice_idx = np.min(np.where(processed_slices >= d)[0])
-                                
-                                if prev_slice_idx == next_slice_idx:  # If same slice
-                                    output[b, c, d] = output[b, c, key_slices[prev_slice_idx]]
-                                else:
-                                    # Linear interpolation
-                                    prev_slice = key_slices[prev_slice_idx]
-                                    next_slice = key_slices[next_slice_idx]
-                                    
-                                    weight_next = (d - prev_slice) / (next_slice - prev_slice)
-                                    weight_prev = 1.0 - weight_next
-                                    
-                                    output[b, c, d] = (
-                                        weight_prev * output[b, c, prev_slice] + 
-                                        weight_next * output[b, c, next_slice]
-                                    )
-            
-            print("Finished processing all slices")
-        else:
-            # No SAM2 available, use fallback for all slices
-            output = torch.sigmoid(seg_output)
-        
-        # Debug - check output dimensions
-        print(f"Output dimensions: {output.shape}")
-        
-        # If we padded the input, remove padding from output
-        if was_padded:
-            print("Removing padding from output")
-            # Calculate original dimensions (before padding)
-            orig_depth = depth - (padding[4] + padding[5])
-            orig_height = height - (padding[2] + padding[3])
-            orig_width = width - (padding[0] + padding[1])
-            
-            # In training mode
-            if self.training:
-                # Use a gradual blending factor
-                alpha = 0.5  # Balance between SAM output and fallback
                 
-                # Apply sigmoid to segment output for mixing
-                sig_output = torch.sigmoid(seg_output)
-                
-                # Mix outputs while preserving gradients
-                mixed_output = alpha * output + (1 - alpha) * sig_output
-                
-                # Crop to original size
-                mixed_output = mixed_output[:, :, 
-                               padding[4]:padding[4]+orig_depth,
-                               padding[2]:padding[2]+orig_height,
-                               padding[0]:padding[0]+orig_width]
-                return mixed_output
-            else:
-                # Crop to original size
-                output = output[:, :, 
-                         padding[4]:padding[4]+orig_depth,
-                         padding[2]:padding[2]+orig_height,
-                         padding[0]:padding[0]+orig_width]
-                return output
+                slice_time = time.time() - slice_start_time
+                print(f"  Slice {d} processed in {slice_time:.4f}s")
+            
+            sam_processing_time = time.time() - sam_start_time
         
-        # If not padded
+        # In training mode, mix with fallback to preserve gradient flow
         if self.training:
-            # Use a gradual blending factor
-            alpha = 0.5  # Balance between SAM output and fallback
+            # Balance between SAM output and fallback
+            alpha = 0.5
             
             # Apply sigmoid to segment output for mixing
             sig_output = torch.sigmoid(seg_output)
@@ -822,12 +628,20 @@ class AutoSAM2(nn.Module):
             # Mix outputs while preserving gradients
             mixed_output = alpha * output + (1 - alpha) * sig_output
             
+            total_time = time.time() - forward_start_time
+            print(f"Forward pass timing: Total={total_time:.4f}s, Encoder={encoder_time:.4f}s, "
+                  f"Decoder={decoder_time:.4f}s, SegHead={seg_head_time:.4f}s, SAM={sam_processing_time:.4f}s")
+            
             return mixed_output
         else:
             # In evaluation mode, just return the output
+            total_time = time.time() - forward_start_time
+            print(f"Forward pass timing: Total={total_time:.4f}s, Encoder={encoder_time:.4f}s, "
+                  f"Decoder={decoder_time:.4f}s, SegHead={seg_head_time:.4f}s, SAM={sam_processing_time:.4f}s")
+            
             return output
 
-# Function to convert model output to BraTS format
+# Helper function to convert model output to BraTS format if needed
 def convert_to_brats_classes(prediction, threshold=0.5):
     """
     Convert binary tumor prediction to BraTS multi-class format
@@ -871,7 +685,6 @@ def convert_to_brats_classes(prediction, threshold=0.5):
     brats_output[et > 0.5] = 4       # ET
     
     return brats_output
-
 #train.py - Enhanced version with optimizations
 import os
 import torch
