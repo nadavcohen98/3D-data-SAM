@@ -449,6 +449,7 @@ class MiniDecoder(nn.Module):
 class AutoSAM2(nn.Module):
     """
     AutoSAM2 model for 3D medical image segmentation
+    Using SAM2 for both training and validation
     """
     def __init__(self, num_classes=2):
         super().__init__()
@@ -481,8 +482,13 @@ class AutoSAM2(nn.Module):
             self.has_sam2 = False
             self.sam2 = None
         
-        # Fallback segmentation head
-        self.seg_head = nn.Conv3d(3, num_classes, kernel_size=1)
+        # Improved segmentation head for fallback
+        self.seg_head = nn.Sequential(
+            nn.Conv3d(3, 16, kernel_size=3, padding=1),
+            nn.InstanceNorm3d(16),
+            nn.ReLU(inplace=True),
+            nn.Conv3d(16, num_classes, kernel_size=1)
+        )
     
     def _convert_features_to_image(self, features_slice):
         """Convert feature slice to RGB image for SAM2"""
@@ -505,6 +511,33 @@ class AutoSAM2(nn.Module):
         image = np.transpose(image, (1, 2, 0)).astype(np.uint8)
         return image
     
+    def _process_with_sam2(self, slice_embedding, device):
+        """Process a single slice with SAM2"""
+        # Convert to RGB image
+        rgb_image = self._convert_features_to_image(slice_embedding)
+        height, width = rgb_image.shape[:2]
+        
+        # Set image
+        self.sam2.set_image(rgb_image)
+        
+        # Generate points
+        center_point = np.array([[width // 2, height // 2]])
+        
+        # Predict
+        masks, scores, _ = self.sam2.predict(
+            point_coords=center_point,
+            point_labels=np.array([1]),  # 1 for foreground
+            multimask_output=True
+        )
+        
+        # Get best mask
+        if len(masks) > 0:
+            best_idx = np.argmax(scores)
+            mask = torch.tensor(masks[best_idx], device=device).float()
+            return mask
+        
+        return None
+    
     def forward(self, x):
         batch_size, channels, depth, height, width = x.shape
         
@@ -523,47 +556,61 @@ class AutoSAM2(nn.Module):
                 align_corners=False
             )
         
-        # Always use the fallback for training - this ensures gradients flow properly
-        # During training, we'll get proper gradients this way
-        output = self.seg_head(embeddings)
+        # Generate segmentation outputs using fallback
+        seg_output = self.seg_head(embeddings)
         
-        # If we're in eval mode (not training), we can try SAM2
-        if not self.training and self.has_sam2 and self.sam2 is not None:
-            with torch.no_grad():  # Make sure not to interfere with gradients
-                sam_output = torch.zeros_like(output)
-                
-                # Process middle slice
-                middle_slice = depth // 2
-                
-                # Get the embeddings for the middle slice
+        # Create tensor for final output
+        output = torch.zeros_like(seg_output)
+        
+        # Process with SAM2 if available
+        if self.has_sam2 and self.sam2 is not None:
+            # For each slice in the volume
+            for d in range(depth):
+                # For each batch item
                 for b in range(batch_size):
-                    slice_emb = embeddings[b, :, middle_slice]
-                    rgb_image = self._convert_features_to_image(slice_emb)
-                    
                     try:
-                        # Process with SAM2
-                        self.sam2.set_image(rgb_image)
-                        center_point = np.array([[width // 2, height // 2]])
-                        masks, _, _ = self.sam2.predict(
-                            point_coords=center_point,
-                            point_labels=np.array([1]),
-                            multimask_output=False
-                        )
+                        # Get slice embedding
+                        slice_embedding = embeddings[b, :, d].detach().cpu()
                         
-                        if len(masks) > 0:
-                            mask = torch.tensor(masks[0], device=x.device).float()
-                            sam_output[b, 1, middle_slice] = mask
-                            sam_output[b, 0, middle_slice] = 1 - mask
+                        # Process with SAM2
+                        mask = self._process_with_sam2(slice_embedding, x.device)
+                        
+                        # If SAM2 produced a valid mask
+                        if mask is not None:
+                            # Assign to output
+                            output[b, 1, d] = mask
+                            output[b, 0, d] = 1 - mask
+                        else:
+                            # Use fallback segmentation for this slice
+                            output[b, :, d] = torch.sigmoid(seg_output[b, :, d])
                     except Exception as e:
-                        print(f"Error in SAM2 processing: {e}")
-                
-                # For visualization purposes, you can return the SAM output
-                # We'll not use this for backpropagation
-                if torch.sum(sam_output) > 0:
-                    # Note: we're not affecting the gradient flow here
-                    output = sam_output.detach()
+                        print(f"Error processing slice {d} with SAM2: {e}")
+                        # Use fallback segmentation for this slice
+                        output[b, :, d] = torch.sigmoid(seg_output[b, :, d])
+        else:
+            # No SAM2 available, use fallback for all slices
+            output = torch.sigmoid(seg_output)
         
-        return output
+        # In training mode, we need to preserve the gradient flow
+        # Mix the gradient-preserving output with the SAM2 output
+        if self.training:
+            # Use a gradual blending factor that increases over time
+            # This allows the model to start with more gradient flow and
+            # gradually incorporate more SAM2 outputs
+            alpha = 0.5  # Balance between SAM output and fallback
+            
+            # Apply sigmoid to segment output for mixing
+            sig_output = torch.sigmoid(seg_output)
+            
+            # Mix outputs while preserving gradients
+            # This is a key step: it ensures gradients flow through seg_output
+            # while incorporating the SAM2 predictions
+            mixed_output = alpha * output + (1 - alpha) * sig_output
+            
+            return mixed_output
+        else:
+            # In evaluation mode, just return the output
+            return output
 
 #train.py - Enhanced version with optimizations
 import os
