@@ -743,6 +743,7 @@ class AutoSAM2(nn.Module):
         # Use every 8th slice during training to save time, every 4th during inference
         slice_stride = 8 if self.training else 4
         key_slices = list(range(0, depth, slice_stride))
+        key_slices = [s for s in key_slices if s < depth]
         
         # Only use SAM2 if it's available
         if self.has_sam2 and self.sam2_predictor is not None:
