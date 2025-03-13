@@ -1336,7 +1336,7 @@ def train_model(data_path, batch_size=1, epochs=20, learning_rate=1e-3,
         
         # Train
         train_loss, train_metrics = train_epoch(model, train_loader, optimizer, criterion, device, epoch, scheduler)
-    print(f"DEBUG: Train loss: {train_loss}, Train Dice: {train_metrics.get('mean_dice', 0.0)}")
+        print(f"DEBUG: Train loss: {train_loss}, Train Dice: {train_metrics.get('mean_dice', 0.0)}")
         
         # Update history
         history['train_loss'].append(train_loss)
