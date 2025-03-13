@@ -523,53 +523,45 @@ class AutoSAM2(nn.Module):
                 align_corners=False
             )
         
-        # If SAM2 is not available, use fallback
-        if not self.has_sam2 or self.sam2 is None:
-            return self.seg_head(embeddings)
+        # Always use the fallback for training - this ensures gradients flow properly
+        # During training, we'll get proper gradients this way
+        output = self.seg_head(embeddings)
         
-        # For a simple first implementation, just process middle slice
-        middle_slice = depth // 2
-        
-        # Initialize output tensor
-        output = torch.zeros((batch_size, self.num_classes, depth, height, width), 
-                            device=x.device)
-        
-        # Process each batch item
-        for b in range(batch_size):
-            # Get middle slice embeddings
-            slice_emb = embeddings[b, :, middle_slice]
-            
-            # Convert to RGB image for SAM2
-            rgb_image = self._convert_features_to_image(slice_emb)
-            
-            try:
-                # Set image in SAM2
-                self.sam2.set_image(rgb_image)
+        # If we're in eval mode (not training), we can try SAM2
+        if not self.training and self.has_sam2 and self.sam2 is not None:
+            with torch.no_grad():  # Make sure not to interfere with gradients
+                sam_output = torch.zeros_like(output)
                 
-                # Use center point as prompt
-                center_point = np.array([[width // 2, height // 2]])
+                # Process middle slice
+                middle_slice = depth // 2
                 
-                # Get prediction from SAM2
-                masks, _, _ = self.sam2.predict(
-                    point_coords=center_point,
-                    point_labels=np.array([1]),  # 1 for foreground
-                    multimask_output=False
-                )
-                
-                # Convert mask to tensor
-                if len(masks) > 0:
-                    mask = torch.tensor(masks[0], device=x.device).float()
+                # Get the embeddings for the middle slice
+                for b in range(batch_size):
+                    slice_emb = embeddings[b, :, middle_slice]
+                    rgb_image = self._convert_features_to_image(slice_emb)
                     
-                    # Add to output tensor
-                    output[b, 1, middle_slice] = mask  # Tumor class
-                    output[b, 0, middle_slice] = 1 - mask  # Background class
-            
-            except Exception as e:
-                print(f"Error in SAM2 processing: {e}")
-                # Use fallback for this slice
-                slice_pred = self.seg_head(embeddings[b:b+1, :, middle_slice:middle_slice+1])
-                slice_pred = torch.sigmoid(slice_pred).squeeze(2)
-                output[b, :, middle_slice] = slice_pred
+                    try:
+                        # Process with SAM2
+                        self.sam2.set_image(rgb_image)
+                        center_point = np.array([[width // 2, height // 2]])
+                        masks, _, _ = self.sam2.predict(
+                            point_coords=center_point,
+                            point_labels=np.array([1]),
+                            multimask_output=False
+                        )
+                        
+                        if len(masks) > 0:
+                            mask = torch.tensor(masks[0], device=x.device).float()
+                            sam_output[b, 1, middle_slice] = mask
+                            sam_output[b, 0, middle_slice] = 1 - mask
+                    except Exception as e:
+                        print(f"Error in SAM2 processing: {e}")
+                
+                # For visualization purposes, you can return the SAM output
+                # We'll not use this for backpropagation
+                if torch.sum(sam_output) > 0:
+                    # Note: we're not affecting the gradient flow here
+                    output = sam_output.detach()
         
         return output
 
