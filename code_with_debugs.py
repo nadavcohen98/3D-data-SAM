@@ -93,8 +93,8 @@ class BraTSDataset(Dataset):
         self.cache_data = cache_data
         self.verbose = verbose
     
-    # Cache for faster data loading
-    self.data_cache = {} if cache_data else None
+        # Cache for faster data loading
+        self.data_cache = {} if cache_data else None
         
         # Cache for faster data loading
         self.data_cache = {} if cache_data else None
