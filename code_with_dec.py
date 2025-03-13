@@ -587,6 +587,9 @@ import time
 from datetime import datetime, timedelta
 import random
 import torch.nn.functional as F
+import torch.serialization
+
+torch.serialization.add_safe_globals([np.core.multiarray.scalar])
 
 
 def calculate_dice_score(y_pred, y_true):
@@ -1125,7 +1128,7 @@ def train_model(data_path, batch_size=1, epochs=20, learning_rate=1e-3,
     if os.path.exists(model_path) and not reset:
         print(f"Found existing model checkpoint at {model_path}, loading...")
         try:
-            checkpoint = torch.load(model_path, map_location=device)
+            checkpoint = torch.load(model_path, map_location=device, weights_only=False)
             model.load_state_dict(checkpoint['model_state_dict'])
             start_epoch = checkpoint['epoch'] + 1
             best_dice = checkpoint.get('best_dice', 0.0)
