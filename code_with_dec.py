@@ -538,79 +538,43 @@ class AutoSAM2(nn.Module):
         
         return None
     
-    def forward(self, x):
-        batch_size, channels, depth, height, width = x.shape
-        
-        # Get features from encoder
-        encoder_features = self.encoder(x)
-        
-        # Get embeddings from mini-decoder
-        embeddings = self.mini_decoder(encoder_features)
-        
-        # Ensure dimensions match for output
-        if embeddings.shape[2:] != x.shape[2:]:
-            embeddings = F.interpolate(
-                embeddings, 
-                size=x.shape[2:],
-                mode='trilinear',
-                align_corners=False
+def forward(self, x, visualize=False):
+    batch_size, channels, depth, height, width = x.shape
+    
+    # Run encoder to get features and probability maps
+    encoder_output = self.encoder(x)
+    encoder_features = encoder_output['features']
+    prob_maps = encoder_output['prob_maps']
+    
+    # Resize probability maps to match input dimensions
+    resized_prob_maps = F.interpolate(
+        prob_maps, 
+        size=(depth, height, width),
+        mode='trilinear', 
+        align_corners=False
+    )
+    
+    # Initialize output tensor
+    output_masks = torch.zeros_like(resized_prob_maps)
+    
+    # Determine which slices to process
+    slice_stride = 8 if self.training else 4  # Every 8th during training, every 4th during eval
+    key_slices = list(range(0, depth, slice_stride))
+    
+    # Process selected slices with SAM2
+    for slice_idx in key_slices:
+        if slice_idx < depth:  # Safety check
+            slice_masks = self.process_slice_with_sam2(
+                x, resized_prob_maps, encoder_features, slice_idx
             )
-        
-        # Generate segmentation outputs using fallback
-        seg_output = self.seg_head(embeddings)
-        
-        # Create tensor for final output
-        output = torch.zeros_like(seg_output)
-        
-        # Process with SAM2 if available
-        if self.has_sam2 and self.sam2 is not None:
-            # For each slice in the volume
-            for d in range(depth):
-                # For each batch item
-                for b in range(batch_size):
-                    try:
-                        # Get slice embedding
-                        slice_embedding = embeddings[b, :, d].detach().cpu()
-                        
-                        # Process with SAM2
-                        mask = self._process_with_sam2(slice_embedding, x.device)
-                        
-                        # If SAM2 produced a valid mask
-                        if mask is not None:
-                            # Assign to output
-                            output[b, 1, d] = mask
-                            output[b, 0, d] = 1 - mask
-                        else:
-                            # Use fallback segmentation for this slice
-                            output[b, :, d] = torch.sigmoid(seg_output[b, :, d])
-                    except Exception as e:
-                        print(f"Error processing slice {d} with SAM2: {e}")
-                        # Use fallback segmentation for this slice
-                        output[b, :, d] = torch.sigmoid(seg_output[b, :, d])
-        else:
-            # No SAM2 available, use fallback for all slices
-            output = torch.sigmoid(seg_output)
-        
-        # In training mode, we need to preserve the gradient flow
-        # Mix the gradient-preserving output with the SAM2 output
-        if self.training:
-            # Use a gradual blending factor that increases over time
-            # This allows the model to start with more gradient flow and
-            # gradually incorporate more SAM2 outputs
-            alpha = 0.5  # Balance between SAM output and fallback
-            
-            # Apply sigmoid to segment output for mixing
-            sig_output = torch.sigmoid(seg_output)
-            
-            # Mix outputs while preserving gradients
-            # This is a key step: it ensures gradients flow through seg_output
-            # while incorporating the SAM2 predictions
-            mixed_output = alpha * output + (1 - alpha) * sig_output
-            
-            return mixed_output
-        else:
-            # In evaluation mode, just return the output
-            return output
+            output_masks[:, :, slice_idx] = slice_masks
+    
+    # For remaining slices, use the encoder's probability maps
+    for z in range(depth):
+        if z not in key_slices:
+            output_masks[:, :, z] = resized_prob_maps[:, :, z]
+    
+    return output_masks
 
 #train.py - Enhanced version with optimizations
 import os
