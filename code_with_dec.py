@@ -731,8 +731,555 @@ class MulticlassPointPromptGenerator:
                 # Resize probability map to match height and width if needed
                 if class_prob.shape[0] != height or class_prob.shape[1] != width:
                     from scipy.ndimage import zoom
-                    h_factor = hei
+                    h_factor = height / class_prob.shape[0]
+                    w_factor = width / class_prob.shape[1]
+                    class_prob = zoom(class_prob, (h_factor, w_factor), order=1)
+                
+                # Find regions above threshold
+                high_prob_mask = class_prob > threshold
+                
+                # If we found high probability regions
+                if np.any(high_prob_mask):
+                    # Label connected components
+                    labeled_mask, num_features = ndimage.label(high_prob_mask)
+                    
+                    # Sort components by size
+                    sizes = ndimage.sum(high_prob_mask, labeled_mask, range(1, num_features+1))
+                    sorted_indices = np.argsort(-sizes)  # Descending order
+                    
+                    # Take up to the specified number of largest components
+                    num_components = min(self.num_points_per_class, num_features)
+                    points_added = 0
+                    
+                    for i in range(num_components):
+                        component_idx = sorted_indices[i] + 1
+                        component_mask = labeled_mask == component_idx
+                        
+                        # Find center of mass of the component
+                        cy, cx = ndimage.center_of_mass(component_mask)
+                        
+                        # Add point to the list
+                        batch_points.append([int(cx), int(cy)])
+                        batch_labels.append(c)  # Use class as label
+                        points_added += 1
+                    
+                    # If we didn't add enough points, add additional points from the same component
+                    if points_added < self.num_points_per_class and num_features > 0:
+                        largest_component = labeled_mask == (sorted_indices[0] + 1)
+                        
+                        # Find additional points within the largest component
+                        y_indices, x_indices = np.where(largest_component)
+                        
+                        # If we have enough points
+                        if len(y_indices) > 0:
+                            # Randomly select additional points
+                            remaining = self.num_points_per_class - points_added
+                            indices = np.random.choice(len(y_indices), 
+                                                      min(remaining, len(y_indices)), 
+                                                      replace=False)
+                            
+                            for idx in indices:
+                                batch_points.append([int(x_indices[idx]), int(y_indices[idx])])
+                                batch_labels.append(c)
+            
+            # Add background points (class 0)
+            # Add points near the edges of the image
+            edge_points = [
+                [width//4, height//4],
+                [3*width//4, height//4],
+                [width//4, 3*height//4],
+                [3*width//4, 3*height//4]
+            ]
+            
+            for point in edge_points:
+                batch_points.append(point)
+                batch_labels.append(0)  # Background class
+            
+            # Convert to numpy arrays
+            all_points.append(np.array(batch_points))
+            all_labels.append(np.array(batch_labels))
+        
+        return all_points, all_labels
 
+class SAM2TumorSegmenter:
+    """
+    Uses SAM2 to segment tumors from rich 2D slices with multi-class support
+    """
+    def __init__(self, sam2_predictor, num_classes=4):
+        self.sam2_predictor = sam2_predictor
+        self.num_classes = num_classes
+        
+    def segment_slice(self, rich_slice, point_coords, point_labels, bounding_boxes=None):
+        """
+        Segment tumor in a rich 2D slice using SAM2
+        
+        Args:
+            rich_slice: Rich 2D representation [H, W, 3]
+            point_coords: Point prompts [N, 2]
+            point_labels: Point labels [N]
+            bounding_boxes: Optional bounding boxes
+            
+        Returns:
+            Multi-class segmentation mask
+        """
+        height, width = rich_slice.shape[:2]
+        
+        # Initialize multi-class mask
+        multi_class_mask = np.zeros((self.num_classes, height, width), dtype=np.float32)
+        
+        # Process each class separately
+        for c in range(1, self.num_classes):
+            # Get points for this class
+            class_indices = np.where(point_labels == c)[0]
+            
+            # Skip if no points for this class
+            if len(class_indices) == 0:
+                continue
+            
+            # Extract points for this class
+            class_points = point_coords[class_indices]
+            class_point_labels = np.ones(len(class_points))  # All foreground
+            
+            # Also add some background points
+            background_indices = np.where(point_labels == 0)[0]
+            
+            if len(background_indices) > 0:
+                bg_points = point_coords[background_indices]
+                
+                # Combine foreground and background points
+                combined_points = np.vstack([class_points, bg_points])
+                combined_labels = np.concatenate([class_point_labels, 
+                                               np.zeros(len(bg_points))])
+            else:
+                combined_points = class_points
+                combined_labels = class_point_labels
+            
+            # Set image in SAM2 predictor
+            try:
+                self.sam2_predictor.set_image(rich_slice)
+                
+                # Get bounding box for this class if available
+                box = None
+                if bounding_boxes is not None and c-1 < len(bounding_boxes) and bounding_boxes[c-1] is not None:
+                    # Extract 2D box from 3D box
+                    box_info = bounding_boxes[c-1]
+                    box = np.array([
+                        box_info['x_min'], box_info['y_min'], 
+                        box_info['x_max'], box_info['y_max']
+                    ])
+                
+                # Get SAM2 prediction
+                masks, scores, _ = self.sam2_predictor.predict(
+                    point_coords=combined_points,
+                    point_labels=combined_labels,
+                    box=box,
+                    multimask_output=True
+                )
+                
+                # Get best mask
+                if len(scores) > 0:
+                    best_idx = np.argmax(scores)
+                    class_mask = masks[best_idx].astype(np.float32)
+                    
+                    # Store in multi-class mask
+                    multi_class_mask[c] = class_mask
+            
+            except Exception as e:
+                print(f"Error in SAM2 segmentation for class {c}: {e}")
+        
+        # Resolve overlaps between classes
+        # Priority: Enhancing tumor (3) > Non-enhancing tumor (2) > Edema (1)
+        for y in range(height):
+            for x in range(width):
+                if multi_class_mask[3, y, x] > 0.5:  # Enhancing tumor
+                    multi_class_mask[1, y, x] = 0
+                    multi_class_mask[2, y, x] = 0
+                elif multi_class_mask[2, y, x] > 0.5:  # Non-enhancing tumor
+                    multi_class_mask[1, y, x] = 0
+        
+        return multi_class_mask
+
+class AutoSAM2(nn.Module):
+    """
+    Implementation of AutoSAM2 for multi-class 3D medical image segmentation
+    Enhanced with improved feature transfer from encoder to SAM2
+    Processing every Nth slice for better performance
+    """
+    def __init__(self, num_classes=4):
+        super().__init__()
+        
+        # Store configuration
+        self.num_classes = num_classes
+        
+        # Create 3D encoder with reduced downsampling
+        self.encoder = MultiscaleEncoder(in_channels=4, base_channels=16, num_classes=num_classes)
+        
+        # Create enhanced rich slice generator that uses multi-level features
+        self.slice_generator = EnhancedRichSliceGenerator(prob_map_weight=0.5)
+        
+        # Create bounding box generator
+        self.bbox_generator = TumorBoundingBoxGenerator()
+        
+        # Create point prompt generator
+        self.prompt_generator = MulticlassPointPromptGenerator()
+        
+        # Initialize SAM2 model from Hugging Face
+        try:
+            print(f"Loading SAM2 from Hugging Face...")
+            self.sam2_predictor = SAM2ImagePredictor.from_pretrained("facebook/sam2-hiera-large")
+            
+            # Freeze weights
+            for param in self.sam2_predictor.model.parameters():
+                param.requires_grad = False
+            
+            # Create tumor segmenter
+            self.segmenter = SAM2TumorSegmenter(self.sam2_predictor, num_classes=num_classes)
+            
+            print("Initialized SAM2 model successfully")
+        except Exception as e:
+            print(f"Error loading SAM2 model: {e}")
+            raise RuntimeError(f"Failed to initialize SAM2: {e}")
+    
+    def process_slice_with_sam2(self, volume, prob_maps, encoder_features, slice_idx):
+        """
+        Process a single slice using the complete AutoSAM2 pipeline
+        
+        Args:
+            volume: Input volume [B, C, D, H, W]
+            prob_maps: Probability maps [B, num_classes, D, H, W]
+            encoder_features: List of feature maps from encoder
+            slice_idx: Index of slice to process
+            
+        Returns:
+            Segmentation masks for the slice [B, num_classes, H, W]
+        """
+        batch_size, _, depth, height, width = volume.shape
+        
+        # Generate rich 2D representation using multi-level features
+        rich_slices = self.slice_generator.generate_rich_slice(
+            volume, slice_idx, prob_maps, encoder_features
+        )
+        
+        # Generate bounding boxes from probability maps
+        boxes = self.bbox_generator.get_bounding_boxes(prob_maps)
+        
+        # Generate point prompts
+        points, labels = self.prompt_generator.generate_prompts(
+            prob_maps, slice_idx, height, width
+        )
+        
+        # Process each slice with SAM2
+        result_masks = []
+        
+        for b in range(batch_size):
+            # Process slice
+            mask = self.segmenter.segment_slice(
+                rich_slices[b], 
+                points[b], 
+                labels[b], 
+                boxes[b] if b < len(boxes) else None
+            )
+            
+            # Convert to tensor
+            mask_tensor = torch.tensor(mask, device=volume.device)
+            result_masks.append(mask_tensor)
+        
+        # Stack results
+        stacked_masks = torch.stack(result_masks) if result_masks else torch.zeros(
+            (batch_size, self.num_classes, height, width), 
+            device=volume.device
+        )
+        
+        return stacked_masks
+        
+    def forward(self, x, visualize=False):
+        """
+        Forward pass through AutoSAM2 with enhanced feature transfer
+        Processing every 8th slice for better performance
+        
+        Args:
+            x: Input volume [B, C, D, H, W]
+            visualize: Whether to visualize results
+            
+        Returns:
+            Multi-class segmentation masks [B, num_classes, D, H, W]
+        """
+        batch_size, channels, depth, height, width = x.shape
+        
+        # Run encoder to get features and probability maps
+        encoder_output = self.encoder(x)
+        encoder_features = encoder_output['features']  # [enc1, enc2, enc3, bottleneck]
+        prob_maps = encoder_output['prob_maps']
+        
+        # Resize probability maps to match input dimensions
+        resized_prob_maps = F.interpolate(
+            prob_maps, 
+            size=(depth, height, width),
+            mode='trilinear', 
+            align_corners=False
+        )
+        
+        # Initialize output tensor
+        output_masks = torch.zeros_like(resized_prob_maps)
+        
+        # Determine which slices to process with SAM2
+        # Process every 8th slice during training, every 4th during evaluation
+        slice_stride = 8 if self.training else 4
+        key_slices = list(range(0, depth, slice_stride))
+        
+        # Process specified slices with SAM2
+        for slice_idx in key_slices:
+            if slice_idx < depth:  # Safety check
+                # Process the slice with SAM2 using multi-level features
+                slice_masks = self.process_slice_with_sam2(
+                    x, resized_prob_maps, encoder_features, slice_idx
+                )
+                
+                # Add the processed slice to the output volume
+                output_masks[:, :, slice_idx] = slice_masks
+        
+        # Fill in other slices with interpolation between SAM2-processed slices
+        # This provides smoother transitions between slices
+        for z in range(depth):
+            if z in key_slices:
+                continue  # Skip already processed slices
+                
+            # Find the nearest processed slices (before and after)
+            prev_z = max([s for s in key_slices if s < z], default=None)
+            next_z = min([s for s in key_slices if s > z], default=None)
+            
+            # If we have both before and after slices, interpolate
+            if prev_z is not None and next_z is not None:
+                # Calculate weights for interpolation
+                total_dist = next_z - prev_z
+                weight_next = (z - prev_z) / total_dist
+                weight_prev = (next_z - z) / total_dist
+                
+                # Linear interpolation between the two processed slices
+                output_masks[:, :, z] = (
+                    weight_prev * output_masks[:, :, prev_z] + 
+                    weight_next * output_masks[:, :, next_z]
+                )
+            # If we only have a previous slice, copy it
+            elif prev_z is not None:
+                output_masks[:, :, z] = output_masks[:, :, prev_z]
+            # If we only have a next slice, copy it
+            elif next_z is not None:
+                output_masks[:, :, z] = output_masks[:, :, next_z]
+            # If neither is available (shouldn't happen with our slice scheme)
+            else:
+                # Use the encoder's prediction as fallback
+                output_masks[:, :, z] = resized_prob_maps[:, :, z]
+                
+        # Fuse SAM2 results with encoder predictions for better consistency
+        # Weight SAM2 results more heavily, but incorporate encoder probabilities
+        # to maintain 3D consistency
+        alpha = 0.7  # Weight for SAM2 results
+        final_masks = alpha * output_masks + (1 - alpha) * resized_prob_maps
+        
+        # Apply post-processing to ensure anatomical consistency
+        if not self.training:
+            final_masks = self.apply_post_processing(final_masks)
+        
+        # For visualization during development/debugging
+        if visualize and not self.training:
+            self.visualize_results(x, final_masks, key_slices)
+            
+        return final_masks
+    
+    def apply_post_processing(self, masks):
+        """
+        Apply post-processing to ensure anatomical consistency
+        
+        Args:
+            masks: Predicted masks [B, C, D, H, W]
+            
+        Returns:
+            Post-processed masks
+        """
+        batch_size, num_classes, depth, height, width = masks.shape
+        processed_masks = masks.clone()
+        
+        # Process each batch separately
+        for b in range(batch_size):
+            # 1. Apply 3D connected component analysis to remove small isolated predictions
+            for c in range(1, num_classes):
+                # Convert to numpy for connected component analysis
+                mask_np = (masks[b, c] > 0.5).cpu().numpy()
+                
+                # Skip if no positive predictions
+                if not np.any(mask_np):
+                    continue
+                
+                # Label connected components
+                labeled, num_components = ndimage.label(mask_np)
+                
+                if num_components > 0:
+                    # Calculate component sizes
+                    component_sizes = ndimage.sum(mask_np, labeled, range(1, num_components + 1))
+                    
+                    # Keep only the largest component if we have multiple
+                    if num_components > 1:
+                        # Find size threshold (keep components larger than 5% of largest)
+                        max_size = np.max(component_sizes)
+                        size_threshold = max_size * 0.05
+                        
+                        # Create mask of components to keep
+                        keep_mask = np.zeros_like(labeled, dtype=bool)
+                        for i, size in enumerate(component_sizes):
+                            if size > size_threshold:
+                                keep_mask |= (labeled == (i + 1))
+                        
+                        # Update the mask
+                        processed_masks[b, c] = torch.tensor(
+                            keep_mask, 
+                            dtype=processed_masks.dtype,
+                            device=processed_masks.device
+                        )
+            
+            # 2. Enforce hierarchy constraints for tumor sub-regions
+            # Whole tumor (WT) = Union of all tumor classes
+            # Tumor core (TC) = Union of enhancing and non-enhancing tumor
+            # Enhancing tumor (ET) = Only enhancing tumor
+            
+            # Create masks for each region
+            if num_classes >= 4:  # We have all tumor subclasses
+                # Ensure enhancing tumor (class 3) is within tumor core
+                et_mask = processed_masks[b, 3] > 0.5
+                
+                # Ensure non-enhancing tumor (class 2) and enhancing tumor are within whole tumor
+                tc_mask = (processed_masks[b, 2] > 0.5) | et_mask
+                
+                # Ensure edema (class 1) is consistent with whole tumor
+                wt_mask = (processed_masks[b, 1] > 0.5) | tc_mask
+                
+                # Update masks to ensure consistent hierarchy
+                processed_masks[b, 1] = wt_mask.float() * processed_masks[b, 1]
+                processed_masks[b, 2] = tc_mask.float() * processed_masks[b, 2]
+                processed_masks[b, 3] = et_mask.float() * processed_masks[b, 3]
+                
+                # Ensure no voxel belongs to multiple tumor subclasses
+                # Priority: ET > TC > WT
+                for y in range(height):
+                    for x in range(width):
+                        for z in range(depth):
+                            if processed_masks[b, 3, z, y, x] > 0.5:  # ET present
+                                processed_masks[b, 2, z, y, x] = 0
+                                processed_masks[b, 1, z, y, x] = 0
+                            elif processed_masks[b, 2, z, y, x] > 0.5:  # TC present
+                                processed_masks[b, 1, z, y, x] = 0
+        
+        return processed_masks
+    
+    def visualize_results(self, volume, masks, key_slices=None):
+        """
+        Visualize segmentation results for debugging
+        
+        Args:
+            volume: Input volume [B, C, D, H, W]
+            masks: Predicted masks [B, C, D, H, W]
+            key_slices: List of slices processed by SAM2
+        """
+        # Only visualize first item in batch for simplicity
+        batch_idx = 0
+        
+        # Get dimensions
+        _, channels, depth, height, width = volume.shape
+        
+        # Select a subset of slices to visualize
+        if key_slices is None:
+            # If key_slices not provided, choose every 10th slice
+            vis_slices = list(range(0, depth, 10))
+        else:
+            # Use the slices that were processed by SAM2
+            vis_slices = key_slices
+        
+        # Create figure with subplots
+        num_slices = len(vis_slices)
+        fig, axes = plt.subplots(num_slices, 4, figsize=(16, 4 * num_slices))
+        
+        # If only one slice, wrap axes in list
+        if num_slices == 1:
+            axes = [axes]
+        
+        # Define colors for each class
+        class_colors = [
+            [0, 0, 0],      # Background
+            [0, 1, 0],      # Class 1: Edema (green)
+            [0, 0, 1],      # Class 2: Non-enhancing tumor (blue)
+            [1, 0, 0]       # Class 3: Enhancing tumor (red)
+        ]
+        
+        for i, slice_idx in enumerate(vis_slices):
+            # Get slice data
+            t1 = volume[batch_idx, 1, slice_idx].cpu().numpy()
+            t1ce = volume[batch_idx, 2, slice_idx].cpu().numpy() if channels > 2 else t1
+            
+            # Normalize for visualization
+            def normalize(img):
+                return (img - img.min()) / (img.max() - img.min() + 1e-8)
+            
+            t1_norm = normalize(t1)
+            t1ce_norm = normalize(t1ce)
+            
+            # Create RGB visualization of input
+            input_vis = np.stack([t1ce_norm, t1_norm, t1_norm], axis=2)
+            
+            # Show input image
+            axes[i][0].imshow(input_vis)
+            axes[i][0].set_title(f"Slice {slice_idx}: Input")
+            axes[i][0].axis('off')
+            
+            # Show segmentation mask for each class
+            for c in range(1, self.num_classes):
+                # Get mask for this class
+                mask = masks[batch_idx, c, slice_idx].cpu().numpy() > 0.5
+                
+                # Create overlay
+                overlay = input_vis.copy()
+                overlay[mask] = class_colors[c]
+                
+                # Show overlay
+                axes[i][c].imshow(overlay)
+                class_names = ["", "Edema", "Non-enhancing", "Enhancing"]
+                axes[i][c].set_title(f"Class {c}: {class_names[c]}")
+                axes[i][c].axis('off')
+        
+        plt.tight_layout()
+        plt.show()
+
+def test_autosam2():
+    """
+    Test function for the AutoSAM2 model
+    """
+    # Create sample input
+    batch_size = 1
+    channels = 4  # T1, T2, T1CE, FLAIR
+    depth = 32
+    height = 128
+    width = 128
+    
+    # Create random input tensor
+    input_tensor = torch.randn(batch_size, channels, depth, height, width)
+    
+    # Create model
+    model = AutoSAM2(num_classes=4)
+    
+    # Set to evaluation mode
+    model.eval()
+    
+    # Forward pass
+    with torch.no_grad():
+        output = model(input_tensor, visualize=True)
+    
+    # Print output shape
+    print(f"Output shape: {output.shape}")
+    
+    return output
+
+if __name__ == "__main__":
+    # Test the model
+    test_autosam2()
 #train.py - Enhanced version with optimizations
 import os
 import torch
