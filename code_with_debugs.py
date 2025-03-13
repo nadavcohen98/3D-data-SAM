@@ -586,8 +586,8 @@ class AutoSAM2(nn.Module):
         seg_output = self.seg_head(embeddings)
         seg_head_time = time.time() - seg_head_start_time
         
-        # Create tensor for final output - start with sigmoid of seg_output
-        output = torch.sigmoid(seg_output)
+        # Apply sigmoid to get probabilities - create a new tensor, don't modify in-place
+        output = torch.sigmoid(seg_output.clone())
         
         # Process with SAM2 if available - ONLY for selected slices
         sam_processing_time = 0
@@ -601,6 +601,9 @@ class AutoSAM2(nn.Module):
             key_slices = list(range(0, depth, step))[:15]  # No more than 15 slices
             
             print(f"Processing {len(key_slices)} out of {depth} slices with step {step}")
+            
+            # Create a new output tensor to avoid modifying the original one
+            output_with_sam = output.clone()
             
             # Process only the selected slices with SAM2
             for d in key_slices:
@@ -617,9 +620,9 @@ class AutoSAM2(nn.Module):
                         
                         # If SAM2 produced a valid mask
                         if mask is not None:
-                            # Assign to output
-                            output[b, 1, d] = mask
-                            output[b, 0, d] = 1 - mask
+                            # Assign to output - avoid modifying tensors in-place
+                            output_with_sam[b, 1, d] = mask
+                            output_with_sam[b, 0, d] = 1 - mask
                     except Exception as e:
                         print(f"Error processing slice {d} with SAM2: {e}")
                 
@@ -627,6 +630,9 @@ class AutoSAM2(nn.Module):
                 print(f"  Slice {d} processed in {slice_time:.4f}s")
             
             sam_processing_time = time.time() - sam_start_time
+            
+            # Use the SAM-processed output
+            output = output_with_sam
         
         # In training mode, mix with fallback to preserve gradient flow
         if self.training:
@@ -636,7 +642,7 @@ class AutoSAM2(nn.Module):
             # Apply sigmoid to segment output for mixing
             sig_output = torch.sigmoid(seg_output)
             
-            # Mix outputs while preserving gradients
+            # Mix outputs while preserving gradients - create a new tensor
             mixed_output = alpha * output + (1 - alpha) * sig_output
             
             total_time = time.time() - forward_start_time
