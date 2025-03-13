@@ -347,19 +347,21 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
+from scipy import ndimage
 
-# Import SAM2 with error handling
+# Import SAM2 with proper error handling
 try:
     from sam2.sam2_image_predictor import SAM2ImagePredictor
     HAS_SAM2 = True
     print("Successfully imported SAM2")
 except ImportError:
-    print("ERROR: sam2 package not available.")
+    print("ERROR: sam2 package not available. This implementation requires SAM2.")
     HAS_SAM2 = False
 
 class Encoder3D(nn.Module):
     """
-    Simple 3D encoder that follows UNet structure
+    3D encoder based on UNet architecture with reduced downsampling
+    to preserve spatial information
     """
     def __init__(self, in_channels=4, base_channels=16):
         super().__init__()
@@ -368,10 +370,10 @@ class Encoder3D(nn.Module):
         self.enc1 = nn.Sequential(
             nn.Conv3d(in_channels, base_channels, kernel_size=3, padding=1),
             nn.InstanceNorm3d(base_channels),
-            nn.ReLU(inplace=True),
+            nn.LeakyReLU(inplace=True),
             nn.Conv3d(base_channels, base_channels, kernel_size=3, padding=1),
             nn.InstanceNorm3d(base_channels),
-            nn.ReLU(inplace=True)
+            nn.LeakyReLU(inplace=True)
         )
         self.pool1 = nn.MaxPool3d(kernel_size=2, stride=2)
         
@@ -379,68 +381,112 @@ class Encoder3D(nn.Module):
         self.enc2 = nn.Sequential(
             nn.Conv3d(base_channels, base_channels*2, kernel_size=3, padding=1),
             nn.InstanceNorm3d(base_channels*2),
-            nn.ReLU(inplace=True),
+            nn.LeakyReLU(inplace=True),
             nn.Conv3d(base_channels*2, base_channels*2, kernel_size=3, padding=1),
             nn.InstanceNorm3d(base_channels*2),
-            nn.ReLU(inplace=True)
+            nn.LeakyReLU(inplace=True)
         )
         self.pool2 = nn.MaxPool3d(kernel_size=2, stride=2)
         
-        # Bottleneck
-        self.bottleneck = nn.Sequential(
+        # Third encoder block 
+        self.enc3 = nn.Sequential(
             nn.Conv3d(base_channels*2, base_channels*4, kernel_size=3, padding=1),
             nn.InstanceNorm3d(base_channels*4),
-            nn.ReLU(inplace=True),
+            nn.LeakyReLU(inplace=True),
             nn.Conv3d(base_channels*4, base_channels*4, kernel_size=3, padding=1),
             nn.InstanceNorm3d(base_channels*4),
-            nn.ReLU(inplace=True)
+            nn.LeakyReLU(inplace=True)
         )
+        
+        # Bottleneck
+        self.bottleneck = nn.Sequential(
+            nn.Conv3d(base_channels*4, base_channels*8, kernel_size=3, padding=1),
+            nn.InstanceNorm3d(base_channels*8),
+            nn.LeakyReLU(inplace=True),
+            nn.Conv3d(base_channels*8, base_channels*8, kernel_size=3, padding=1),
+            nn.InstanceNorm3d(base_channels*8),
+            nn.LeakyReLU(inplace=True)
+        )
+        
+        # Dropout for regularization
+        self.dropout = nn.Dropout3d(0.3)
     
     def forward(self, x):
         # Encoder pathway with skip connections
         x1 = self.enc1(x)
+        x1 = self.dropout(x1)
+        
         x = self.pool1(x1)
         
         x2 = self.enc2(x)
+        x2 = self.dropout(x2)
+        
         x = self.pool2(x2)
         
-        x = self.bottleneck(x)
+        x3 = self.enc3(x)
+        x3 = self.dropout(x3)
         
-        return [x1, x2, x]  # Return features for skip connections
+        x = self.bottleneck(x3)
+        x = self.dropout(x)
+        
+        return [x1, x2, x3, x]
 
 class MiniDecoder(nn.Module):
     """
-    Mini-decoder that produces embeddings for SAM2, 
-    similar to AutoSAM's approach
+    Enhanced mini-decoder that produces embeddings for SAM2, 
+    similar to AutoSAM's approach with improved feature propagation
     """
     def __init__(self, base_channels=16):
         super().__init__()
         
-        # Upsampling blocks
+        # First upsampling block with skip connection
         self.up1 = nn.ConvTranspose3d(
-            base_channels*4, base_channels*2, 
+            base_channels*8, base_channels*4, 
             kernel_size=2, stride=2
         )
         self.conv1 = nn.Sequential(
+            nn.Conv3d(base_channels*8, base_channels*4, kernel_size=3, padding=1),
+            nn.InstanceNorm3d(base_channels*4),
+            nn.LeakyReLU(inplace=True),
+            nn.Conv3d(base_channels*4, base_channels*4, kernel_size=3, padding=1),
+            nn.InstanceNorm3d(base_channels*4),
+            nn.LeakyReLU(inplace=True)
+        )
+        
+        # Second upsampling block with skip connection
+        self.up2 = nn.ConvTranspose3d(
+            base_channels*4, base_channels*2, 
+            kernel_size=2, stride=2
+        )
+        self.conv2 = nn.Sequential(
             nn.Conv3d(base_channels*4, base_channels*2, kernel_size=3, padding=1),
             nn.InstanceNorm3d(base_channels*2),
-            nn.ReLU(inplace=True)
+            nn.LeakyReLU(inplace=True),
+            nn.Conv3d(base_channels*2, base_channels*2, kernel_size=3, padding=1),
+            nn.InstanceNorm3d(base_channels*2),
+            nn.LeakyReLU(inplace=True)
         )
         
         # Feature projection to get RGB-like output
+        # This is similar to AutoSAM's approach
         self.final = nn.Conv3d(base_channels*2, 3, kernel_size=1)
-        self.tanh = nn.Tanh()  # Similar to AutoSAM
+        self.tanh = nn.Tanh()  # Similar to AutoSAM for normalized output
     
     def forward(self, features):
         # Unpack features from encoder
-        x1, x2, bottleneck = features
+        x1, x2, x3, bottleneck = features
         
         # First upsampling with skip connection
         x = self.up1(bottleneck)
-        x = torch.cat([x, x2], dim=1)
+        x = torch.cat([x, x3], dim=1)
         x = self.conv1(x)
         
-        # Final projection with tanh (like in AutoSAM)
+        # Second upsampling with skip connection
+        x = self.up2(x)
+        x = torch.cat([x, x2], dim=1)
+        x = self.conv2(x)
+        
+        # Final projection with tanh activation
         x = self.final(x)
         x = self.tanh(x)
         
@@ -448,41 +494,45 @@ class MiniDecoder(nn.Module):
 
 class AutoSAM2(nn.Module):
     """
-    AutoSAM2 model for 3D medical image segmentation
+    Enhanced AutoSAM2 model that processes multiple slices
+    and interpolates between them for efficiency
     """
     def __init__(self, num_classes=2):
         super().__init__()
         
+        # Model components
+        self.encoder = Encoder3D(in_channels=4, base_channels=16)
+        self.mini_decoder = MiniDecoder(base_channels=16)
+        
+        # Fallback segmentation head (similar to AutoSAM approach)
+        self.seg_head = nn.Sequential(
+            nn.Conv3d(3, 16, kernel_size=3, padding=1),
+            nn.InstanceNorm3d(16),
+            nn.LeakyReLU(inplace=True),
+            nn.Conv3d(16, num_classes, kernel_size=1)
+        )
+        
         # Store configuration
         self.num_classes = num_classes
-        
-        # Create encoder
-        self.encoder = Encoder3D(in_channels=4, base_channels=16)
-        
-        # Create mini-decoder
-        self.mini_decoder = MiniDecoder(base_channels=16)
         
         # Initialize SAM2
         if HAS_SAM2:
             try:
-                self.sam2 = SAM2ImagePredictor.from_pretrained("facebook/sam2-hiera-large")
+                self.sam2_predictor = SAM2ImagePredictor.from_pretrained("facebook/sam2-hiera-large")
                 print("SAM2 initialized successfully")
                 
                 # Freeze SAM2 weights
-                for param in self.sam2.model.parameters():
+                for param in self.sam2_predictor.model.parameters():
                     param.requires_grad = False
                 
                 self.has_sam2 = True
             except Exception as e:
                 print(f"Error initializing SAM2: {e}")
                 self.has_sam2 = False
-                self.sam2 = None
+                self.sam2_predictor = None
         else:
             self.has_sam2 = False
-            self.sam2 = None
-        
-        # Fallback segmentation head
-        self.seg_head = nn.Conv3d(3, num_classes, kernel_size=1)
+            self.sam2_predictor = None
     
     def _convert_features_to_image(self, features_slice):
         """Convert feature slice to RGB image for SAM2"""
@@ -505,65 +555,132 @@ class AutoSAM2(nn.Module):
         image = np.transpose(image, (1, 2, 0)).astype(np.uint8)
         return image
     
+    def _process_slice_with_sam2(self, embeddings_slice, device):
+        """Process a single slice with SAM2"""
+        # Convert to RGB image
+        rgb_image = self._convert_features_to_image(embeddings_slice)
+        height, width = rgb_image.shape[:2]
+        
+        # Generate points - using center point as a simple default
+        center_point = np.array([[width // 2, height // 2]])
+        
+        try:
+            # Set image
+            self.sam2_predictor.set_image(rgb_image)
+            
+            # Predict mask
+            masks, scores, _ = self.sam2_predictor.predict(
+                point_coords=center_point,
+                point_labels=np.array([1]),  # 1 for foreground
+                multimask_output=True
+            )
+            
+            # Get best mask
+            if len(masks) > 0:
+                best_idx = np.argmax(scores)
+                mask = torch.tensor(masks[best_idx], device=device).float()
+                return mask
+            
+        except Exception as e:
+            print(f"Error in SAM2 processing: {e}")
+        
+        return None
+    
     def forward(self, x):
+        """
+        Forward pass processing every Nth slice for efficiency
+        
+        Args:
+            x: Input volume [B, C, D, H, W]
+            
+        Returns:
+            Segmentation masks [B, num_classes, D, H, W]
+        """
         batch_size, channels, depth, height, width = x.shape
         
         # Get features from encoder
         encoder_features = self.encoder(x)
         
         # Get embeddings from mini-decoder
+        # This is the key component inspired by AutoSAM
         embeddings = self.mini_decoder(encoder_features)
         
-        # Ensure dimensions match for output
-        if embeddings.shape[2:] != x.shape[2:]:
-            embeddings = F.interpolate(
-                embeddings, 
-                size=x.shape[2:],
-                mode='trilinear',
-                align_corners=False
-            )
+        # Generate fallback segmentation with segmentation head
+        fallback_output = self.seg_head(embeddings)
         
-        # Always use the fallback for training - this ensures gradients flow properly
-        # During training, we'll get proper gradients this way
-        output = self.seg_head(embeddings)
+        # Apply sigmoid to get probabilities
+        prob_maps = torch.sigmoid(fallback_output)
         
-        # If we're in eval mode (not training), we can try SAM2
-        if not self.training and self.has_sam2 and self.sam2 is not None:
-            with torch.no_grad():  # Make sure not to interfere with gradients
-                sam_output = torch.zeros_like(output)
+        # Initialize output tensor (same shape as prob_maps)
+        output_masks = torch.zeros_like(prob_maps)
+        
+        # Determine which slices to process with SAM2
+        # Process every 8th slice during training, every 4th during inference
+        slice_stride = 8 if self.training else 4
+        key_slices = list(range(0, depth, slice_stride))
+        
+        # Only use SAM2 in evaluation mode (not during training to save time)
+        if not self.training and self.has_sam2 and self.sam2_predictor is not None:
+            for b in range(batch_size):
+                # Process key slices with SAM2
+                processed_slices = {}
                 
-                # Process middle slice
-                middle_slice = depth // 2
-                
-                # Get the embeddings for the middle slice
-                for b in range(batch_size):
-                    slice_emb = embeddings[b, :, middle_slice]
-                    rgb_image = self._convert_features_to_image(slice_emb)
-                    
+                for slice_idx in key_slices:
                     try:
-                        # Process with SAM2
-                        self.sam2.set_image(rgb_image)
-                        center_point = np.array([[width // 2, height // 2]])
-                        masks, _, _ = self.sam2.predict(
-                            point_coords=center_point,
-                            point_labels=np.array([1]),
-                            multimask_output=False
-                        )
+                        # Get slice embedding
+                        slice_embedding = embeddings[b, :, slice_idx].detach().cpu()
                         
-                        if len(masks) > 0:
-                            mask = torch.tensor(masks[0], device=x.device).float()
-                            sam_output[b, 1, middle_slice] = mask
-                            sam_output[b, 0, middle_slice] = 1 - mask
+                        # Process with SAM2
+                        mask = self._process_slice_with_sam2(slice_embedding, x.device)
+                        
+                        # If valid mask
+                        if mask is not None:
+                            # Assign to output
+                            output_masks[b, 1, slice_idx] = mask
+                            output_masks[b, 0, slice_idx] = 1 - mask
+                            processed_slices[slice_idx] = True
+                        else:
+                            # Use fallback
+                            output_masks[b, :, slice_idx] = prob_maps[b, :, slice_idx]
                     except Exception as e:
-                        print(f"Error in SAM2 processing: {e}")
+                        print(f"Error processing slice {slice_idx}: {e}")
+                        output_masks[b, :, slice_idx] = prob_maps[b, :, slice_idx]
                 
-                # For visualization purposes, you can return the SAM output
-                # We'll not use this for backpropagation
-                if torch.sum(sam_output) > 0:
-                    # Note: we're not affecting the gradient flow here
-                    output = sam_output.detach()
-        
-        return output
+                # Interpolate for non-key slices
+                for slice_idx in range(depth):
+                    if slice_idx not in processed_slices:
+                        # Find nearest processed slices
+                        prev_slice = None
+                        next_slice = None
+                        
+                        for s in key_slices:
+                            if s < slice_idx and s in processed_slices:
+                                prev_slice = s
+                            if s > slice_idx and s in processed_slices:
+                                next_slice = s
+                                break
+                        
+                        # If both prev and next exist, interpolate
+                        if prev_slice is not None and next_slice is not None:
+                            # Linear interpolation
+                            weight = (slice_idx - prev_slice) / (next_slice - prev_slice)
+                            output_masks[b, :, slice_idx] = (1 - weight) * output_masks[b, :, prev_slice] + weight * output_masks[b, :, next_slice]
+                        
+                        # Otherwise use closest or fallback
+                        elif prev_slice is not None:
+                            output_masks[b, :, slice_idx] = output_masks[b, :, prev_slice]
+                        elif next_slice is not None:
+                            output_masks[b, :, slice_idx] = output_masks[b, :, next_slice]
+                        else:
+                            output_masks[b, :, slice_idx] = prob_maps[b, :, slice_idx]
+            
+            return output_masks
+        else:
+            # During training, just use the fallback segmentation head outputs
+            # This ensures proper gradient flow during training
+            return prob_maps
+
+
 
 #train.py - Enhanced version with optimizations
 import os
