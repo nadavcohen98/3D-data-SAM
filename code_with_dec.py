@@ -343,6 +343,109 @@ def get_brats_dataloader(root_dir, batch_size=1, train=True, normalize=True, max
 
 #model.py
 
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import numpy as np
+
+# Import SAM2 with error handling
+try:
+    from sam2.sam2_image_predictor import SAM2ImagePredictor
+    HAS_SAM2 = True
+    print("Successfully imported SAM2")
+except ImportError:
+    print("ERROR: sam2 package not available.")
+    HAS_SAM2 = False
+
+class Encoder3D(nn.Module):
+    """
+    Simple 3D encoder that follows UNet structure
+    """
+    def __init__(self, in_channels=4, base_channels=16):
+        super().__init__()
+        
+        # First encoder block
+        self.enc1 = nn.Sequential(
+            nn.Conv3d(in_channels, base_channels, kernel_size=3, padding=1),
+            nn.InstanceNorm3d(base_channels),
+            nn.ReLU(inplace=True),
+            nn.Conv3d(base_channels, base_channels, kernel_size=3, padding=1),
+            nn.InstanceNorm3d(base_channels),
+            nn.ReLU(inplace=True)
+        )
+        self.pool1 = nn.MaxPool3d(kernel_size=2, stride=2)
+        
+        # Second encoder block
+        self.enc2 = nn.Sequential(
+            nn.Conv3d(base_channels, base_channels*2, kernel_size=3, padding=1),
+            nn.InstanceNorm3d(base_channels*2),
+            nn.ReLU(inplace=True),
+            nn.Conv3d(base_channels*2, base_channels*2, kernel_size=3, padding=1),
+            nn.InstanceNorm3d(base_channels*2),
+            nn.ReLU(inplace=True)
+        )
+        self.pool2 = nn.MaxPool3d(kernel_size=2, stride=2)
+        
+        # Bottleneck
+        self.bottleneck = nn.Sequential(
+            nn.Conv3d(base_channels*2, base_channels*4, kernel_size=3, padding=1),
+            nn.InstanceNorm3d(base_channels*4),
+            nn.ReLU(inplace=True),
+            nn.Conv3d(base_channels*4, base_channels*4, kernel_size=3, padding=1),
+            nn.InstanceNorm3d(base_channels*4),
+            nn.ReLU(inplace=True)
+        )
+    
+    def forward(self, x):
+        # Encoder pathway with skip connections
+        x1 = self.enc1(x)
+        x = self.pool1(x1)
+        
+        x2 = self.enc2(x)
+        x = self.pool2(x2)
+        
+        x = self.bottleneck(x)
+        
+        return [x1, x2, x]  # Return features for skip connections
+
+class MiniDecoder(nn.Module):
+    """
+    Mini-decoder that produces embeddings for SAM2, 
+    similar to AutoSAM's approach
+    """
+    def __init__(self, base_channels=16):
+        super().__init__()
+        
+        # Upsampling blocks
+        self.up1 = nn.ConvTranspose3d(
+            base_channels*4, base_channels*2, 
+            kernel_size=2, stride=2
+        )
+        self.conv1 = nn.Sequential(
+            nn.Conv3d(base_channels*4, base_channels*2, kernel_size=3, padding=1),
+            nn.InstanceNorm3d(base_channels*2),
+            nn.ReLU(inplace=True)
+        )
+        
+        # Feature projection to get RGB-like output
+        self.final = nn.Conv3d(base_channels*2, 3, kernel_size=1)
+        self.tanh = nn.Tanh()  # Similar to AutoSAM
+    
+    def forward(self, features):
+        # Unpack features from encoder
+        x1, x2, bottleneck = features
+        
+        # First upsampling with skip connection
+        x = self.up1(bottleneck)
+        x = torch.cat([x, x2], dim=1)
+        x = self.conv1(x)
+        
+        # Final projection with tanh (like in AutoSAM)
+        x = self.final(x)
+        x = self.tanh(x)
+        
+        return x
+
 class AutoSAM2(nn.Module):
     """
     AutoSAM2 model for 3D medical image segmentation
@@ -461,8 +564,6 @@ class AutoSAM2(nn.Module):
                     output = sam_output.detach()
         
         return output
-
-
 
 #train.py - Enhanced version with optimizations
 import os
