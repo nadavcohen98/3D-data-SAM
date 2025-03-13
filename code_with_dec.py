@@ -347,234 +347,391 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
+from scipy import ndimage
+import matplotlib.pyplot as plt
 
-# Import SAM2 with error handling
+# Import SAM2 with better error handling
 try:
     from sam2.sam2_image_predictor import SAM2ImagePredictor
     HAS_SAM2 = True
     print("Successfully imported SAM2")
 except ImportError:
-    print("ERROR: sam2 package not available.")
+    print("ERROR: sam2 package not available. This implementation requires SAM2.")
     HAS_SAM2 = False
+    raise ImportError("SAM2 must be installed for this implementation to work")
 
-class Encoder3D(nn.Module):
+class MultiscaleEncoder(nn.Module):
     """
-    Simple 3D encoder that follows UNet structure
+    Encoder that extracts multi-scale features from 3D medical images
+    with less aggressive downsampling to preserve spatial information
     """
-    def __init__(self, in_channels=4, base_channels=16):
+    def __init__(self, in_channels=4, base_channels=16, num_classes=4):
         super().__init__()
+        self.num_classes = num_classes
         
-        # First encoder block
+        # Encoder path with reduced downsampling
         self.enc1 = nn.Sequential(
             nn.Conv3d(in_channels, base_channels, kernel_size=3, padding=1),
             nn.InstanceNorm3d(base_channels),
-            nn.ReLU(inplace=True),
+            nn.LeakyReLU(inplace=True),
             nn.Conv3d(base_channels, base_channels, kernel_size=3, padding=1),
             nn.InstanceNorm3d(base_channels),
-            nn.ReLU(inplace=True)
+            nn.LeakyReLU(inplace=True)
         )
+        # First pooling - reduce dimensions by factor of 2
         self.pool1 = nn.MaxPool3d(kernel_size=2, stride=2)
         
-        # Second encoder block
         self.enc2 = nn.Sequential(
             nn.Conv3d(base_channels, base_channels*2, kernel_size=3, padding=1),
             nn.InstanceNorm3d(base_channels*2),
-            nn.ReLU(inplace=True),
+            nn.LeakyReLU(inplace=True),
             nn.Conv3d(base_channels*2, base_channels*2, kernel_size=3, padding=1),
             nn.InstanceNorm3d(base_channels*2),
-            nn.ReLU(inplace=True)
+            nn.LeakyReLU(inplace=True)
         )
+        # Second pooling - reduce dimensions by factor of 2 (total 4x reduction)
         self.pool2 = nn.MaxPool3d(kernel_size=2, stride=2)
         
-        # Bottleneck
-        self.bottleneck = nn.Sequential(
+        self.enc3 = nn.Sequential(
             nn.Conv3d(base_channels*2, base_channels*4, kernel_size=3, padding=1),
             nn.InstanceNorm3d(base_channels*4),
-            nn.ReLU(inplace=True),
+            nn.LeakyReLU(inplace=True),
             nn.Conv3d(base_channels*4, base_channels*4, kernel_size=3, padding=1),
             nn.InstanceNorm3d(base_channels*4),
-            nn.ReLU(inplace=True)
+            nn.LeakyReLU(inplace=True)
         )
+        # We stop at 4x downsampling (no third pooling layer)
+        
+        self.bottleneck = nn.Sequential(
+            nn.Conv3d(base_channels*4, base_channels*8, kernel_size=3, padding=1),
+            nn.InstanceNorm3d(base_channels*8),
+            nn.LeakyReLU(inplace=True),
+            nn.Conv3d(base_channels*8, base_channels*8, kernel_size=3, padding=1),
+            nn.InstanceNorm3d(base_channels*8),
+            nn.LeakyReLU(inplace=True)
+        )
+        
+        # Probability map generator without further reduction
+        self.prob_map = nn.Sequential(
+            nn.Conv3d(base_channels*8, base_channels*4, kernel_size=1),
+            nn.InstanceNorm3d(base_channels*4),
+            nn.LeakyReLU(inplace=True),
+            nn.Conv3d(base_channels*4, num_classes, kernel_size=1),
+            nn.Sigmoid()
+        )
+        
+        # Dropout for regularization
+        self.dropout = nn.Dropout3d(0.3)
     
     def forward(self, x):
-        # Encoder pathway with skip connections
+        # Encoder path with dropout
         x1 = self.enc1(x)
+        x1 = self.dropout(x1)
+        
         x = self.pool1(x1)
         
         x2 = self.enc2(x)
+        x2 = self.dropout(x2)
+        
         x = self.pool2(x2)
         
-        x = self.bottleneck(x)
+        x3 = self.enc3(x)
+        x3 = self.dropout(x3)
         
-        return [x1, x2, x]  # Return features for skip connections
+        # Bottleneck (no more pooling)
+        x = self.bottleneck(x3)
+        x = self.dropout(x)
+        
+        # Generate probability maps for each class
+        prob_maps = self.prob_map(x)
+        
+        return {'features': [x1, x2, x3, x], 'prob_maps': prob_maps}
 
-class MiniDecoder(nn.Module):
+class TumorBoundingBoxGenerator:
     """
-    Mini-decoder that produces embeddings for SAM2, 
-    similar to AutoSAM's approach
+    Utility class to extract bounding boxes from tumor probability maps
     """
-    def __init__(self, base_channels=16):
-        super().__init__()
-        
-        # Upsampling blocks
-        self.up1 = nn.ConvTranspose3d(
-            base_channels*4, base_channels*2, 
-            kernel_size=2, stride=2
-        )
-        self.conv1 = nn.Sequential(
-            nn.Conv3d(base_channels*4, base_channels*2, kernel_size=3, padding=1),
-            nn.InstanceNorm3d(base_channels*2),
-            nn.ReLU(inplace=True)
-        )
-        
-        # Feature projection to get RGB-like output
-        self.final = nn.Conv3d(base_channels*2, 3, kernel_size=1)
-        self.tanh = nn.Tanh()  # Similar to AutoSAM
+    def __init__(self, threshold=0.5, padding=10):
+        self.threshold = threshold
+        self.padding = padding
     
-    def forward(self, features):
-        # Unpack features from encoder
-        x1, x2, bottleneck = features
+    def get_bounding_boxes(self, prob_maps, min_region_size=10):
+        """
+        Extract bounding boxes for each class from probability maps
         
-        # First upsampling with skip connection
-        x = self.up1(bottleneck)
-        x = torch.cat([x, x2], dim=1)
-        x = self.conv1(x)
-        
-        # Final projection with tanh (like in AutoSAM)
-        x = self.final(x)
-        x = self.tanh(x)
-        
-        return x
-
-class AutoSAM2(nn.Module):
-    """
-    AutoSAM2 model for 3D medical image segmentation
-    Using SAM2 for both training and validation
-    """
-    def __init__(self, num_classes=2):
-        super().__init__()
-        
-        # Store configuration
-        self.num_classes = num_classes
-        
-        # Create encoder
-        self.encoder = Encoder3D(in_channels=4, base_channels=16)
-        
-        # Create mini-decoder
-        self.mini_decoder = MiniDecoder(base_channels=16)
-        
-        # Initialize SAM2
-        if HAS_SAM2:
-            try:
-                self.sam2 = SAM2ImagePredictor.from_pretrained("facebook/sam2-hiera-large")
-                print("SAM2 initialized successfully")
-                
-                # Freeze SAM2 weights
-                for param in self.sam2.model.parameters():
-                    param.requires_grad = False
-                
-                self.has_sam2 = True
-            except Exception as e:
-                print(f"Error initializing SAM2: {e}")
-                self.has_sam2 = False
-                self.sam2 = None
-        else:
-            self.has_sam2 = False
-            self.sam2 = None
-        
-        # Improved segmentation head for fallback
-        self.seg_head = nn.Sequential(
-            nn.Conv3d(3, 16, kernel_size=3, padding=1),
-            nn.InstanceNorm3d(16),
-            nn.ReLU(inplace=True),
-            nn.Conv3d(16, num_classes, kernel_size=1)
-        )
-    
-    def _convert_features_to_image(self, features_slice):
-        """Convert feature slice to RGB image for SAM2"""
-        # Ensure features_slice is numpy array
-        if torch.is_tensor(features_slice):
-            features_slice = features_slice.detach().cpu().numpy()
-        
-        # Normalize each channel to [0, 255]
-        image = np.zeros_like(features_slice)
-        for c in range(features_slice.shape[0]):
-            channel = features_slice[c]
-            min_val = np.min(channel)
-            max_val = np.max(channel)
+        Args:
+            prob_maps: Probability maps [B, C, D, H, W]
+            min_region_size: Minimum size of tumor region to consider
             
-            # Avoid division by zero
-            if max_val > min_val:
-                image[c] = (channel - min_val) / (max_val - min_val) * 255
+        Returns:
+            Dictionary of bounding boxes per class for each batch item
+        """
+        batch_size, num_classes, depth, height, width = prob_maps.shape
+        all_boxes = []
         
-        # Convert to [H, W, C] format and uint8 type
-        image = np.transpose(image, (1, 2, 0)).astype(np.uint8)
-        return image
+        for b in range(batch_size):
+            batch_boxes = []
+            
+            for c in range(1, num_classes):  # Skip background class (0)
+                # Get binary mask for this class
+                prob_map = prob_maps[b, c].cpu().detach().numpy()
+                binary_mask = prob_map > self.threshold
+                
+                # Skip if no region found
+                if not np.any(binary_mask):
+                    batch_boxes.append(None)
+                    continue
+                
+                # Label connected components
+                labeled_mask, num_features = ndimage.label(binary_mask)
+                
+                # Find largest connected component
+                if num_features == 0:
+                    batch_boxes.append(None)
+                    continue
+                
+                sizes = ndimage.sum(binary_mask, labeled_mask, range(1, num_features+1))
+                largest_component_idx = np.argmax(sizes) + 1
+                
+                # Skip if largest component is too small
+                if sizes[largest_component_idx-1] < min_region_size:
+                    batch_boxes.append(None)
+                    continue
+                
+                # Extract component mask
+                component_mask = labeled_mask == largest_component_idx
+                
+                # Find bounding box of tumor region
+                z_indices, y_indices, x_indices = np.where(component_mask)
+                
+                # Add padding to bounding box
+                z_min = max(0, np.min(z_indices) - self.padding)
+                z_max = min(depth - 1, np.max(z_indices) + self.padding)
+                y_min = max(0, np.min(y_indices) - self.padding)
+                y_max = min(height - 1, np.max(y_indices) + self.padding)
+                x_min = max(0, np.min(x_indices) - self.padding)
+                x_max = min(width - 1, np.max(x_indices) + self.padding)
+                
+                # Store bounding box
+                batch_boxes.append({
+                    'z_min': z_min, 'z_max': z_max,
+                    'y_min': y_min, 'y_max': y_max,
+                    'x_min': x_min, 'x_max': x_max,
+                    'class': c
+                })
+            
+            all_boxes.append(batch_boxes)
+        
+        return all_boxes
+
+
+class EnhancedRichSliceGenerator:
+    """
+    Enhanced generator for rich 2D representations that uses multi-level features
+    from the 3D encoder for better information transfer to SAM2
+    """
+    def __init__(self, prob_map_weight=0.5):
+        self.prob_map_weight = prob_map_weight
     
-    def _process_with_sam2(self, slice_embedding, device):
-        """Process a single slice with SAM2"""
-        # Convert to RGB image
-        rgb_image = self._convert_features_to_image(slice_embedding)
-        height, width = rgb_image.shape[:2]
+    def generate_rich_slice(self, volume, slice_idx, prob_maps=None, encoder_features=None):
+        """
+        Generate rich 2D representation using both volume data and encoder features
         
-        # Set image
-        self.sam2.set_image(rgb_image)
+        Args:
+            volume: Input volume [B, C, D, H, W]
+            slice_idx: Index of slice to process
+            prob_maps: Probability maps from encoder [B, num_classes, D, H, W]
+            encoder_features: List of feature maps at different resolutions
+                             [enc1, enc2, enc3, bottleneck]
         
-        # Generate points
-        center_point = np.array([[width // 2, height // 2]])
+        Returns:
+            Rich 2D representation for SAM2
+        """
+        batch_size, modalities, depth, height, width = volume.shape
         
-        # Predict
-        masks, scores, _ = self.sam2.predict(
-            point_coords=center_point,
-            point_labels=np.array([1]),  # 1 for foreground
-            multimask_output=True
-        )
+        # Prepare output batch
+        rgb_batch = []
         
-        # Get best mask
-        if len(masks) > 0:
-            best_idx = np.argmax(scores)
-            mask = torch.tensor(masks[best_idx], device=device).float()
-            return mask
+        for b in range(batch_size):
+            # Get slice with safety bounds checking
+            slice_idx_safe = min(max(slice_idx, 0), depth-1)
+            current_slice = volume[b, :, slice_idx_safe].cpu().detach().numpy()
+            
+            # Extract individual modalities
+            flair = current_slice[0].copy()
+            t1 = current_slice[1].copy()
+            t1ce = current_slice[2].copy() if modalities > 2 else t1.copy()
+            t2 = current_slice[3].copy() if modalities > 3 else t1.copy()
+            
+            # Enhanced contrast function with adaptive percentile clipping
+            def enhance_contrast(img, p_low=1, p_high=99):
+                # Handle uniform regions
+                if np.max(img) - np.min(img) < 1e-6:
+                    return np.zeros_like(img)
+                
+                low, high = np.percentile(img, [p_low, p_high])
+                img_norm = np.clip((img - low) / (high - low + 1e-8), 0, 1)
+                return img_norm * 255
+            
+            # Create base RGB channels highlighting different tumor characteristics
+            r_channel = enhance_contrast(flair).astype(np.uint8)  # FLAIR - edema
+            g_channel = enhance_contrast(t1ce).astype(np.uint8)   # T1CE - enhancing tumor
+            b_channel = enhance_contrast(t2).astype(np.uint8)     # T2 - general tumor region
+            
+            # ENHANCEMENT 1: Incorporate multi-level features from the encoder
+            if encoder_features is not None:
+                # Extract feature maps for this slice
+                feature_maps = []
+                for feat_level in encoder_features:
+                    # Skip if feature level is empty
+                    if feat_level is None or feat_level.shape[0] <= b:
+                        continue
+                        
+                    # Get the correct slice from this feature level
+                    # Need to handle different resolutions
+                    feat_depth = feat_level.shape[2]
+                    feat_slice_idx = min(int(slice_idx_safe * feat_depth / depth), feat_depth-1)
+                    
+                    # Extract slice from feature map
+                    feat_slice = feat_level[b, :, feat_slice_idx].cpu().detach()
+                    
+                    # Resize to match the slice dimensions
+                    if feat_slice.shape[1] != height or feat_slice.shape[2] != width:
+                        feat_slice = F.interpolate(
+                            feat_slice.unsqueeze(0),  # Add batch dim
+                            size=(height, width),
+                            mode='bilinear',
+                            align_corners=False
+                        ).squeeze(0)
+                    
+                    # Add to list of feature maps
+                    feature_maps.append(feat_slice)
+                
+                # Enhance channels with feature information if available
+                if feature_maps:
+                    # Use deepest features for tumor highlighting (bottleneck)
+                    if len(feature_maps) >= 4:
+                        # Enhance red channel with bottleneck features (tumor focus)
+                        deep_feat = feature_maps[3]
+                        # Get mean across channels and normalize
+                        deep_feat_mean = torch.mean(deep_feat, dim=0).numpy()
+                        deep_feat_norm = (deep_feat_mean - deep_feat_mean.min()) / (deep_feat_mean.max() - deep_feat_mean.min() + 1e-8)
+                        deep_feat_vis = (deep_feat_norm * 255).astype(np.uint8)
+                        
+                        # Blend with red channel (tumor highlighting)
+                        r_channel = np.maximum(r_channel, deep_feat_vis)
+                    
+                    # Use middle-level features for edge enhancement (enc3)
+                    if len(feature_maps) >= 3:
+                        # Enhance green channel with mid-level features (edges)
+                        mid_feat = feature_maps[2]
+                        # Use variance across channels to detect edges
+                        mid_feat_var = torch.var(mid_feat, dim=0).numpy()
+                        mid_feat_norm = (mid_feat_var - mid_feat_var.min()) / (mid_feat_var.max() - mid_feat_var.min() + 1e-8)
+                        mid_feat_vis = (mid_feat_norm * 255).astype(np.uint8)
+                        
+                        # Blend with green channel (edge enhancement)
+                        g_channel = np.maximum(g_channel, mid_feat_vis)
+                    
+                    # Use shallow features for texture (enc1)
+                    if len(feature_maps) >= 1:
+                        # Enhance blue channel with shallow features (texture)
+                        shallow_feat = feature_maps[0]
+                        # Get max across channels for texture details
+                        shallow_feat_max = torch.max(shallow_feat, dim=0)[0].numpy()
+                        shallow_feat_norm = (shallow_feat_max - shallow_feat_max.min()) / (shallow_feat_max.max() - shallow_feat_max.min() + 1e-8)
+                        shallow_feat_vis = (shallow_feat_norm * 255).astype(np.uint8)
+                        
+                        # Blend with blue channel (texture details)
+                        b_channel = np.maximum(b_channel, shallow_feat_vis)
+            
+            # Add probability map influence if available
+            if prob_maps is not None:
+                # Ensure prob_maps has a valid slice index
+                prob_depth = prob_maps.shape[2]
+                prob_slice_idx = min(slice_idx_safe, prob_depth-1)
+                prob_slice = prob_maps[b, 1:, prob_slice_idx].cpu().detach().numpy()
+                
+                # Resize probability maps to match the slice dimensions if needed
+                if prob_slice.shape[1] != height or prob_slice.shape[2] != width:
+                    from scipy.ndimage import zoom
+                    # Calculate zoom factors
+                    h_factor = height / prob_slice.shape[1]
+                    w_factor = width / prob_slice.shape[2]
+                    # Resize each class probability map
+                    resized_prob = np.zeros((prob_slice.shape[0], height, width))
+                    for c in range(prob_slice.shape[0]):
+                        resized_prob[c] = zoom(prob_slice[c], (h_factor, w_factor), order=1)
+                    prob_slice = resized_prob
+                
+                # ENHANCEMENT 2: Use class-specific color coding for probability maps
+                # Class 1 (Edema) - enhance yellow (R+G)
+                if prob_slice.shape[0] >= 1:
+                    edema_prob = (prob_slice[0] * 255 * self.prob_map_weight).astype(np.uint8)
+                    r_channel = np.maximum(r_channel, edema_prob)
+                    g_channel = np.maximum(g_channel, edema_prob)
+                
+                # Class 2 (Non-enhancing) - enhance green
+                if prob_slice.shape[0] >= 2:
+                    non_enh_prob = (prob_slice[1] * 255 * self.prob_map_weight).astype(np.uint8)
+                    g_channel = np.maximum(g_channel, non_enh_prob)
+                
+                # Class 3 (Enhancing) - enhance red
+                if prob_slice.shape[0] >= 3:
+                    enh_prob = (prob_slice[2] * 255 * self.prob_map_weight).astype(np.uint8)
+                    r_channel = np.maximum(r_channel, enh_prob)
+            
+            # Stack channels to create RGB image
+            rgb_slice = np.stack([r_channel, g_channel, b_channel], axis=2)
+            
+            # Ensure array is contiguous in memory
+            rgb_slice = np.ascontiguousarray(rgb_slice)
+            
+            rgb_batch.append(rgb_slice)
         
-        return None
+        return np.array(rgb_batch)
+
+class MulticlassPointPromptGenerator:
+    """
+    Generates intelligent point prompts for SAM2 for multiclass segmentation
+    """
+    def __init__(self, num_points_per_class=3):
+        self.num_points_per_class = num_points_per_class
     
-    def forward(self, x, visualize=False):
-        batch_size, channels, depth, height, width = x.shape
+    def generate_prompts(self, prob_maps, slice_idx, height, width, threshold=0.7):
+        """
+        Generate point prompts for each class based on probability maps
         
-        # Run encoder to get features and probability maps
-        encoder_output = self.encoder(x)
-        encoder_features = encoder_output['features']
-        prob_maps = encoder_output['prob_maps']
+        Args:
+            prob_maps: Probability maps [B, C, D, H, W]
+            slice_idx: Current slice index
+            height, width: Dimensions of the slice
+            threshold: Probability threshold for points
+            
+        Returns:
+            Point coordinates and labels for each batch item
+        """
+        batch_size, num_classes, depth, _, _ = prob_maps.shape
+        all_points = []
+        all_labels = []
         
-        # Resize probability maps to match input dimensions
-        resized_prob_maps = F.interpolate(
-            prob_maps, 
-            size=(depth, height, width),
-            mode='trilinear', 
-            align_corners=False
-        )
+        # Ensure slice_idx is within bounds of prob_maps depth
+        slice_idx_safe = min(max(slice_idx, 0), depth-1)
         
-        # Initialize output tensor
-        output_masks = torch.zeros_like(resized_prob_maps)
-        
-        # Determine which slices to process
-        slice_stride = 8 if self.training else 4  # Every 8th during training, every 4th during eval
-        key_slices = list(range(0, depth, slice_stride))
-        
-        # Process selected slices with SAM2
-        for slice_idx in key_slices:
-            if slice_idx < depth:  # Safety check
-                slice_masks = self.process_slice_with_sam2(
-                    x, resized_prob_maps, encoder_features, slice_idx
-                )
-                output_masks[:, :, slice_idx] = slice_masks
-        
-        # For remaining slices, use the encoder's probability maps
-        for z in range(depth):
-            if z not in key_slices:
-                output_masks[:, :, z] = resized_prob_maps[:, :, z]
-        
-        return output_masks
+        for b in range(batch_size):
+            # Initialize lists for points and labels
+            batch_points = []
+            batch_labels = []
+            
+            # Process each tumor class (skip background class 0)
+            for c in range(1, num_classes):
+                # Get probability map for this class in the current slice
+                class_prob = prob_maps[b, c, slice_idx_safe].cpu().detach().numpy()
+                
+                # Resize probability map to match height and width if needed
+                if class_prob.shape[0] != height or class_prob.shape[1] != width:
+                    from scipy.ndimage import zoom
+                    h_factor = hei
 
 #train.py - Enhanced version with optimizations
 import os
