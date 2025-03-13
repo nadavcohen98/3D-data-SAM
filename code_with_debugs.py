@@ -1418,7 +1418,6 @@ def main():
     parser.add_argument('--memory_limit', type=float, default=0.9,
                         help='Memory limit for GPU (0.0-1.0)')
     
-    
     args = parser.parse_args()
     
     # Set memory limit for GPU if available
@@ -1428,17 +1427,6 @@ def main():
             print(f"Set GPU memory fraction to {args.memory_limit * 100:.1f}%")
         except Exception as e:
             print(f"Warning: Could not set GPU memory fraction: {e}")
-
-    # Parse target shape argument
-    try:
-        target_shape = tuple(map(int, args.target_shape.split(',')))
-        if len(target_shape) != 3:
-            raise ValueError("Target shape must have exactly 3 dimensions (depth, height, width).")
-    except ValueError as e:
-        print(f"Error parsing target shape: {e}")
-        return  # Exit early if parsing fails
-    
-    print(f"Using target shape: {target_shape}")
 
     # Train the model
     try:
@@ -1453,6 +1441,8 @@ def main():
         )
     except Exception as e:
         print(f"Error during training: {e}")
+        import traceback
+        traceback.print_exc()
         return  # Exit if training fails
 
     # Print final metrics safely
