@@ -231,13 +231,13 @@ class UNet3DEncoder(nn.Module):
     Enhanced UNet3D Encoder that creates features at different resolutions
     with improved ability to capture 3D context
     """
-    def __init__(self, in_channels=4, base_channels=16, slice_interval=10):
+    def __init__(self, in_channels=4, base_channels=16, slice_interval=1):
         super(UNet3DEncoder, self).__init__()
         
         # Configuration
         self.in_channels = in_channels
         self.base_channels = base_channels
-        self.slice_interval = slice_interval
+        self.slice_interval = slice_interval  # This should be 1 to process all slices
         
         # Initial convolution block
         self.initial_conv = ResidualBlock3D(in_channels, base_channels)
@@ -262,23 +262,9 @@ class UNet3DEncoder(nn.Module):
         depth_idx = dims.index(min(dims))
         depth = dims[depth_idx]
         
-        # Select key slices at regular intervals
-        key_indices = []
-        for i in range(0, depth, self.slice_interval):
-            if i < depth:
-                key_indices.append(i)
-        
-        # Add middle slice if not included
-        middle_idx = depth // 2
-        if middle_idx not in key_indices:
-            key_indices.append(middle_idx)
-            key_indices.sort()
-        
-        # Add boundary slices if not included (to ensure coverage of the entire volume)
-        if 0 not in key_indices:
-            key_indices.insert(0, 0)
-        if depth-1 not in key_indices:
-            key_indices.append(depth-1)
+        # Process ALL slices - we use slice_interval=1
+        # Create a list of all indices along the depth dimension
+        key_indices = list(range(depth))
         
         # Encoder pathway with attention
         x1 = self.initial_conv(x)  # Full resolution
@@ -448,13 +434,14 @@ class AutoSAM2(nn.Module):
     4. Slice-by-slice processing with SAM2 across the entire volume
     5. Compatibility with the existing train.py
     """
-    def __init__(self, num_classes=4, base_channels=16, slice_interval=10, 
+    def __init__(self, num_classes=4, base_channels=16, slice_interval=1, 
                  trilinear=True, sam2_model_path=None, enable_sam2=True):
         super().__init__()
         
         # Store configuration
         self.num_classes = num_classes
-        self.slice_interval = slice_interval
+        # Set slice interval to 1 by default to process all slices
+        self.slice_interval = 1  # Changed from slice_interval parameter to always use 1
         self.sam2_model_path = sam2_model_path
         self.enable_sam2 = enable_sam2
         
@@ -462,7 +449,7 @@ class AutoSAM2(nn.Module):
         self.encoder = UNet3DEncoder(
             in_channels=4,
             base_channels=base_channels,
-            slice_interval=slice_interval
+            slice_interval=1  # Always use 1 to process all slices
         )
         
         # Create the enhanced partial decoder for better embeddings
@@ -503,7 +490,7 @@ class AutoSAM2(nn.Module):
         }
         
         logger.info(f"Initialized AutoSAM2 with {base_channels} base channels, "
-                   f"slice interval {slice_interval}, SAM2 enabled: {self.has_sam2 if hasattr(self, 'has_sam2') else False}")
+                   f"processing ALL slices, SAM2 enabled: {self.has_sam2 if hasattr(self, 'has_sam2') else False}")
         
     def initialize_sam2(self):
         """Initialize SAM2 with improved approach"""
@@ -618,6 +605,12 @@ class AutoSAM2(nn.Module):
         if not self.has_sam2:
             logger.warning(f"SAM2 not available for slice {slice_idx}. Using fallback.")
             # Return placeholder if SAM2 not available
+            height, width = img_slice.shape[2:]
+            return torch.zeros((1, self.num_classes, height, width), device=device)
+            
+        # Skip processing if the slice is empty (all zeros or nearly all zeros)
+        if img_slice.sum() < 1e-6:
+            logger.info(f"Skipping empty slice {slice_idx}")
             height, width = img_slice.shape[2:]
             return torch.zeros((1, self.num_classes, height, width), device=device)
             
@@ -764,7 +757,6 @@ class AutoSAM2(nn.Module):
                     volume[:, :, :, :, j] = interp_mask
         
         return volume
-
 
 
 #dataset.py
