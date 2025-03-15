@@ -1,4 +1,3 @@
-
 #model.py
 import torch
 import torch.nn as nn
@@ -14,107 +13,174 @@ except ImportError:
     print("ERROR: sam2 package not available.")
     HAS_SAM2 = False
 
-class SimpleConvBlock3D(nn.Module):
+class ConvBlock3D(nn.Module):
     """
-    Simple 3D convolutional block, similar to the 2D version in the original UNet.
+    Basic 3D convolutional block with normalization and activation.
     """
-    def __init__(self, in_channels, out_channels):
-        super(SimpleConvBlock3D, self).__init__()
+    def __init__(self, in_channels, out_channels, kernel_size=3, padding=1, stride=1, use_batchnorm=True, dropout_p=0.3):
+        super(ConvBlock3D, self).__init__()
         
-        # Two convolutional layers with batch normalization and ReLU
-        self.double_conv = nn.Sequential(
-            nn.Conv3d(in_channels, out_channels, kernel_size=3, padding=1),
-            nn.BatchNorm3d(out_channels),
-            nn.ReLU(inplace=True),
-            nn.Conv3d(out_channels, out_channels, kernel_size=3, padding=1),
-            nn.BatchNorm3d(out_channels),
-            nn.ReLU(inplace=True),
-            nn.Dropout3d(p=0.3)  # Similar to the original UNet
+        # First convolution
+        self.conv1 = nn.Conv3d(
+            in_channels=in_channels,
+            out_channels=out_channels,
+            kernel_size=kernel_size,
+            padding=padding,
+            stride=stride,
+            bias=not use_batchnorm,
         )
+        self.norm1 = nn.BatchNorm3d(out_channels) if use_batchnorm else nn.Identity()
+        self.activation1 = nn.ReLU(inplace=True)
+        
+        # Second convolution
+        self.conv2 = nn.Conv3d(
+            in_channels=out_channels,
+            out_channels=out_channels,
+            kernel_size=kernel_size,
+            padding=padding,
+            stride=stride,
+            bias=not use_batchnorm,
+        )
+        self.norm2 = nn.BatchNorm3d(out_channels) if use_batchnorm else nn.Identity()
+        self.activation2 = nn.ReLU(inplace=True)
+        
+        # Dropout for regularization
+        self.dropout = nn.Dropout3d(p=dropout_p) if dropout_p > 0 else nn.Identity()
     
     def forward(self, x):
-        return self.double_conv(x)
+        x = self.conv1(x)
+        x = self.norm1(x)
+        x = self.activation1(x)
+        
+        x = self.conv2(x)
+        x = self.norm2(x)
+        x = self.activation2(x)
+        
+        x = self.dropout(x)
+        return x
 
-class UNet3D(nn.Module):
+class SimpleEncoder3D(nn.Module):
     """
-    3D adaptation of the original 2D UNet for volumetric segmentation.
+    3D encoder for volumetric data - similar to the original SimpleEncoder3D
+    but properly handles 3D volumes instead of slices.
     """
-    def __init__(self, in_channels=4, out_channels=4):
-        super(UNet3D, self).__init__()
+    def __init__(self, in_channels=4, base_channels=16):
+        super(SimpleEncoder3D, self).__init__()
         
-        # Encoder path
-        self.enc1 = SimpleConvBlock3D(in_channels, 64)
-        self.enc2 = SimpleConvBlock3D(64, 128)
-        self.enc3 = SimpleConvBlock3D(128, 256)
-        self.enc4 = SimpleConvBlock3D(256, 512)
+        # First encoder block
+        self.enc1 = ConvBlock3D(in_channels, base_channels, dropout_p=0.3)
+        self.pool1 = nn.MaxPool3d(kernel_size=2, stride=2)
+        
+        # Second encoder block
+        self.enc2 = ConvBlock3D(base_channels, base_channels*2, dropout_p=0.3)
+        self.pool2 = nn.MaxPool3d(kernel_size=2, stride=2)
+        
+        # Third encoder block
+        self.enc3 = ConvBlock3D(base_channels*2, base_channels*4, dropout_p=0.3)
+        self.pool3 = nn.MaxPool3d(kernel_size=2, stride=2)
+        
+        # Fourth encoder block
+        self.enc4 = ConvBlock3D(base_channels*4, base_channels*8, dropout_p=0.3)
+        self.pool4 = nn.MaxPool3d(kernel_size=2, stride=2)
         
         # Bottleneck
-        self.bottleneck = SimpleConvBlock3D(512, 1024)
-        
-        # Decoder path
-        self.upconv4 = nn.ConvTranspose3d(1024, 512, kernel_size=2, stride=2)
-        self.dec4 = SimpleConvBlock3D(1024, 512)  # 1024 = 512 + 512 (skip connection)
-        
-        self.upconv3 = nn.ConvTranspose3d(512, 256, kernel_size=2, stride=2)
-        self.dec3 = SimpleConvBlock3D(512, 256)   # 512 = 256 + 256 (skip connection)
-        
-        self.upconv2 = nn.ConvTranspose3d(256, 128, kernel_size=2, stride=2)
-        self.dec2 = SimpleConvBlock3D(256, 128)   # 256 = 128 + 128 (skip connection)
-        
-        self.upconv1 = nn.ConvTranspose3d(128, 64, kernel_size=2, stride=2)
-        self.dec1 = SimpleConvBlock3D(128, 64)    # 128 = 64 + 64 (skip connection)
-        
-        # Final convolutional layer
-        self.final_conv = nn.Conv3d(64, out_channels, kernel_size=1)
+        self.bottleneck = ConvBlock3D(base_channels*8, base_channels*16, dropout_p=0.3)
     
     def forward(self, x):
-        # Encoder path
-        enc1 = self.enc1(x)
-        enc2 = self.enc2(F.max_pool3d(enc1, kernel_size=2, stride=2))
-        enc3 = self.enc3(F.max_pool3d(enc2, kernel_size=2, stride=2))
-        enc4 = self.enc4(F.max_pool3d(enc3, kernel_size=2, stride=2))
+        # Encoder pathway with skip connections
+        x1 = self.enc1(x)
+        p1 = self.pool1(x1)
         
-        # Bottleneck
-        bottleneck = self.bottleneck(F.max_pool3d(enc4, kernel_size=2, stride=2))
+        x2 = self.enc2(p1)
+        p2 = self.pool2(x2)
         
-        # Decoder path with skip connections
-        dec4 = self.upconv4(bottleneck)
-        # Handle possible size mismatch
-        if dec4.shape[2:] != enc4.shape[2:]:
-            dec4 = F.interpolate(dec4, size=enc4.shape[2:], mode='trilinear', align_corners=False)
-        dec4 = torch.cat((enc4, dec4), dim=1)
-        dec4 = self.dec4(dec4)
+        x3 = self.enc3(p2)
+        p3 = self.pool3(x3)
         
-        dec3 = self.upconv3(dec4)
-        # Handle possible size mismatch
-        if dec3.shape[2:] != enc3.shape[2:]:
-            dec3 = F.interpolate(dec3, size=enc3.shape[2:], mode='trilinear', align_corners=False)
-        dec3 = torch.cat((enc3, dec3), dim=1)
-        dec3 = self.dec3(dec3)
+        x4 = self.enc4(p3)
+        p4 = self.pool4(x4)
         
-        dec2 = self.upconv2(dec3)
-        # Handle possible size mismatch
-        if dec2.shape[2:] != enc2.shape[2:]:
-            dec2 = F.interpolate(dec2, size=enc2.shape[2:], mode='trilinear', align_corners=False)
-        dec2 = torch.cat((enc2, dec2), dim=1)
-        dec2 = self.dec2(dec2)
+        bottleneck = self.bottleneck(p4)
         
-        dec1 = self.upconv1(dec2)
-        # Handle possible size mismatch
-        if dec1.shape[2:] != enc1.shape[2:]:
-            dec1 = F.interpolate(dec1, size=enc1.shape[2:], mode='trilinear', align_corners=False)
-        dec1 = torch.cat((enc1, dec1), dim=1)
-        dec1 = self.dec1(dec1)
+        return [x1, x2, x3, x4, bottleneck]
+
+class SimpleDecoder3D(nn.Module):
+    """
+    Simple decoder that ensures proper size handling for 3D volumes.
+    Keeps the same interface as the original SimpleDecoder3D.
+    """
+    def __init__(self, base_channels=16, out_channels=4):
+        super(SimpleDecoder3D, self).__init__()
+        
+        # Upsampling block 1
+        self.up1 = nn.ConvTranspose3d(
+            base_channels*16, base_channels*8, 
+            kernel_size=2, stride=2
+        )
+        self.dec1 = ConvBlock3D(base_channels*16, base_channels*8, dropout_p=0.3)  # 16 channels from bottleneck + 8 from skip
+        
+        # Upsampling block 2
+        self.up2 = nn.ConvTranspose3d(
+            base_channels*8, base_channels*4,
+            kernel_size=2, stride=2
+        )
+        self.dec2 = ConvBlock3D(base_channels*8, base_channels*4, dropout_p=0.3)  # 8 channels from up1 + 4 from skip
+        
+        # Upsampling block 3
+        self.up3 = nn.ConvTranspose3d(
+            base_channels*4, base_channels*2,
+            kernel_size=2, stride=2
+        )
+        self.dec3 = ConvBlock3D(base_channels*4, base_channels*2, dropout_p=0.3)  # 4 channels from up2 + 2 from skip
+        
+        # Upsampling block 4
+        self.up4 = nn.ConvTranspose3d(
+            base_channels*2, base_channels,
+            kernel_size=2, stride=2
+        )
+        self.dec4 = ConvBlock3D(base_channels*2, base_channels, dropout_p=0.3)  # 2 channels from up3 + 1 from skip
+        
+        # Final layer
+        self.final = nn.Conv3d(base_channels, out_channels, kernel_size=1)
+    
+    def forward(self, features):
+        x1, x2, x3, x4, bottleneck = features
+        
+        # Upsampling with skip connections
+        x = self.up1(bottleneck)
+        # Handle size mismatch with interpolation if needed
+        if x.shape[2:] != x4.shape[2:]:
+            x = F.interpolate(x, size=x4.shape[2:], mode='trilinear', align_corners=False)
+        x = torch.cat([x, x4], dim=1)
+        x = self.dec1(x)
+        
+        x = self.up2(x)
+        if x.shape[2:] != x3.shape[2:]:
+            x = F.interpolate(x, size=x3.shape[2:], mode='trilinear', align_corners=False)
+        x = torch.cat([x, x3], dim=1)
+        x = self.dec2(x)
+        
+        x = self.up3(x)
+        if x.shape[2:] != x2.shape[2:]:
+            x = F.interpolate(x, size=x2.shape[2:], mode='trilinear', align_corners=False)
+        x = torch.cat([x, x2], dim=1)
+        x = self.dec3(x)
+        
+        x = self.up4(x)
+        if x.shape[2:] != x1.shape[2:]:
+            x = F.interpolate(x, size=x1.shape[2:], mode='trilinear', align_corners=False)
+        x = torch.cat([x, x1], dim=1)
+        x = self.dec4(x)
         
         # Final convolution
-        output = self.final_conv(dec1)
+        x = self.final(x)
         
-        return output
+        return x
 
 class AutoSAM2(nn.Module):
     """
-    Simplified AutoSAM2 that focuses on just the 3D UNet part for now.
-    Integration with SAM2 will be added in a later phase.
+    3D adaptation of AutoSAM2 that maintains the original interface
+    expected by train.py.
     """
     def __init__(self, num_classes=4):
         super(AutoSAM2, self).__init__()
@@ -122,10 +188,11 @@ class AutoSAM2(nn.Module):
         # Store configuration
         self.num_classes = num_classes
         
-        # Create 3D UNet
-        self.unet3d = UNet3D(in_channels=4, out_channels=num_classes)
+        # Create encoder and decoder
+        self.encoder = SimpleEncoder3D(in_channels=4, base_channels=16)
+        self.decoder = SimpleDecoder3D(base_channels=16, out_channels=num_classes)
         
-        # Initialize SAM2 (but don't use it yet)
+        # Initialize SAM2
         if HAS_SAM2:
             try:
                 self.sam2 = SAM2ImagePredictor.from_pretrained("facebook/sam2-hiera-large")
@@ -144,22 +211,49 @@ class AutoSAM2(nn.Module):
             self.has_sam2 = False
             self.sam2 = None
     
+    def process_slice_with_sam2(self, img_slice, device):
+        """
+        Placeholder for processing a single 2D slice with SAM2.
+        This will be implemented in the next phase.
+        """
+        # In this simple version, we'll just return a placeholder
+        # We just want to verify that the data dimensions are correct
+        height, width = img_slice.shape[1:]
+        placeholder = torch.zeros((height, width), device=device)
+        return placeholder
+    
     def forward(self, x):
         """
-        Forward pass - use the 3D UNet to generate segmentations for the entire volume.
-        
-        Args:
-            x: Input tensor of shape [batch_size, 4, depth, height, width]
-               representing the 4 MRI modalities
+        Forward pass - maintains the same interface as the original model.
         """
-        # Get segmentation from UNet
-        segmentation = self.unet3d(x)
+        batch_size, channels, depth, height, width = x.shape
+        
+        # Get features from encoder
+        features = self.encoder(x)
+        
+        # Get segmentation from decoder
+        segmentation = self.decoder(features)
+        
+        # Print shape information for debugging
+        if self.training:
+            print(f"Processing volume with shape: {x.shape}")
+            print(f"Output segmentation shape: {segmentation.shape}")
+        
+        # Select middle slice for demonstration with SAM2
+        if self.has_sam2 and self.training:
+            # Calculate middle slice
+            middle_slice = depth // 2
+            print(f"In full model, would process slice {middle_slice} with SAM2")
+            
+            # Get some data from middle slice for demonstration
+            for b in range(batch_size):
+                sample_slice = x[b, 0, :, :, middle_slice]  # Get FLAIR modality
+                print(f"Middle slice {middle_slice} shape: {sample_slice.shape}")
         
         # Apply sigmoid to get probabilities
         output = torch.sigmoid(segmentation)
         
         return output
-
 #dataset.py
 import os
 import torch
