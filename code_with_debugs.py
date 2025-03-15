@@ -369,7 +369,7 @@ class SimpleEncoder3D(nn.Module):
     
     def forward(self, x):
         # Print input shape to verify dimensions
-        print(f"Encoder input shape: {x.shape}")
+        #print(f"Encoder input shape: {x.shape}")
         
         # Encoder pathway with skip connections
         x1 = self.enc1(x)
