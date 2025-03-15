@@ -236,8 +236,8 @@ class AutoSAM2(nn.Module):
         
         # Print shape information for debugging
         if self.training:
-            print(f"Processing volume with shape: {x.shape}")
-            print(f"Output segmentation shape: {segmentation.shape}")
+            #print(f"Processing volume with shape: {x.shape}")
+            #print(f"Output segmentation shape: {segmentation.shape}")
         
         # Apply sigmoid to get probabilities
         output = torch.sigmoid(segmentation)
