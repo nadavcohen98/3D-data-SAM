@@ -82,7 +82,7 @@ def apply_augmentations(image, mask, probability=0.5):
 
 class BraTSDataset(Dataset):
     def __init__(self, root_dir, train=True, normalize=True, max_samples=None, 
-                 filter_empty=False, use_augmentation=False, target_shape=None, 
+                 filter_empty=False, use_augmentation=False, 
                  cache_data=False, verbose=True):
         """
         Enhanced BraTS dataset with efficient data loading
@@ -91,7 +91,6 @@ class BraTSDataset(Dataset):
         self.train = train
         self.normalize = normalize
         self.use_augmentation = use_augmentation and train
-        self.target_shape = target_shape
         self.cache_data = cache_data
         self.verbose = verbose
         
@@ -178,29 +177,6 @@ class BraTSDataset(Dataset):
         else:
             return len(self.patient_dirs)
     
-    def _resize_volume(self, image, mask):
-        """Resize volume to target dimensions if specified"""
-        if self.target_shape is None:
-            return image, mask
-            
-        target_depth, target_height, target_width = self.target_shape
-        
-        # Resize using interpolation
-        resized_image = F.interpolate(
-            image.unsqueeze(0),  # Add batch dimension
-            size=(target_depth, target_height, target_width),
-            mode='trilinear',
-            align_corners=False
-        ).squeeze(0)  # Remove batch dimension
-        
-        resized_mask = F.interpolate(
-            mask.unsqueeze(0),  # Add batch dimension
-            size=(target_depth, target_height, target_width),
-            mode='nearest'
-        ).squeeze(0)  # Remove batch dimension
-        
-        return resized_image, resized_mask
-    
     def _load_monai_data(self, idx):
         """Load data from MONAI's Task01_BrainTumour structure with error handling"""
         # Check if data is in cache
@@ -239,7 +215,7 @@ class BraTSDataset(Dataset):
             if self.verbose:
                 print(f"Error loading image {self.image_files[idx]}: {e}")
             # Return dummy data
-            dummy_shape = (4, 240, 240, 155) if self.target_shape is None else (4, *self.target_shape)
+            dummy_shape = (4, 240, 240, 155) 
             return torch.zeros(dummy_shape, dtype=torch.float32), torch.zeros((1, *dummy_shape[1:]), dtype=torch.float32)
     
     def __getitem__(self, idx):
@@ -250,9 +226,6 @@ class BraTSDataset(Dataset):
         if self.normalize:
             image = preprocess_brats_data(image, normalize=True)
         
-        # Resize to target dimensions if specified
-        if self.target_shape is not None:
-            image, mask = self._resize_volume(image, mask)
         
         # Apply data augmentation in training mode
         if self.use_augmentation:
@@ -262,7 +235,7 @@ class BraTSDataset(Dataset):
 
 def get_brats_dataloader(root_dir, batch_size=1, train=True, normalize=True, max_samples=None, 
                          num_workers=4, filter_empty=False, use_augmentation=False, 
-                         target_shape=None, cache_data=False, verbose=True):
+                         cache_data=False, verbose=True):
     """Create a DataLoader for BraTS dataset with a proper train/validation split"""
     
     # Step 1: Load ALL available data from the training directory
@@ -274,7 +247,6 @@ def get_brats_dataloader(root_dir, batch_size=1, train=True, normalize=True, max
         max_samples=None,  # Don't limit samples in dataset initialization
         filter_empty=filter_empty,
         use_augmentation=False,  # We'll add augmentation later if needed
-        target_shape=target_shape,
         cache_data=cache_data,
         verbose=False  # Turn off verbose in dataset to avoid double messages
     )
@@ -1086,8 +1058,7 @@ def save_training_history(history, filename):
     plt.close()
 
 def train_model(data_path, batch_size=1, epochs=20, learning_rate=1e-3,
-               use_mixed_precision=False, test_run=False, reset=True, 
-               target_shape=(64, 128, 128)):
+               use_mixed_precision=False, test_run=False, reset=True):
     """
     Optimized train function with better learning rate schedule
     Including IoU and BCE loss in history.
@@ -1157,14 +1128,14 @@ def train_model(data_path, batch_size=1, epochs=20, learning_rate=1e-3,
         data_path, batch_size=batch_size, train=True,
         normalize=True, max_samples=max_samples, num_workers=4,
         filter_empty=False, use_augmentation=True,
-        target_shape=target_shape, cache_data=False, verbose=True
+        cache_data=False, verbose=True
     )
 
     val_loader = get_brats_dataloader(
         data_path, batch_size=batch_size, train=False,
         normalize=True, max_samples=max_samples, num_workers=4,
         filter_empty=False, use_augmentation=False,
-        target_shape=target_shape, cache_data=False, verbose=True
+        cache_data=False, verbose=True
     )
     
     # Set up OneCycle learning rate scheduler
@@ -1298,8 +1269,6 @@ def main():
                         help='Disable mixed precision training')
     parser.add_argument('--memory_limit', type=float, default=0.9,
                         help='Memory limit for GPU (0.0-1.0)')
-    parser.add_argument('--target_shape', type=str, default="64,128,128",
-                        help='Target shape for resizing (depth,height,width)')
     
     args = parser.parse_args()
     
@@ -1311,17 +1280,6 @@ def main():
         except Exception as e:
             print(f"Warning: Could not set GPU memory fraction: {e}")
 
-    # Parse target shape argument
-    try:
-        target_shape = tuple(map(int, args.target_shape.split(',')))
-        if len(target_shape) != 3:
-            raise ValueError("Target shape must have exactly 3 dimensions (depth, height, width).")
-    except ValueError as e:
-        print(f"Error parsing target shape: {e}")
-        return  # Exit early if parsing fails
-    
-    print(f"Using target shape: {target_shape}")
-
     # Train the model
     try:
         model, history, best_metrics = train_model(
@@ -1332,7 +1290,6 @@ def main():
             use_mixed_precision=not args.no_mixed_precision,
             test_run=args.test_run,
             reset=args.reset,
-            target_shape=target_shape
         )
     except Exception as e:
         print(f"Error during training: {e}")
