@@ -463,7 +463,7 @@ class SimpleDecoder3D(nn.Module):
         
         return x
 
-class SimpleAutoSAM2(nn.Module):
+class AutoSAM2(nn.Module):
     """
     Simplified version of AutoSAM2 to verify data flow
     """
