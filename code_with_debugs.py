@@ -16,7 +16,6 @@ except ImportError:
 class ConvBlock3D(nn.Module):
     """
     Simplified 3D convolutional block optimized for performance.
-    Combines useful elements from the previous models without excess complexity.
     """
     def __init__(self, in_channels, out_channels, kernel_size=3, padding=1, dropout_p=0.3):
         super(ConvBlock3D, self).__init__()
@@ -47,8 +46,7 @@ class ConvBlock3D(nn.Module):
 
 class EfficientEncoder3D(nn.Module):
     """
-    Efficient 3D encoder that processes the volume while extracting key slices
-    for later integration with SAM2.
+    Efficient 3D encoder with correct dimension handling.
     """
     def __init__(self, in_channels=4, base_channels=16, slice_interval=10):
         super(EfficientEncoder3D, self).__init__()
@@ -78,8 +76,18 @@ class EfficientEncoder3D(nn.Module):
         self.slice_projection = nn.Conv3d(base_channels*16, 256, kernel_size=1)
     
     def forward(self, x):
-        # Track input shape for selecting key slices
-        batch_size, channels, depth, height, width = x.shape
+        # We need to determine the depth dimension correctly
+        batch_size, channels, dim1, dim2, dim3 = x.shape
+        
+        # BraTS data typically has shape [batch, channels, depth, height, width]
+        # Where depth is around 155 and height/width are around 240
+        # So we identify the smallest dimension as depth
+        dims = [dim1, dim2, dim3]
+        depth_idx = dims.index(min(dims))
+        depth = dims[depth_idx]
+        
+        # Print input shape analysis
+        print(f"Input shape: {x.shape}, identified depth: {depth} (dimension index {depth_idx})")
         
         # Store key slice indices (approximately every slice_interval slices)
         key_indices = []
@@ -97,36 +105,40 @@ class EfficientEncoder3D(nn.Module):
         print(f"Selected {len(key_indices)} key slices at depths: {key_indices}")
         
         # Encoder pathway with skip connections
-        x1 = self.enc1(x)  # Output: [batch, 16, d, h, w]
-        p1 = self.pool1(x1)  # Output: [batch, 16, d/2, h/2, w/2]
+        x1 = self.enc1(x)
+        p1 = self.pool1(x1)
         
-        x2 = self.enc2(p1)  # Output: [batch, 32, d/2, h/2, w/2]
-        p2 = self.pool2(x2)  # Output: [batch, 32, d/4, h/4, w/4]
+        x2 = self.enc2(p1)
+        p2 = self.pool2(x2)
         
-        x3 = self.enc3(p2)  # Output: [batch, 64, d/4, h/4, w/4]
-        p3 = self.pool3(x3)  # Output: [batch, 64, d/8, h/8, w/8]
+        x3 = self.enc3(p2)
+        p3 = self.pool3(x3)
         
-        x4 = self.enc4(p3)  # Output: [batch, 128, d/8, h/8, w/8]
-        p4 = self.pool4(x4)  # Output: [batch, 128, d/16, h/16, w/16]
+        x4 = self.enc4(p3)
+        p4 = self.pool4(x4)
         
-        bottleneck = self.bottleneck(p4)  # Output: [batch, 256, d/16, h/16, w/16]
+        bottleneck = self.bottleneck(p4)
         
         # Project features for key slices (to be used with SAM2 later)
-        key_features = self.slice_projection(bottleneck)  # Output: [batch, 256, d/16, h/16, w/16]
+        key_features = self.slice_projection(bottleneck)
+        
+        # Calculate downsampled depth
+        downsampled_depth = depth // 16  # After 4 pooling layers with stride 2
         
         # Calculate downsampled key indices
-        ds_key_indices = [idx // 16 for idx in key_indices]
+        ds_key_indices = [min(idx // 16, downsampled_depth-1) for idx in key_indices]
         
         # Store dimensions at each level for the decoder
         encoder_dimensions = {
-            "input": (depth, height, width),
-            "enc1": x1.shape[2:],  # [d, h, w]
-            "enc2": x2.shape[2:],  # [d/2, h/2, w/2]
-            "enc3": x3.shape[2:],  # [d/4, h/4, w/4]
-            "enc4": x4.shape[2:],  # [d/8, h/8, w/8]
-            "bottleneck": bottleneck.shape[2:],  # [d/16, h/16, w/16]
+            "input_shape": x.shape,
+            "enc1_shape": x1.shape,
+            "enc2_shape": x2.shape,
+            "enc3_shape": x3.shape,
+            "enc4_shape": x4.shape,
+            "bottleneck_shape": bottleneck.shape,
             "key_indices": key_indices,
-            "ds_key_indices": ds_key_indices
+            "ds_key_indices": ds_key_indices,
+            "depth_dim_idx": depth_idx  # Store which dimension is depth
         }
         
         return [x1, x2, x3, x4, bottleneck, key_features, encoder_dimensions]
@@ -134,7 +146,6 @@ class EfficientEncoder3D(nn.Module):
 class EfficientDecoder3D(nn.Module):
     """
     Efficient 3D decoder that works with the encoded features.
-    Preserves the same interface as the original decoder.
     """
     def __init__(self, base_channels=16, out_channels=4):
         super(EfficientDecoder3D, self).__init__()
@@ -144,28 +155,28 @@ class EfficientDecoder3D(nn.Module):
             base_channels*16, base_channels*8, 
             kernel_size=2, stride=2
         )
-        self.dec1 = ConvBlock3D(base_channels*16, base_channels*8)  # 16 channels from bottleneck + 8 from skip
+        self.dec1 = ConvBlock3D(base_channels*16, base_channels*8)
         
         # Upsampling block 2
         self.up2 = nn.ConvTranspose3d(
             base_channels*8, base_channels*4,
             kernel_size=2, stride=2
         )
-        self.dec2 = ConvBlock3D(base_channels*8, base_channels*4)  # 8 channels from up1 + 4 from skip
+        self.dec2 = ConvBlock3D(base_channels*8, base_channels*4)
         
         # Upsampling block 3
         self.up3 = nn.ConvTranspose3d(
             base_channels*4, base_channels*2,
             kernel_size=2, stride=2
         )
-        self.dec3 = ConvBlock3D(base_channels*4, base_channels*2)  # 4 channels from up2 + 2 from skip
+        self.dec3 = ConvBlock3D(base_channels*4, base_channels*2)
         
         # Upsampling block 4
         self.up4 = nn.ConvTranspose3d(
             base_channels*2, base_channels,
             kernel_size=2, stride=2
         )
-        self.dec4 = ConvBlock3D(base_channels*2, base_channels)  # 2 channels from up3 + 1 from skip
+        self.dec4 = ConvBlock3D(base_channels*2, base_channels)
         
         # Final layer
         self.final = nn.Conv3d(base_channels, out_channels, kernel_size=1)
@@ -179,95 +190,72 @@ class EfficientDecoder3D(nn.Module):
         if x.shape[2:] != x4.shape[2:]:
             x = F.interpolate(x, size=x4.shape[2:], mode='trilinear', align_corners=False)
         x = torch.cat([x, x4], dim=1)
-        x = self.dec1(x)  # Output: [batch, 128, d/8, h/8, w/8]
+        x = self.dec1(x)
         
         x = self.up2(x)
         if x.shape[2:] != x3.shape[2:]:
             x = F.interpolate(x, size=x3.shape[2:], mode='trilinear', align_corners=False)
         x = torch.cat([x, x3], dim=1)
-        x = self.dec2(x)  # Output: [batch, 64, d/4, h/4, w/4]
+        x = self.dec2(x)
         
         x = self.up3(x)
         if x.shape[2:] != x2.shape[2:]:
             x = F.interpolate(x, size=x2.shape[2:], mode='trilinear', align_corners=False)
         x = torch.cat([x, x2], dim=1)
-        x = self.dec3(x)  # Output: [batch, 32, d/2, h/2, w/2]
+        x = self.dec3(x)
         
         x = self.up4(x)
         if x.shape[2:] != x1.shape[2:]:
             x = F.interpolate(x, size=x1.shape[2:], mode='trilinear', align_corners=False)
         x = torch.cat([x, x1], dim=1)
-        x = self.dec4(x)  # Output: [batch, 16, d, h, w]
+        x = self.dec4(x)
         
         # Final convolution
-        x = self.final(x)  # Output: [batch, 4, d, h, w]
+        x = self.final(x)
         
         return x
 
-class KeySliceExtractor(nn.Module):
+class SliceExtractor(nn.Module):
     """
-    Helper module to extract and process key slices for SAM2 integration.
-    This will be fully utilized when we integrate with SAM2.
+    Module to extract specific slices from a 3D volume,
+    accounting for different dimension orderings.
     """
-    def __init__(self, input_channels=256, output_channels=256, output_size=(64, 64)):
-        super(KeySliceExtractor, self).__init__()
-        
-        self.output_size = output_size
-        
-        # Adaptive pooling to get desired output size
-        self.adaptive_pool = nn.AdaptiveAvgPool2d(output_size)
-        
-        # Convolutional layers to process slices
-        self.conv1 = nn.Conv2d(input_channels, input_channels, kernel_size=3, padding=1)
-        self.norm1 = nn.BatchNorm2d(input_channels)
-        self.relu1 = nn.ReLU(inplace=True)
-        
-        self.conv2 = nn.Conv2d(input_channels, output_channels, kernel_size=3, padding=1)
-        self.norm2 = nn.BatchNorm2d(output_channels)
-        self.relu2 = nn.ReLU(inplace=True)
+    def __init__(self):
+        super(SliceExtractor, self).__init__()
     
-    def forward(self, x, key_indices):
+    def forward(self, x, indices, depth_dim=2):
         """
-        Extract and process key slices from a 3D tensor.
+        Extract slices from a specific dimension of a 3D tensor.
         
         Args:
-            x: 3D tensor of shape [batch, channels, depth, height, width]
-            key_indices: List of key slice indices to extract
+            x: 3D tensor of shape [batch, channels, dim1, dim2, dim3]
+            indices: List of indices to extract
+            depth_dim: Which dimension to extract from (0, 1, or 2, corresponding to dim1, dim2, or dim3)
             
         Returns:
-            Dictionary of processed 2D slices, ready for SAM2
+            Dictionary of 2D slices
         """
-        batch_size, channels, depth, height, width = x.shape
-        processed_slices = {}
+        batch_size = x.shape[0]
+        slices = {}
         
         for b in range(batch_size):
-            processed_slices[b] = {}
-            for idx in key_indices:
-                if idx < depth:
-                    # Extract the slice - shape: [channels, height, width]
+            slices[b] = {}
+            for idx in indices:
+                # Extract along the correct dimension
+                if depth_dim == 0:  # Extract from dim1
                     slice_2d = x[b, :, idx, :, :]
-                    
-                    # Apply adaptive pooling if needed to get target size
-                    if slice_2d.shape[1:] != self.output_size:
-                        slice_2d = self.adaptive_pool(slice_2d)
-                    
-                    # Process the slice
-                    slice_2d = self.conv1(slice_2d)
-                    slice_2d = self.norm1(slice_2d)
-                    slice_2d = self.relu1(slice_2d)
-                    
-                    slice_2d = self.conv2(slice_2d)
-                    slice_2d = self.norm2(slice_2d)
-                    slice_2d = self.relu2(slice_2d)
-                    
-                    processed_slices[b][idx] = slice_2d
+                elif depth_dim == 1:  # Extract from dim2
+                    slice_2d = x[b, :, :, idx, :]
+                else:  # Extract from dim3
+                    slice_2d = x[b, :, :, :, idx]
+                
+                slices[b][idx] = slice_2d
         
-        return processed_slices
+        return slices
 
 class AutoSAM2(nn.Module):
     """
-    Hybrid 3D-2D AutoSAM2 model that processes the entire volume
-    while extracting key slices for future SAM2 integration.
+    Hybrid 3D-2D AutoSAM2 model with correct dimension handling.
     """
     def __init__(self, num_classes=4, slice_interval=10):
         super(AutoSAM2, self).__init__()
@@ -288,12 +276,8 @@ class AutoSAM2(nn.Module):
             out_channels=num_classes
         )
         
-        # Key slice extractor for SAM2 integration (to be used later)
-        self.key_slice_extractor = KeySliceExtractor(
-            input_channels=256,
-            output_channels=256,
-            output_size=(64, 64)
-        )
+        # Slice extractor
+        self.slice_extractor = SliceExtractor()
         
         # Initialize SAM2
         if HAS_SAM2:
@@ -320,27 +304,43 @@ class AutoSAM2(nn.Module):
         This will be implemented fully in the next phase.
         """
         # In this simple version, we'll just return a placeholder
-        # We just want to verify that the data dimensions are correct
         height, width = img_slice.shape[1:]
         placeholder = torch.zeros((height, width), device=device)
         return placeholder
     
     def forward(self, x):
         """
-        Forward pass of the hybrid model.
+        Forward pass of the hybrid model with dimension correction.
         """
-        batch_size, channels, depth, height, width = x.shape
-        
-        # Get features from encoder - includes key slice info
+        # Get features from encoder with dimension info
         features = self.encoder(x)
         
         # Process through decoder for basic segmentation
         segmentation = self.decoder(features)
         
         # Extract dimensions and key info
-        x1, x2, x3, x4, bottleneck, key_features, dimensions = features
+        _, _, _, _, _, key_features, dimensions = features
         key_indices = dimensions["key_indices"]
-        ds_key_indices = dimensions["ds_key_indices"]
+        depth_dim_idx = dimensions["depth_dim_idx"]
+        
+        # When training with SAM2 enabled (future implementation)
+        if self.has_sam2 and self.training:
+            # Just for demonstration in current phase
+            print(f"In future implementation: would process {len(key_indices)} key slices with SAM2")
+            
+            # Extract sample slice for visualization
+            input_shape = dimensions["input_shape"]
+            middle_idx = input_shape[2 + depth_dim_idx] // 2  # Account for batch and channel dims
+            
+            # Extract slices using correct dimension
+            if depth_dim_idx == 0:
+                sample_slice = x[0, 0, middle_idx, :, :]  # First batch, first channel
+            elif depth_dim_idx == 1:
+                sample_slice = x[0, 0, :, middle_idx, :]
+            else:
+                sample_slice = x[0, 0, :, :, middle_idx]
+                
+            print(f"Shape of middle slice: {sample_slice.shape}")
         
         # Apply sigmoid to get probabilities
         output = torch.sigmoid(segmentation)
