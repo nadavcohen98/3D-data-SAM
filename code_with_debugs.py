@@ -362,7 +362,7 @@ class SimpleEncoder3D(nn.Module):
     
     def forward(self, x):
         # Print input shape to verify dimensions
-        #print(f"Encoder input shape: {x.shape}")
+        print(f"Encoder input shape: {x.shape}")
         
         # Encoder pathway with skip connections
         x1 = self.enc1(x)
@@ -374,9 +374,9 @@ class SimpleEncoder3D(nn.Module):
         x = self.bottleneck(x)
         
         # Print shapes of each feature level
-        #print(f"Skip connection 1 shape: {x1.shape}")
-        #print(f"Skip connection 2 shape: {x2.shape}")
-        #print(f"Bottleneck shape: {x.shape}")
+        print(f"Skip connection 1 shape: {x1.shape}")
+        print(f"Skip connection 2 shape: {x2.shape}")
+        print(f"Bottleneck shape: {x.shape}")
         
         return [x1, x2, x]
 
@@ -422,15 +422,15 @@ class SimpleDecoder3D(nn.Module):
         x1, x2, x = features
         
         # Print shapes before operations
-        #print(f"Decoder input shapes - x1: {x1.shape}, x2: {x2.shape}, bottleneck: {x.shape}")
+        print(f"Decoder input shapes - x1: {x1.shape}, x2: {x2.shape}, bottleneck: {x.shape}")
         
         # First upsampling
         x = self.up1(x)
-        #print(f"After up1: {x.shape}")
+        print(f"After up1: {x.shape}")
         
         # Handle size mismatch - just use interpolation to match
         if x.shape[2:] != x2.shape[2:]:
-            #print(f"Size mismatch in decoder. Interpolating {x.shape} to match {x2.shape}")
+            print(f"Size mismatch in decoder. Interpolating {x.shape} to match {x2.shape}")
             x = F.interpolate(x, size=x2.shape[2:], mode='trilinear', align_corners=False)
         
         # Concatenate and process
@@ -439,11 +439,11 @@ class SimpleDecoder3D(nn.Module):
         
         # Second upsampling
         x = self.up2(x)
-        #print(f"After up2: {x.shape}")
+        print(f"After up2: {x.shape}")
         
         # Handle size mismatch again
         if x.shape[2:] != x1.shape[2:]:
-            #print(f"Size mismatch in decoder. Interpolating {x.shape} to match {x1.shape}")
+            print(f"Size mismatch in decoder. Interpolating {x.shape} to match {x1.shape}")
             x = F.interpolate(x, size=x1.shape[2:], mode='trilinear', align_corners=False)
         
         # Concatenate and process
@@ -452,7 +452,7 @@ class SimpleDecoder3D(nn.Module):
         
         # Final convolution
         x = self.final(x)
-        #print(f"Decoder output shape: {x.shape}")
+        print(f"Decoder output shape: {x.shape}")
         
         return x
 
@@ -506,7 +506,7 @@ class AutoSAM2(nn.Module):
         """
         # Print input dimensions to verify
         batch_size, channels, depth, height, width = x.shape
-        #print(f"Input dimensions: batch_size={batch_size}, channels={channels}, depth={depth}, height={height}, width={width}")
+        print(f"Input dimensions: batch_size={batch_size}, channels={channels}, depth={depth}, height={height}, width={width}")
         
         # Get features from encoder
         features = self.encoder(x)
@@ -518,12 +518,12 @@ class AutoSAM2(nn.Module):
         if self.has_sam2 and self.training:
             # Just print information about what we would process
             middle_slice = depth // 2
-            #print(f"In full model, would process slice {middle_slice} with SAM2")
+            print(f"In full model, would process slice {middle_slice} with SAM2")
             
             # Get some data from middle slice for demonstration
             for b in range(batch_size):
                 sample_slice = x[b, 0, middle_slice]  # Get FLAIR modality
-                #print(f"Middle slice {middle_slice} shape: {sample_slice.shape}")
+                print(f"Middle slice {middle_slice} shape: {sample_slice.shape}")
         
         # Apply sigmoid to get probabilities
         output = torch.sigmoid(segmentation)
