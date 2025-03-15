@@ -7,6 +7,7 @@ import time
 import gc
 import logging
 import os
+import glob
 
 # Configure logging
 logging.basicConfig(
@@ -22,6 +23,8 @@ logger = logging.getLogger("AutoSAM2")
 # Import SAM2 with error handling
 try:
     from sam2.sam2_image_predictor import SAM2ImagePredictor
+    import sam2
+    from sam2.build_sam import build_sam2_hf
     HAS_SAM2 = True
     logger.info("Successfully imported SAM2")
 except ImportError:
@@ -337,14 +340,13 @@ class AutoSAM2(nn.Module):
     embeddings, and SAM2 to complete the segmentation at full resolution.
     """
     def __init__(self, num_classes=4, base_channels=16, slice_interval=10, 
-                 trilinear=True, sam2_model_name="facebook/sam2-hiera-base",
-                 enable_sam2=True, debug_mode=False):
+                 trilinear=True, sam2_model_path=None, enable_sam2=True, debug_mode=False):
         super().__init__()
         
         # Store configuration
         self.num_classes = num_classes
         self.slice_interval = slice_interval
-        self.sam2_model_name = sam2_model_name
+        self.sam2_model_path = sam2_model_path
         self.enable_sam2 = enable_sam2
         self.debug_mode = debug_mode
         
@@ -372,7 +374,7 @@ class AutoSAM2(nn.Module):
         self.embedding_processor = EmbeddingProcessor(embedding_size=64)
         
         # Initialize SAM2
-        self.initialize_sam2(sam2_model_name)
+        self.initialize_sam2()
         
         # Create a fallback UNet3D model for when SAM2 is not available
         # This ensures compatibility with the training pipeline
@@ -395,52 +397,143 @@ class AutoSAM2(nn.Module):
         logger.info(f"Initialized AutoSAM2 with {base_channels} base channels, "
                    f"slice interval {slice_interval}, SAM2 enabled: {self.has_sam2 if hasattr(self, 'has_sam2') else False}")
         
-    def initialize_sam2(self, model_name):
-        """Initialize SAM2 with improved error handling"""
-        if HAS_SAM2 and self.enable_sam2:
-            try:
-                logger.info(f"Initializing SAM2 with model: {model_name}")
-                
-                # Try different model names if the specified one fails
-                model_names_to_try = [
-                    model_name,
-                    "SAM2", 
-                    "sam2",
-                    "sam2-image-predictor",
-                    "facebook/sam2-base",
-                    "facebook/sam2-small"
-                ]
-                
-                for name in model_names_to_try:
-                    try:
-                        logger.info(f"Trying to initialize SAM2 with model name: {name}")
-                        self.sam2 = SAM2ImagePredictor.from_pretrained(name)
-                        logger.info(f"Successfully initialized SAM2 with model: {name}")
-                        break
-                    except Exception as e:
-                        logger.warning(f"Failed to initialize with model name {name}: {e}")
-                
-                # Check if any model was successfully loaded
-                if not hasattr(self, 'sam2') or self.sam2 is None:
-                    raise ValueError("Failed to initialize SAM2 with any of the attempted model names")
-                    
-                # Freeze SAM2 weights
-                for param in self.sam2.model.parameters():
-                    param.requires_grad = False
-                
-                self.has_sam2 = True
-                logger.info("SAM2 initialization complete")
-            except Exception as e:
-                logger.error(f"Error initializing SAM2: {str(e)}")
-                self.has_sam2 = False
-                self.sam2 = None
-        else:
-            self.has_sam2 = False
-            self.sam2 = None
+    def find_sam2_model_file(self):
+        """Find a SAM2 model file on the system"""
+        # Start with the provided path if any
+        if self.sam2_model_path and os.path.exists(self.sam2_model_path):
+            return self.sam2_model_path
+            
+        # Look in common locations
+        potential_paths = [
+            # Direct path to the model we found in the tests
+            "/home/erezhuberman/.cache/huggingface/hub/models--facebook--sam2-hiera-large/snapshots/eba9be237c463eb950e64b65c223ad55c878c2ac/sam2_hiera_large.pt",
+            # Other potential cache locations
+            os.path.expanduser("~/.cache/huggingface/hub/"),
+            os.path.expanduser("~/.cache/torch/hub/checkpoints/"),
+            os.path.expanduser("~/sam2/models/"),
+            os.path.join(os.path.dirname(sam2.__file__), "models"),
+            "models/",
+            "weights/",
+            "checkpoints/"
+        ]
+        
+        # Check direct paths first
+        for path in potential_paths:
+            if os.path.isfile(path) and (path.endswith('.pt') or path.endswith('.pth')):
+                logger.info(f"Found SAM2 model file: {path}")
+                return path
+        
+        # Search directories
+        for dir_path in potential_paths:
+            if os.path.isdir(dir_path):
+                logger.info(f"Searching for SAM2 model in: {dir_path}")
+                for root, dirs, files in os.walk(dir_path):
+                    for file in files:
+                        if file.endswith('.pt') or file.endswith('.pth'):
+                            if 'sam2' in file.lower() or 'sam' in file.lower():
+                                full_path = os.path.join(root, file)
+                                logger.info(f"Found potential SAM2 model file: {full_path}")
+                                return full_path
+        
+        # If nothing is found
+        return None
+        
+    def initialize_sam2(self):
+        """Initialize SAM2 with improved approach"""
+        self.has_sam2 = False
+        self.sam2 = None
+        
+        if not HAS_SAM2 or not self.enable_sam2:
             if not HAS_SAM2:
                 logger.warning("SAM2 package not available. Will run in fallback mode.")
             elif not self.enable_sam2:
                 logger.info("SAM2 integration disabled by user. Will run in fallback mode.")
+            return
+            
+        try:
+            logger.info("Attempting to initialize SAM2")
+            
+            # Try multiple approaches to initialize SAM2
+            
+            # Approach 1: Try direct initialization with sam2_model member variable
+            logger.info("Approach 1: Trying to initialize a SAM2 model instance directly")
+            try:
+                from sam2.modeling.sam2_model import SAM2
+                sam2_model = SAM2()
+                self.sam2 = SAM2ImagePredictor(sam2_model)
+                logger.info("SUCCESS! Initialized SAM2 directly")
+                self.has_sam2 = True
+                return
+            except Exception as e:
+                logger.warning(f"Direct SAM2 initialization failed: {e}")
+            
+            # Approach 2: Find a model file and try to load it directly
+            logger.info("Approach 2: Looking for SAM2 model files")
+            model_file = self.find_sam2_model_file()
+            if model_file:
+                try:
+                    # Try loading with torch first
+                    logger.info(f"Trying to load model file with torch: {model_file}")
+                    state_dict = torch.load(model_file)
+                    
+                    # Try to initialize SAM2 and load state dict
+                    from sam2.modeling.sam2_model import SAM2
+                    sam2_model = SAM2()
+                    sam2_model.load_state_dict(state_dict)
+                    self.sam2 = SAM2ImagePredictor(sam2_model)
+                    logger.info("SUCCESS! Initialized SAM2 with model file")
+                    self.has_sam2 = True
+                    return
+                except Exception as e:
+                    logger.warning(f"Failed to load model file with torch: {e}")
+                    
+                    # Try using SAM2ImagePredictor.from_pretrained with file path
+                    try:
+                        logger.info(f"Trying from_pretrained with file path: {model_file}")
+                        self.sam2 = SAM2ImagePredictor.from_pretrained(model_file)
+                        logger.info("SUCCESS! Initialized SAM2 with from_pretrained")
+                        self.has_sam2 = True
+                        return
+                    except Exception as e:
+                        logger.warning(f"Failed to initialize with from_pretrained: {e}")
+            
+            # Approach 3: Try using build_sam2_hf directly
+            logger.info("Approach 3: Trying to use build_sam2_hf directly")
+            try:
+                logger.info("Trying to import build_sam2_hf and initialize model")
+                model_ids = ["facebook/sam2-hiera-large", "facebook/sam2-base", "facebook/sam2-small"]
+                
+                for model_id in model_ids:
+                    try:
+                        logger.info(f"Trying to build SAM2 with model_id: {model_id}")
+                        sam2_model = build_sam2_hf(model_id)
+                        self.sam2 = SAM2ImagePredictor(sam2_model)
+                        logger.info(f"SUCCESS! Built SAM2 with model_id: {model_id}")
+                        self.has_sam2 = True
+                        return
+                    except Exception as e:
+                        logger.warning(f"Failed to build with model_id {model_id}: {e}")
+            
+            except Exception as e:
+                logger.warning(f"Failed to use build_sam2_hf: {e}")
+            
+            # If all approaches failed
+            logger.error("All SAM2 initialization approaches failed")
+            self.has_sam2 = False
+            self.sam2 = None
+            
+        except Exception as e:
+            logger.error(f"Error in SAM2 initialization: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+            self.has_sam2 = False
+            self.sam2 = None
+            
+        # Final logging of SAM2 status
+        if self.has_sam2:
+            logger.info("SAM2 initialized successfully")
+        else:
+            logger.warning("SAM2 initialization failed, will use fallback UNet3D")
                 
     def process_slice_with_sam2(self, img_slice, embedding, slice_idx, device):
         """
@@ -483,7 +576,6 @@ class AutoSAM2(nn.Module):
             
             # Reshape mask to match expected output format [B, C, H, W]
             # Note: SAM2 outputs masks with shape [1, 1, H, W] but we need [1, num_classes, H, W]
-            # We'll convert the binary mask to multi-class here
             height, width = mask.shape[2:]
             multi_class_mask = torch.zeros((1, self.num_classes, height, width), device=device)
             
@@ -676,9 +768,6 @@ class AutoSAM2(nn.Module):
             depth_dim_idx
         )
         
-        # Apply sigmoid for final output (already applied in process_slice_with_sam2)
-        # output = torch.sigmoid(output)
-        
         # Track timing
         decoder_time = time.time() - decoder_start
         self.performance_metrics["decoder_time"].append(decoder_time)
@@ -746,7 +835,6 @@ class AutoSAM2(nn.Module):
         if isinstance(x_tuple, tuple):
             return x_tuple[0]
         return x_tuple
-
 #dataset.py
 import os
 import torch
