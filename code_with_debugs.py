@@ -425,7 +425,7 @@ class AutoSAM2(nn.Module):
         else:
             logger.warning("SAM2 initialization failed, will use fallback UNet3D")
                 
-        def process_slice_with_sam2(self, img_slice, embedding, slice_idx, device):
+    def process_slice_with_sam2(self, img_slice, embedding, slice_idx, device):
         """
         Process a single 2D slice with SAM2
         
