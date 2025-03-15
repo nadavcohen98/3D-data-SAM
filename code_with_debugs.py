@@ -11,7 +11,7 @@ import glob
 
 # Configure logging with reduced verbosity
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.WARNING,  # Change from INFO to WARNING
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
         logging.FileHandler("autosam2.log"),
