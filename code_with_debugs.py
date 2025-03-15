@@ -13,62 +13,121 @@ except ImportError:
     print("ERROR: sam2 package not available.")
     HAS_SAM2 = False
 
-class EnhancedEncoder3D(nn.Module):
+class ResidualBlock3D(nn.Module):
     """
-    Enhanced 3D encoder with deeper features (up to 128 channels)
-    and multi-slice processing capability
+    3D convolutional block with residual connections and group normalization.
+    This combines the best elements from the Kaggle example and our previous model.
     """
-    def __init__(self, in_channels=4, base_channels=16, slice_interval=10):
-        super().__init__()
+    def __init__(self, in_channels, out_channels, num_groups=8):
+        super(ResidualBlock3D, self).__init__()
         
-        # Add slice_interval parameter
+        # Main convolutional path
+        self.conv_block = nn.Sequential(
+            nn.Conv3d(in_channels, out_channels, kernel_size=3, padding=1),
+            nn.GroupNorm(num_groups=min(num_groups, out_channels), num_channels=out_channels),
+            nn.ReLU(inplace=True),
+            nn.Conv3d(out_channels, out_channels, kernel_size=3, padding=1),
+            nn.GroupNorm(num_groups=min(num_groups, out_channels), num_channels=out_channels)
+        )
+        
+        # Residual connection with projection if needed
+        self.residual = nn.Conv3d(in_channels, out_channels, kernel_size=1) if in_channels != out_channels else nn.Identity()
+        
+        # Final activation after residual connection
+        self.activation = nn.ReLU(inplace=True)
+    
+    def forward(self, x):
+        residual = self.residual(x)
+        x = self.conv_block(x)
+        return self.activation(x + residual)
+
+class EncoderBlock3D(nn.Module):
+    """
+    Encoder block that combines downsampling with residual convolutions.
+    """
+    def __init__(self, in_channels, out_channels, num_groups=8):
+        super(EncoderBlock3D, self).__init__()
+        
+        self.encoder = nn.Sequential(
+            nn.MaxPool3d(kernel_size=2, stride=2),
+            ResidualBlock3D(in_channels, out_channels, num_groups)
+        )
+    
+    def forward(self, x):
+        return self.encoder(x)
+
+class DecoderBlock3D(nn.Module):
+    """
+    Decoder block with upsampling and residual convolutions.
+    Includes option for trilinear upsampling or transposed convolutions.
+    """
+    def __init__(self, in_channels, out_channels, num_groups=8, trilinear=True):
+        super(DecoderBlock3D, self).__init__()
+        
+        # Upsampling method
+        if trilinear:
+            self.up = nn.Upsample(scale_factor=2, mode='trilinear', align_corners=True)
+        else:
+            self.up = nn.ConvTranspose3d(in_channels // 2, in_channels // 2, kernel_size=2, stride=2)
+        
+        # Residual convolution block after concatenation
+        self.conv = ResidualBlock3D(in_channels, out_channels, num_groups)
+    
+    def forward(self, x1, x2):
+        # Upsample x1
+        x1 = self.up(x1)
+        
+        # Pad x1 if needed to match x2 dimensions
+        diffZ = x2.size()[2] - x1.size()[2]
+        diffY = x2.size()[3] - x1.size()[3]
+        diffX = x2.size()[4] - x1.size()[4]
+        
+        x1 = F.pad(x1, [
+            diffX // 2, diffX - diffX // 2,  # Left, Right
+            diffY // 2, diffY - diffY // 2,  # Top, Bottom
+            diffZ // 2, diffZ - diffZ // 2   # Front, Back
+        ])
+        
+        # Concatenate x2 (encoder features) with x1 (decoder features)
+        x = torch.cat([x2, x1], dim=1)
+        
+        # Apply residual convolution block
+        return self.conv(x)
+
+class EnhancedUNet3D(nn.Module):
+    """
+    Enhanced UNet3D with residual connections, group normalization, and key slice tracking.
+    Combines the strengths of both our previous model and the Kaggle example.
+    """
+    def __init__(self, in_channels=4, n_classes=4, base_channels=16, slice_interval=10, trilinear=True):
+        super(EnhancedUNet3D, self).__init__()
+        
+        # Configuration
+        self.in_channels = in_channels
+        self.n_classes = n_classes
+        self.base_channels = base_channels
         self.slice_interval = slice_interval
         
-        # First encoder block - UNCHANGED
-        self.enc1 = nn.Sequential(
-            nn.Conv3d(in_channels, base_channels, kernel_size=3, padding=1),
-            nn.InstanceNorm3d(base_channels),
-            nn.ReLU(inplace=True),
-            nn.Conv3d(base_channels, base_channels, kernel_size=3, padding=1),
-            nn.InstanceNorm3d(base_channels),
-            nn.ReLU(inplace=True)
-        )
-        self.pool1 = nn.MaxPool3d(kernel_size=2, stride=2)
+        # Initial convolution block
+        self.initial_conv = ResidualBlock3D(in_channels, base_channels)
         
-        # Second encoder block - UNCHANGED
-        self.enc2 = nn.Sequential(
-            nn.Conv3d(base_channels, base_channels*2, kernel_size=3, padding=1),
-            nn.InstanceNorm3d(base_channels*2),
-            nn.ReLU(inplace=True),
-            nn.Conv3d(base_channels*2, base_channels*2, kernel_size=3, padding=1),
-            nn.InstanceNorm3d(base_channels*2),
-            nn.ReLU(inplace=True)
-        )
-        self.pool2 = nn.MaxPool3d(kernel_size=2, stride=2)
+        # Encoder pathway
+        self.enc1 = EncoderBlock3D(base_channels, base_channels * 2)
+        self.enc2 = EncoderBlock3D(base_channels * 2, base_channels * 4)
+        self.enc3 = EncoderBlock3D(base_channels * 4, base_channels * 8)
+        self.enc4 = EncoderBlock3D(base_channels * 8, base_channels * 8)  # Keep channel count at 128
         
-        # Third encoder block - NEW
-        self.enc3 = nn.Sequential(
-            nn.Conv3d(base_channels*2, base_channels*4, kernel_size=3, padding=1),
-            nn.InstanceNorm3d(base_channels*4),
-            nn.ReLU(inplace=True),
-            nn.Conv3d(base_channels*4, base_channels*4, kernel_size=3, padding=1),
-            nn.InstanceNorm3d(base_channels*4),
-            nn.ReLU(inplace=True)
-        )
-        self.pool3 = nn.MaxPool3d(kernel_size=2, stride=2)
+        # Decoder pathway with skip connections
+        self.dec1 = DecoderBlock3D(base_channels * 16, base_channels * 4, trilinear=trilinear)  # 8 + 8 = 16
+        self.dec2 = DecoderBlock3D(base_channels * 8, base_channels * 2, trilinear=trilinear)   # 4 + 4 = 8
+        self.dec3 = DecoderBlock3D(base_channels * 4, base_channels, trilinear=trilinear)       # 2 + 2 = 4
+        self.dec4 = DecoderBlock3D(base_channels * 2, base_channels, trilinear=trilinear)       # 1 + 1 = 2
         
-        # Bottleneck - Modified to use 128 channels
-        self.bottleneck = nn.Sequential(
-            nn.Conv3d(base_channels*4, base_channels*8, kernel_size=3, padding=1),
-            nn.InstanceNorm3d(base_channels*8),
-            nn.ReLU(inplace=True),
-            nn.Conv3d(base_channels*8, base_channels*8, kernel_size=3, padding=1),
-            nn.InstanceNorm3d(base_channels*8),
-            nn.ReLU(inplace=True)
-        )
+        # Final output layer
+        self.output_conv = nn.Conv3d(base_channels, n_classes, kernel_size=1)
         
-        # Projection layer for SAM2
-        self.slice_projection = nn.Conv3d(base_channels*8, 256, kernel_size=1)
+        # Projection for SAM2 embeddings
+        self.sam_projection = nn.Conv3d(base_channels * 8, 256, kernel_size=1)
     
     def forward(self, x):
         # Get batch dimensions
@@ -91,24 +150,28 @@ class EnhancedEncoder3D(nn.Module):
             key_indices.append(middle_idx)
             key_indices.sort()
         
-        # Encoder pathway with the additional layer
-        x1 = self.enc1(x)
-        p1 = self.pool1(x1)
+        # Encoder pathway
+        x1 = self.initial_conv(x)
+        x2 = self.enc1(x1)
+        x3 = self.enc2(x2)
+        x4 = self.enc3(x3)
+        x5 = self.enc4(x4)
         
-        x2 = self.enc2(p1)
-        p2 = self.pool2(x2)
+        # Generate SAM2 embeddings
+        sam_embeddings = self.sam_projection(x5)
         
-        x3 = self.enc3(p2)
-        p3 = self.pool3(x3)
+        # Calculate downsampled indices for bottleneck
+        downsampled_depth = depth // 16  # After 4 encoder blocks
+        ds_key_indices = [min(idx // 16, downsampled_depth-1) for idx in key_indices]
         
-        x4 = self.bottleneck(p3)
+        # Decoder pathway
+        x = self.dec1(x5, x4)
+        x = self.dec2(x, x3)
+        x = self.dec3(x, x2)
+        x = self.dec4(x, x1)
         
-        # Generate embeddings for SAM2
-        key_features = self.slice_projection(x4)
-        
-        # Calculate downsampled key indices
-        downsampled_depth = depth // 8  # After 3 pooling layers
-        ds_key_indices = [min(idx // 8, downsampled_depth-1) for idx in key_indices]
+        # Final convolution
+        x = self.output_conv(x)
         
         # Store metadata for key slice processing
         metadata = {
@@ -117,104 +180,7 @@ class EnhancedEncoder3D(nn.Module):
             "depth_dim_idx": depth_idx
         }
         
-        return [x1, x2, x3, x4, key_features, metadata]
-
-class EnhancedDecoder3D(nn.Module):
-    """
-    Enhanced decoder with additional upsampling level to handle 128 channels
-    """
-    def __init__(self, base_channels=16, out_channels=4):
-        super().__init__()
-        
-        # First upsampling block (128 → 64)
-        self.up1 = nn.ConvTranspose3d(
-            base_channels*8, base_channels*4, 
-            kernel_size=2, stride=2,
-            output_padding=(0, 0, 1)  # Add padding in depth dimension for odd sizes
-        )
-        self.dec1 = nn.Sequential(
-            nn.Conv3d(base_channels*8, base_channels*4, kernel_size=3, padding=1), # concat: 4+4=8
-            nn.InstanceNorm3d(base_channels*4),
-            nn.ReLU(inplace=True),
-            nn.Conv3d(base_channels*4, base_channels*4, kernel_size=3, padding=1),
-            nn.InstanceNorm3d(base_channels*4),
-            nn.ReLU(inplace=True)
-        )
-        
-        # Second upsampling block (64 → 32)
-        self.up2 = nn.ConvTranspose3d(
-            base_channels*4, base_channels*2,
-            kernel_size=2, stride=2,
-            output_padding=(0, 0, 1)  # Add padding in depth dimension for odd sizes
-        )
-        self.dec2 = nn.Sequential(
-            nn.Conv3d(base_channels*4, base_channels*2, kernel_size=3, padding=1), # concat: 2+2=4
-            nn.InstanceNorm3d(base_channels*2),
-            nn.ReLU(inplace=True),
-            nn.Conv3d(base_channels*2, base_channels*2, kernel_size=3, padding=1),
-            nn.InstanceNorm3d(base_channels*2),
-            nn.ReLU(inplace=True)
-        )
-        
-        # Third upsampling block (32 → 16)
-        self.up3 = nn.ConvTranspose3d(
-            base_channels*2, base_channels,
-            kernel_size=2, stride=2,
-            output_padding=(0, 0, 1)  # Add padding in depth dimension for odd sizes
-        )
-        self.dec3 = nn.Sequential(
-            nn.Conv3d(base_channels*2, base_channels, kernel_size=3, padding=1), # concat: 1+1=2
-            nn.InstanceNorm3d(base_channels),
-            nn.ReLU(inplace=True),
-            nn.Conv3d(base_channels, base_channels, kernel_size=3, padding=1),
-            nn.InstanceNorm3d(base_channels),
-            nn.ReLU(inplace=True)
-        )
-        
-        # Final layer
-        self.final = nn.Conv3d(base_channels, out_channels, kernel_size=1)
-    
-    def forward(self, features):
-        # Extract features
-        x1, x2, x3, x4, _, _ = features
-        
-        # First upsampling (128 → 64)
-        x = self.up1(x4)
-        
-        # Handle dimension mismatch if needed
-        if x.shape[2:] != x3.shape[2:]:
-            x = F.interpolate(x, size=x3.shape[2:], mode='trilinear', align_corners=False)
-        
-        # Combine features and process
-        x = torch.cat([x, x3], dim=1)
-        x = self.dec1(x)
-        
-        # Second upsampling (64 → 32)
-        x = self.up2(x)
-        
-        # Handle dimension mismatch if needed
-        if x.shape[2:] != x2.shape[2:]:
-            x = F.interpolate(x, size=x2.shape[2:], mode='trilinear', align_corners=False)
-        
-        # Combine features and process
-        x = torch.cat([x, x2], dim=1)
-        x = self.dec2(x)
-        
-        # Third upsampling (32 → 16)
-        x = self.up3(x)
-        
-        # Handle dimension mismatch if needed
-        if x.shape[2:] != x1.shape[2:]:
-            x = F.interpolate(x, size=x1.shape[2:], mode='trilinear', align_corners=False)
-        
-        # Combine features and process
-        x = torch.cat([x, x1], dim=1)
-        x = self.dec3(x)
-        
-        # Final convolution
-        x = self.final(x)
-        
-        return x
+        return x, sam_embeddings, metadata
 
 class SliceProcessor(nn.Module):
     """
@@ -228,10 +194,10 @@ class SliceProcessor(nn.Module):
         # Simple refinement for slice features
         self.refine = nn.Sequential(
             nn.Conv2d(input_channels, input_channels, kernel_size=3, padding=1),
-            nn.InstanceNorm2d(input_channels),
+            nn.GroupNorm(num_groups=min(8, input_channels), num_channels=input_channels),
             nn.ReLU(inplace=True),
             nn.Conv2d(input_channels, input_channels, kernel_size=1),
-            nn.InstanceNorm2d(input_channels),
+            nn.GroupNorm(num_groups=min(8, input_channels), num_channels=input_channels),
             nn.ReLU(inplace=True)
         )
         
@@ -280,26 +246,27 @@ class SliceProcessor(nn.Module):
 
 class AutoSAM2(nn.Module):
     """
-    Enhanced AutoSAM2 with 128-channel features and multi-slice processing
+    Enhanced AutoSAM2 with residual UNet3D and multi-slice processing capability
     """
-    def __init__(self, num_classes=4, slice_interval=10):
+    def __init__(self, num_classes=4, base_channels=16, slice_interval=10, trilinear=True):
         super().__init__()
         
         # Store configuration
         self.num_classes = num_classes
         self.slice_interval = slice_interval
         
-        # Create enhanced encoder and decoder
-        self.encoder = EnhancedEncoder3D(
-            in_channels=4, 
-            base_channels=16,
-            slice_interval=slice_interval
+        # Create enhanced UNet3D
+        self.unet3d = EnhancedUNet3D(
+            in_channels=4,
+            n_classes=num_classes,
+            base_channels=base_channels,
+            slice_interval=slice_interval,
+            trilinear=trilinear
         )
         
-        self.decoder = EnhancedDecoder3D(
-            base_channels=16, 
-            out_channels=num_classes
-        )
+        # Create encoder/decoder variables to maintain compatibility with train.py
+        self.encoder = self.unet3d
+        self.decoder = lambda x: x[0]  # Just return segmentation from UNet3D output
         
         # Slice processor for SAM2 integration
         self.slice_processor = SliceProcessor(
@@ -340,47 +307,27 @@ class AutoSAM2(nn.Module):
         """
         Forward pass with proper multi-slice support
         """
-        batch_size, channels, height, width, depth = x.shape
-        device = x.device
-        
-        # Get features from encoder
-        features = self.encoder(x)
-        
-        # Get segmentation from decoder
-        segmentation = self.decoder(features)
+        # Process with UNet3D and get all outputs
+        segmentation, sam_embeddings, metadata = self.unet3d(x)
         
         # Get key slice info
-        key_features = features[4]
-        metadata = features[5]
         key_indices = metadata["key_indices"]
         depth_dim_idx = metadata["depth_dim_idx"]
         ds_key_indices = metadata["ds_key_indices"]
         
-        # Process key slices with SAM2 (will be implemented fully in next phase)
+        # Process key slices for SAM2 (will be implemented fully in next phase)
         if self.has_sam2 and self.training:
             # Process key slices
             processed_slices = self.slice_processor(
-                key_features, 
-                ds_key_indices, 
+                sam_embeddings,
+                ds_key_indices,
                 depth_dim_idx
             )
-            
-            # Just for demonstration - using middle slice
-            middle_idx = key_indices[len(key_indices)//2]
-            
-            # Get original image slice
-            if depth_dim_idx == 0:
-                sample_slice = x[0, 0, middle_idx]
-            elif depth_dim_idx == 1:
-                sample_slice = x[0, 0, :, middle_idx]
-            else:
-                sample_slice = x[0, 0, :, :, middle_idx]
         
         # Apply sigmoid to get probabilities
         output = torch.sigmoid(segmentation)
         
         return output
-
 
 
 
