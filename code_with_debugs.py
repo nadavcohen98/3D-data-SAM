@@ -15,15 +15,15 @@ except ImportError:
 
 class SimpleEncoder3D(nn.Module):
     """
-    Simple 3D encoder with minimal complexity and added key slice tracking
-    Based on the original model that performed well
+    Enhanced version of the original encoder that performed well
+    Added key slice selection and increased channel depth to 128
     """
     def __init__(self, in_channels=4, base_channels=16, slice_interval=10):
         super().__init__()
         
         self.slice_interval = slice_interval
         
-        # First encoder block
+        # First encoder block - exactly as in original
         self.enc1 = nn.Sequential(
             nn.Conv3d(in_channels, base_channels, kernel_size=3, padding=1),
             nn.InstanceNorm3d(base_channels),
@@ -34,7 +34,7 @@ class SimpleEncoder3D(nn.Module):
         )
         self.pool1 = nn.MaxPool3d(kernel_size=2, stride=2)
         
-        # Second encoder block
+        # Second encoder block - exactly as in original
         self.enc2 = nn.Sequential(
             nn.Conv3d(base_channels, base_channels*2, kernel_size=3, padding=1),
             nn.InstanceNorm3d(base_channels*2),
@@ -45,8 +45,8 @@ class SimpleEncoder3D(nn.Module):
         )
         self.pool2 = nn.MaxPool3d(kernel_size=2, stride=2)
         
-        # Bottleneck
-        self.bottleneck = nn.Sequential(
+        # Third encoder block - adding more depth as requested
+        self.enc3 = nn.Sequential(
             nn.Conv3d(base_channels*2, base_channels*4, kernel_size=3, padding=1),
             nn.InstanceNorm3d(base_channels*4),
             nn.ReLU(inplace=True),
@@ -54,20 +54,42 @@ class SimpleEncoder3D(nn.Module):
             nn.InstanceNorm3d(base_channels*4),
             nn.ReLU(inplace=True)
         )
+        self.pool3 = nn.MaxPool3d(kernel_size=2, stride=2)
         
-        # 2D projection for key slices (for SAM2)
-        self.slice_projection = nn.Conv3d(base_channels*4, 256, kernel_size=1)
+        # Fourth encoder block (new) - going to 128 channels
+        self.enc4 = nn.Sequential(
+            nn.Conv3d(base_channels*4, base_channels*8, kernel_size=3, padding=1),
+            nn.InstanceNorm3d(base_channels*8),
+            nn.ReLU(inplace=True),
+            nn.Conv3d(base_channels*8, base_channels*8, kernel_size=3, padding=1),
+            nn.InstanceNorm3d(base_channels*8),
+            nn.ReLU(inplace=True)
+        )
+        self.pool4 = nn.MaxPool3d(kernel_size=2, stride=2)
+        
+        # Bottleneck - using 128 channels now
+        self.bottleneck = nn.Sequential(
+            nn.Conv3d(base_channels*8, base_channels*8, kernel_size=3, padding=1),
+            nn.InstanceNorm3d(base_channels*8),
+            nn.ReLU(inplace=True),
+            nn.Conv3d(base_channels*8, base_channels*8, kernel_size=3, padding=1),
+            nn.InstanceNorm3d(base_channels*8),
+            nn.ReLU(inplace=True)
+        )
+        
+        # For SAM2 - projection to appropriate embedding size
+        self.slice_projection = nn.Conv3d(base_channels*8, 256, kernel_size=1)
     
     def forward(self, x):
-        # Get input dimensions
+        # Get input dimensions and identify depth
         batch_size, channels, dim1, dim2, dim3 = x.shape
         
-        # Identify depth dimension (smallest one)
+        # Find the smallest dimension (assumed to be depth in BraTS)
         dims = [dim1, dim2, dim3]
         depth_idx = dims.index(min(dims))
         depth = dims[depth_idx]
         
-        # Select key slices
+        # Select key slices at regular intervals
         key_indices = []
         for i in range(0, depth, self.slice_interval):
             if i < depth:
@@ -79,46 +101,69 @@ class SimpleEncoder3D(nn.Module):
             key_indices.append(middle_idx)
             key_indices.sort()
         
-        # Encoder pathway with skip connections
+        # Encoder pathway with skip connections - same as original
         x1 = self.enc1(x)
         x = self.pool1(x1)
         
         x2 = self.enc2(x)
         x = self.pool2(x2)
         
-        bottleneck = self.bottleneck(x)
+        # Additional encoder blocks for deeper features
+        x3 = self.enc3(x)
+        x = self.pool3(x3)
         
-        # Generate key slice embeddings for SAM2
-        key_features = self.slice_projection(bottleneck)
+        x4 = self.enc4(x)
+        x = self.pool4(x4)
         
-        # Calculate downsampled indices
-        downsampled_depth = depth // 4  # After 2 pooling layers
-        ds_key_indices = [min(idx // 4, downsampled_depth-1) for idx in key_indices]
+        # Bottleneck
+        x = self.bottleneck(x)
         
-        # Store metadata for key slices
+        # Project features for SAM2
+        key_features = self.slice_projection(x)
+        
+        # Calculate downsampled key indices (after 4 pooling layers)
+        downsampled_depth = depth // 16
+        ds_key_indices = [min(idx // 16, downsampled_depth-1) for idx in key_indices]
+        
+        # Store metadata for slice processing
         metadata = {
             "key_indices": key_indices,
             "ds_key_indices": ds_key_indices,
             "depth_dim_idx": depth_idx
         }
         
-        return [x1, x2, bottleneck, key_features, metadata]
+        return [x1, x2, x3, x4, x, key_features, metadata]
 
 class SimpleDecoder3D(nn.Module):
     """
-    Simple decoder that ensures proper size handling
-    Keeping the original implementation that worked well
+    Enhanced version of the original decoder that performed well
+    Modified to work with the deeper encoder
     """
     def __init__(self, base_channels=16, out_channels=4):
         super().__init__()
         
-        # Upsampling block 1 - add output_padding to fix dimension mismatch
+        # Upsampling block 1 (from 128 to 64 channels)
         self.up1 = nn.ConvTranspose3d(
-            base_channels*4, base_channels*2, 
+            base_channels*8, base_channels*4, 
             kernel_size=2, stride=2,
             output_padding=(0, 0, 1)  # Add padding in depth dimension
         )
         self.dec1 = nn.Sequential(
+            nn.Conv3d(base_channels*8, base_channels*4, kernel_size=3, padding=1),
+            nn.InstanceNorm3d(base_channels*4),
+            nn.ReLU(inplace=True),
+            nn.Conv3d(base_channels*4, base_channels*4, kernel_size=3, padding=1),
+            nn.InstanceNorm3d(base_channels*4),
+            nn.ReLU(inplace=True)
+        )
+        
+        # Upsampling block 2 (from 64 to 32 channels)
+        self.up2 = nn.ConvTranspose3d(
+            base_channels*4, base_channels*2,
+            kernel_size=2, stride=2,
+            output_padding=(0, 0, 1)  # Add padding in depth dimension
+        )
+        self.dec2 = nn.Sequential(
             nn.Conv3d(base_channels*4, base_channels*2, kernel_size=3, padding=1),
             nn.InstanceNorm3d(base_channels*2),
             nn.ReLU(inplace=True),
@@ -127,13 +172,13 @@ class SimpleDecoder3D(nn.Module):
             nn.ReLU(inplace=True)
         )
         
-        # Upsampling block 2 - also add output_padding to fix potential dimension mismatch
-        self.up2 = nn.ConvTranspose3d(
+        # Upsampling block 3 (from 32 to 16 channels)
+        self.up3 = nn.ConvTranspose3d(
             base_channels*2, base_channels,
             kernel_size=2, stride=2,
             output_padding=(0, 0, 1)  # Add padding in depth dimension
         )
-        self.dec2 = nn.Sequential(
+        self.dec3 = nn.Sequential(
             nn.Conv3d(base_channels*2, base_channels, kernel_size=3, padding=1),
             nn.InstanceNorm3d(base_channels),
             nn.ReLU(inplace=True),
@@ -146,39 +191,107 @@ class SimpleDecoder3D(nn.Module):
         self.final = nn.Conv3d(base_channels, out_channels, kernel_size=1)
     
     def forward(self, features):
-        x1, x2, x, key_features, metadata = features
+        x1, x2, x3, x4, x, _, _ = features
         
-        # First upsampling with output_padding
+        # First upsampling (128 → 64)
         x = self.up1(x)
         
-        # Only use interpolation if dimensions still don't match after output_padding
+        # Handle potential dimension mismatch
+        if x.shape[2:] != x4.shape[2:]:
+            x = F.interpolate(x, size=x4.shape[2:], mode='trilinear', align_corners=False)
+        
+        # Concatenate and process
+        x = torch.cat([x, x4], dim=1)
+        x = self.dec1(x)
+        
+        # Second upsampling (64 → 32)
+        x = self.up2(x)
+        
+        # Handle potential dimension mismatch
+        if x.shape[2:] != x3.shape[2:]:
+            x = F.interpolate(x, size=x3.shape[2:], mode='trilinear', align_corners=False)
+        
+        # Concatenate and process
+        x = torch.cat([x, x3], dim=1)
+        x = self.dec2(x)
+        
+        # Third upsampling (32 → 16)
+        x = self.up3(x)
+        
+        # Handle potential dimension mismatch
         if x.shape[2:] != x2.shape[2:]:
             x = F.interpolate(x, size=x2.shape[2:], mode='trilinear', align_corners=False)
         
         # Concatenate and process
         x = torch.cat([x, x2], dim=1)
-        x = self.dec1(x)
-        
-        # Second upsampling with output_padding
-        x = self.up2(x)
-        
-        # Only use interpolation if dimensions still don't match after output_padding
-        if x.shape[2:] != x1.shape[2:]:
-            x = F.interpolate(x, size=x1.shape[2:], mode='trilinear', align_corners=False)
-        
-        # Concatenate and process
-        x = torch.cat([x, x1], dim=1)
-        x = self.dec2(x)
+        x = self.dec3(x)
         
         # Final convolution
         x = self.final(x)
         
         return x
 
+class KeySliceProcessor(nn.Module):
+    """
+    Auxiliary module to process key slices for SAM2 integration
+    """
+    def __init__(self, input_channels=256, output_size=(64, 64)):
+        super().__init__()
+        
+        self.output_size = output_size
+        
+        # Adaptive pooling to get SAM2-compatible size
+        self.adaptive_pool = nn.AdaptiveAvgPool2d(output_size)
+        
+        # Simple refinement layers
+        self.refine = nn.Sequential(
+            nn.Conv2d(input_channels, input_channels, kernel_size=3, padding=1),
+            nn.InstanceNorm2d(input_channels),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(input_channels, input_channels, kernel_size=3, padding=1),
+            nn.InstanceNorm2d(input_channels),
+            nn.ReLU(inplace=True),
+        )
+    
+    def forward(self, x, slice_idx, depth_dim=2):
+        """
+        Extract and process a specific slice for SAM2
+        
+        Args:
+            x: 3D tensor of shape [B, C, D, H, W]
+            slice_idx: Index of slice to extract
+            depth_dim: Dimension index for depth (0, 1, or 2)
+            
+        Returns:
+            Processed 2D slice suitable for SAM2
+        """
+        batch_size = x.shape[0]
+        processed_slices = []
+        
+        for b in range(batch_size):
+            # Extract slice along proper dimension
+            if depth_dim == 0:
+                slice_2d = x[b, :, slice_idx]
+            elif depth_dim == 1:
+                slice_2d = x[b, :, :, slice_idx]
+            else:
+                slice_2d = x[b, :, :, :, slice_idx]
+            
+            # Resize to target size if needed
+            if slice_2d.shape[1:] != self.output_size:
+                slice_2d = self.adaptive_pool(slice_2d)
+            
+            # Apply refinement
+            slice_2d = self.refine(slice_2d)
+            
+            processed_slices.append(slice_2d)
+        
+        # Stack into batch
+        return torch.stack(processed_slices, dim=0)
+
 class AutoSAM2(nn.Module):
     """
-    Hybrid version of AutoSAM2 using the simpler architecture
-    but with added key slice tracking for future SAM2 integration
+    Enhanced version of AutoSAM2 with deeper UNet and key slice processing
     """
     def __init__(self, num_classes=4, slice_interval=10):
         super().__init__()
@@ -190,13 +303,19 @@ class AutoSAM2(nn.Module):
         # Create encoder and decoder
         self.encoder = SimpleEncoder3D(
             in_channels=4, 
-            base_channels=16, 
+            base_channels=16,
             slice_interval=slice_interval
         )
         
         self.decoder = SimpleDecoder3D(
             base_channels=16, 
             out_channels=num_classes
+        )
+        
+        # Key slice processor for SAM2
+        self.key_slice_processor = KeySliceProcessor(
+            input_channels=256,
+            output_size=(64, 64)
         )
         
         # Initialize SAM2
@@ -230,9 +349,9 @@ class AutoSAM2(nn.Module):
     
     def forward(self, x):
         """
-        Forward pass - simplified to focus on data flow
+        Forward pass - process full volume and prepare for SAM2 integration
         """
-        batch_size, channels, depth, height, width = x.shape
+        batch_size, channels, height, width, depth = x.shape
         
         # Get features from encoder
         features = self.encoder(x)
@@ -240,23 +359,11 @@ class AutoSAM2(nn.Module):
         # Get segmentation from decoder
         segmentation = self.decoder(features)
         
-        # Extract key slice info
-        _, _, _, key_features, metadata = features
+        # Extract key slice info for SAM2 integration
+        _, _, _, _, _, key_features, metadata = features
         key_indices = metadata["key_indices"]
-        depth_dim_idx = metadata["depth_dim_idx"]
-        
-        # Demonstrate SAM2 integration capability
-        if self.has_sam2 and self.training:
-            # Would process key slices with SAM2
-            middle_idx = key_indices[len(key_indices)//2]  # Get middle key index
-            
-            # Extract middle slice using correct dimension
-            if depth_dim_idx == 0:
-                sample_slice = x[0, 0, middle_idx, :, :]  # First batch, first channel
-            elif depth_dim_idx == 1:
-                sample_slice = x[0, 0, :, middle_idx, :]
-            else:
-                sample_slice = x[0, 0, :, :, middle_idx]
+        depth_idx = metadata["depth_dim_idx"]
+        ds_key_indices = metadata["ds_key_indices"]
         
         # Apply sigmoid to get probabilities
         output = torch.sigmoid(segmentation)
