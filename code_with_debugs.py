@@ -361,8 +361,6 @@ class SimpleEncoder3D(nn.Module):
         )
     
     def forward(self, x):
-        # Print input shape to verify dimensions
-        print(f"Encoder input shape: {x.shape}")
         
         # Encoder pathway with skip connections
         x1 = self.enc1(x)
@@ -372,11 +370,6 @@ class SimpleEncoder3D(nn.Module):
         x = self.pool2(x2)
         
         x = self.bottleneck(x)
-        
-        # Print shapes of each feature level
-        print(f"Skip connection 1 shape: {x1.shape}")
-        print(f"Skip connection 2 shape: {x2.shape}")
-        print(f"Bottleneck shape: {x.shape}")
         
         return [x1, x2, x]
 
@@ -422,13 +415,10 @@ class SimpleDecoder3D(nn.Module):
     
     def forward(self, features):
         x1, x2, x = features
-        
-        # Print shapes before operations
-        print(f"Decoder input shapes - x1: {x1.shape}, x2: {x2.shape}, bottleneck: {x.shape}")
+    
         
         # First upsampling with output_padding
         x = self.up1(x)
-        print(f"After up1: {x.shape}")
         
         # Only use interpolation if dimensions still don't match after output_padding
         if x.shape[2:] != x2.shape[2:]:
@@ -442,7 +432,6 @@ class SimpleDecoder3D(nn.Module):
         
         # Second upsampling with output_padding
         x = self.up2(x)
-        print(f"After up2: {x.shape}")
         
         # Only use interpolation if dimensions still don't match after output_padding
         if x.shape[2:] != x1.shape[2:]:
@@ -456,7 +445,6 @@ class SimpleDecoder3D(nn.Module):
         
         # Final convolution
         x = self.final(x)
-        print(f"Decoder output shape: {x.shape}")
         
         return x
 class AutoSAM2(nn.Module):
@@ -507,9 +495,7 @@ class AutoSAM2(nn.Module):
         """
         Forward pass - simplified to focus on data flow
         """
-        # Print input dimensions to verify
         batch_size, channels, height, width, depth = x.shape
-        print(f"Input dimensions: batch_size={batch_size}, channels={channels}, depth={depth}, height={height}, width={width}")
         
         # Get features from encoder
         features = self.encoder(x)
