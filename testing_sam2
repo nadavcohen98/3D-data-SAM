@@ -1,6 +1,8 @@
 import logging
 import os
 import sys
+import inspect
+import traceback
 
 # Configure logging
 logging.basicConfig(
@@ -22,11 +24,84 @@ def test_sam2():
         if hasattr(sam2, '__version__'):
             logger.info(f"SAM2 version: {sam2.__version__}")
         
+        # Show module contents
+        logger.info("SAM2 module contents:")
+        for item in dir(sam2):
+            if not item.startswith('_'):
+                logger.info(f"  - {item}")
+        
         # Check for sam2_image_predictor
         try:
             logger.info("Attempting to import SAM2ImagePredictor")
             from sam2.sam2_image_predictor import SAM2ImagePredictor
             logger.info("SAM2ImagePredictor imported successfully")
+            
+            # Examine the from_pretrained method
+            logger.info("Examining from_pretrained method:")
+            try:
+                signature = str(inspect.signature(SAM2ImagePredictor.from_pretrained))
+                logger.info(f"Method signature: {signature}")
+                
+                try:
+                    source = inspect.getsource(SAM2ImagePredictor.from_pretrained)
+                    logger.info(f"Method source code:\n{source}")
+                except Exception as e:
+                    logger.warning(f"Could not get source code: {e}")
+            except Exception as e:
+                logger.warning(f"Error examining method: {e}")
+            
+            # Try direct initialization
+            logger.info("Trying direct initialization without from_pretrained:")
+            try:
+                sam2_instance = SAM2ImagePredictor()
+                logger.info("SUCCESS! Direct initialization worked")
+                
+                # Check instance attributes
+                if hasattr(sam2_instance, 'model'):
+                    logger.info("Instance has 'model' attribute")
+                if hasattr(sam2_instance, 'predict'):
+                    logger.info("Instance has 'predict' method")
+                    
+            except Exception as e:
+                logger.warning(f"Direct initialization failed: {e}")
+            
+            # Try to find model files locally
+            logger.info("Checking for model files in common locations:")
+            potential_paths = [
+                os.path.join(os.path.dirname(sam2.__file__), "models"),
+                os.path.expanduser("~/.cache/torch/hub/checkpoints/"),
+                os.path.expanduser("~/.cache/huggingface/"),
+                os.path.expanduser("~/sam2/models/"),
+                "models/",
+                "weights/",
+                "checkpoints/"
+            ]
+            
+            model_files = []
+            for path in potential_paths:
+                if os.path.exists(path):
+                    logger.info(f"Checking directory: {path}")
+                    try:
+                        for root, dirs, files in os.walk(path):
+                            for file in files:
+                                if file.endswith('.pth') or file.endswith('.pt') or file.endswith('.bin'):
+                                    full_path = os.path.join(root, file)
+                                    logger.info(f"Found model file: {full_path}")
+                                    model_files.append(full_path)
+                    except Exception as e:
+                        logger.warning(f"Error scanning {path}: {e}")
+            
+            # Try initialization with local paths
+            if model_files:
+                logger.info("Trying initialization with local model files:")
+                for model_path in model_files:
+                    try:
+                        logger.info(f"Trying to initialize with file: {model_path}")
+                        sam2_instance = SAM2ImagePredictor.from_pretrained(model_path)
+                        logger.info(f"SUCCESS! Initialized with local file: {model_path}")
+                        break
+                    except Exception as e:
+                        logger.warning(f"Failed to initialize with file {model_path}: {e}")
             
             # Check for available models
             logger.info("Checking for available models")
@@ -81,6 +156,13 @@ def test_sam2():
                 for method_name in dir(SAM2ImagePredictor):
                     if not method_name.startswith('_'):
                         logger.info(f"  - {method_name}")
+                
+                # Print SAM2ImagePredictor module contents
+                logger.info("SAM2ImagePredictor module contents:")
+                import sam2.sam2_image_predictor
+                for item in dir(sam2.sam2_image_predictor):
+                    if not item.startswith('_'):
+                        logger.info(f"  - {item}")
             
         except ImportError as e:
             logger.error(f"Failed to import SAM2ImagePredictor: {str(e)}")
@@ -109,7 +191,6 @@ def test_sam2():
     
     except Exception as e:
         logger.error(f"Unexpected error: {str(e)}")
-        import traceback
         logger.error(traceback.format_exc())
     
     logger.info("SAM2 initialization test complete")
