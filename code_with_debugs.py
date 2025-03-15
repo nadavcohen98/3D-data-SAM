@@ -387,10 +387,11 @@ class SimpleDecoder3D(nn.Module):
     def __init__(self, base_channels=16, out_channels=4):
         super().__init__()
         
-        # Upsampling block 1
+        # Upsampling block 1 - add output_padding to fix dimension mismatch
         self.up1 = nn.ConvTranspose3d(
             base_channels*4, base_channels*2, 
-            kernel_size=2, stride=2
+            kernel_size=2, stride=2,
+            output_padding=(0, 0, 1)  # Add padding in depth dimension
         )
         self.dec1 = nn.Sequential(
             nn.Conv3d(base_channels*4, base_channels*2, kernel_size=3, padding=1),
@@ -401,10 +402,11 @@ class SimpleDecoder3D(nn.Module):
             nn.ReLU(inplace=True)
         )
         
-        # Upsampling block 2
+        # Upsampling block 2 - also add output_padding to fix potential dimension mismatch
         self.up2 = nn.ConvTranspose3d(
             base_channels*2, base_channels,
-            kernel_size=2, stride=2
+            kernel_size=2, stride=2,
+            output_padding=(0, 0, 1)  # Add padding in depth dimension
         )
         self.dec2 = nn.Sequential(
             nn.Conv3d(base_channels*2, base_channels, kernel_size=3, padding=1),
@@ -424,26 +426,29 @@ class SimpleDecoder3D(nn.Module):
         # Print shapes before operations
         print(f"Decoder input shapes - x1: {x1.shape}, x2: {x2.shape}, bottleneck: {x.shape}")
         
-        # First upsampling
+        # First upsampling with output_padding
         x = self.up1(x)
         print(f"After up1: {x.shape}")
         
-        # Always handle potential size mismatch with interpolation
-        # Note: This is the key change - always interpolate rather than checking
-        x = F.interpolate(x, size=x2.shape[2:], mode='trilinear', align_corners=False)
-        print(f"After interpolation to match x2: {x.shape}")
+        # Only use interpolation if dimensions still don't match after output_padding
+        if x.shape[2:] != x2.shape[2:]:
+            print(f"Size mismatch in decoder. Interpolating {x.shape} to match {x2.shape}")
+            x = F.interpolate(x, size=x2.shape[2:], mode='trilinear', align_corners=False)
+            print(f"After interpolation to match x2: {x.shape}")
         
         # Concatenate and process
         x = torch.cat([x, x2], dim=1)
         x = self.dec1(x)
         
-        # Second upsampling
+        # Second upsampling with output_padding
         x = self.up2(x)
         print(f"After up2: {x.shape}")
         
-        # Always handle potential size mismatch with interpolation
-        x = F.interpolate(x, size=x1.shape[2:], mode='trilinear', align_corners=False)
-        print(f"After interpolation to match x1: {x.shape}")
+        # Only use interpolation if dimensions still don't match after output_padding
+        if x.shape[2:] != x1.shape[2:]:
+            print(f"Size mismatch in decoder. Interpolating {x.shape} to match {x1.shape}")
+            x = F.interpolate(x, size=x1.shape[2:], mode='trilinear', align_corners=False)
+            print(f"After interpolation to match x1: {x.shape}")
         
         # Concatenate and process
         x = torch.cat([x, x1], dim=1)
@@ -454,7 +459,6 @@ class SimpleDecoder3D(nn.Module):
         print(f"Decoder output shape: {x.shape}")
         
         return x
-
 class AutoSAM2(nn.Module):
     """
     Simplified version of AutoSAM2 to verify data flow
