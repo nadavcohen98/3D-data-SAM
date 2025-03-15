@@ -503,19 +503,9 @@ class AutoSAM2(nn.Module):
         """
         Forward pass - simplified to focus on data flow
         """
-        # Get tensor dimensions
-        b, c, d1, d2, d3 = x.shape
-        
-        # Determine which dimension is which based on BraTS standard dimensions
-        # Standard BraTS: 155 slices, 240x240 image dimensions
-        if d1 == 155:
-            depth, height, width = d1, d2, d3
-        elif d3 == 155:
-            depth, height, width = d3, d1, d2
-        else:
-            # If unsure, use standard assumption
-            depth, height, width = d3, d1, d2
-        print(f"Input dimensions: batch_size={b}, channels={c}, depth={depth}, height={height}, width={width}")
+        # Print input dimensions to verify
+        batch_size, channels, height, width, depth = x.shape
+        print(f"Input dimensions: batch_size={batch_size}, channels={channels}, depth={depth}, height={height}, width={width}")
         
         # Get features from encoder
         features = self.encoder(x)
@@ -525,13 +515,13 @@ class AutoSAM2(nn.Module):
         
         # Select middle slice for demonstration
         if self.has_sam2 and self.training:
-            # Just print information about what we would process
+            # Calculate middle slice
             middle_slice = depth // 2
             print(f"In full model, would process slice {middle_slice} with SAM2")
             
             # Get some data from middle slice for demonstration
             for b in range(batch_size):
-                sample_slice = x[b, 0, middle_slice]  # Get FLAIR modality
+                sample_slice = x[b, 0, :, :, middle_slice]  # Get FLAIR modality
                 print(f"Middle slice {middle_slice} shape: {sample_slice.shape}")
         
         # Apply sigmoid to get probabilities
