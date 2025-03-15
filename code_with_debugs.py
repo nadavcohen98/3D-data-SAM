@@ -452,10 +452,14 @@ class AutoSAM2(nn.Module):
             # SAM2 expects numpy arrays not torch tensors
             img_np = img_slice[0, 0].detach().cpu().numpy()
             
+            # Convert to 3-channel image (SAM2 expects 3 channels)
+            # Convert grayscale to RGB by repeating the channel 3 times
+            img_np_3ch = np.stack([img_np, img_np, img_np], axis=2)  # Shape becomes (H, W, 3)
+            
             # Process with SAM2
             try:
                 # 1. First set the image on the predictor
-                self.sam2.set_image(img_np)
+                self.sam2.set_image(img_np_3ch)  # Using 3-channel image
                 
                 # 2. Now make a prediction using a point prompt
                 # Create a center point prompt
