@@ -46,7 +46,7 @@ class ConvBlock3D(nn.Module):
 
 class EfficientEncoder3D(nn.Module):
     """
-    Efficient 3D encoder with correct dimension handling.
+    Efficient 3D encoder that tracks dimensions for proper padding.
     """
     def __init__(self, in_channels=4, base_channels=16, slice_interval=10):
         super(EfficientEncoder3D, self).__init__()
@@ -76,8 +76,6 @@ class EfficientEncoder3D(nn.Module):
         self.slice_projection = nn.Conv3d(base_channels*16, 256, kernel_size=1)
     
     def forward(self, x):
-
-        
         # We need to determine the depth dimension correctly
         batch_size, channels, dim1, dim2, dim3 = x.shape
         
@@ -99,21 +97,26 @@ class EfficientEncoder3D(nn.Module):
         if middle_idx not in key_indices:
             key_indices.append(middle_idx)
             key_indices.sort()  # Keep indices in order
-                
-        # Encoder pathway with skip connections
+        
+        # Encoder pathway with skip connections and dimension tracking
         x1 = self.enc1(x)
+        x1_shape = x1.shape[2:]  # Save shape for decoder
         p1 = self.pool1(x1)
         
         x2 = self.enc2(p1)
+        x2_shape = x2.shape[2:]  # Save shape for decoder
         p2 = self.pool2(x2)
         
         x3 = self.enc3(p2)
+        x3_shape = x3.shape[2:]  # Save shape for decoder
         p3 = self.pool3(x3)
         
         x4 = self.enc4(p3)
+        x4_shape = x4.shape[2:]  # Save shape for decoder
         p4 = self.pool4(x4)
         
         bottleneck = self.bottleneck(p4)
+        bottleneck_shape = bottleneck.shape[2:]  # Save shape for decoder
         
         # Project features for key slices (to be used with SAM2 later)
         key_features = self.slice_projection(bottleneck)
@@ -127,11 +130,11 @@ class EfficientEncoder3D(nn.Module):
         # Store dimensions at each level for the decoder
         encoder_dimensions = {
             "input_shape": x.shape,
-            "enc1_shape": x1.shape,
-            "enc2_shape": x2.shape,
-            "enc3_shape": x3.shape,
-            "enc4_shape": x4.shape,
-            "bottleneck_shape": bottleneck.shape,
+            "x1_shape": x1_shape,
+            "x2_shape": x2_shape,
+            "x3_shape": x3_shape,
+            "x4_shape": x4_shape,
+            "bottleneck_shape": bottleneck_shape,
             "key_indices": key_indices,
             "ds_key_indices": ds_key_indices,
             "depth_dim_idx": depth_idx  # Store which dimension is depth
@@ -139,39 +142,71 @@ class EfficientEncoder3D(nn.Module):
         
         return [x1, x2, x3, x4, bottleneck, key_features, encoder_dimensions]
 
+class PaddedUpConv3D(nn.Module):
+    """
+    Custom upsampling module that handles odd dimensions with proper padding.
+    """
+    def __init__(self, in_channels, out_channels):
+        super(PaddedUpConv3D, self).__init__()
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        
+        # Core ConvTranspose3d layer
+        self.up_conv = nn.ConvTranspose3d(
+            in_channels, out_channels, 
+            kernel_size=2, stride=2
+        )
+        
+    def forward(self, x, target_shape):
+        """
+        Forward function with target shape matching through padding.
+        
+        Args:
+            x: Input tensor
+            target_shape: The shape we need to match after upsampling
+            
+        Returns:
+            Upsampled tensor with shape matching target_shape
+        """
+        # First, do the basic upsampling
+        up = self.up_conv(x)
+        
+        # Check if shapes match
+        if up.shape[2:] == target_shape:
+            return up
+        
+        # Calculate padding needed for each dimension
+        padding = []
+        for i in range(3):  # For 3D dimensions
+            diff = target_shape[i] - up.shape[i+2]
+            # We need the padding at the end, not beginning
+            padding.extend([0, diff])
+        
+        # Apply padding if needed
+        if any(p != 0 for p in padding):
+            # Pad in reverse order (pytorch uses z, y, x order)
+            up = F.pad(up, tuple(reversed(padding)))
+            
+        return up
+
 class EfficientDecoder3D(nn.Module):
     """
-    Efficient 3D decoder that works with the encoded features.
+    Efficient 3D decoder with proper padding for exact dimension matching.
     """
     def __init__(self, base_channels=16, out_channels=4):
         super(EfficientDecoder3D, self).__init__()
         
-        # Upsampling block 1
-        self.up1 = nn.ConvTranspose3d(
-            base_channels*16, base_channels*8, 
-            kernel_size=2, stride=2
-        )
+        # Upsampling blocks with padding support
+        self.up1 = PaddedUpConv3D(base_channels*16, base_channels*8)
         self.dec1 = ConvBlock3D(base_channels*16, base_channels*8)
         
-        # Upsampling block 2
-        self.up2 = nn.ConvTranspose3d(
-            base_channels*8, base_channels*4,
-            kernel_size=2, stride=2
-        )
+        self.up2 = PaddedUpConv3D(base_channels*8, base_channels*4)
         self.dec2 = ConvBlock3D(base_channels*8, base_channels*4)
         
-        # Upsampling block 3
-        self.up3 = nn.ConvTranspose3d(
-            base_channels*4, base_channels*2,
-            kernel_size=2, stride=2
-        )
+        self.up3 = PaddedUpConv3D(base_channels*4, base_channels*2)
         self.dec3 = ConvBlock3D(base_channels*4, base_channels*2)
         
-        # Upsampling block 4
-        self.up4 = nn.ConvTranspose3d(
-            base_channels*2, base_channels,
-            kernel_size=2, stride=2
-        )
+        self.up4 = PaddedUpConv3D(base_channels*2, base_channels)
         self.dec4 = ConvBlock3D(base_channels*2, base_channels)
         
         # Final layer
@@ -180,32 +215,21 @@ class EfficientDecoder3D(nn.Module):
     def forward(self, features):
         x1, x2, x3, x4, bottleneck, key_features, dimensions = features
         
-        
         # Upsampling with skip connections
-        x = self.up1(bottleneck)
-        
-        # Handle size mismatch with interpolation if needed
-        if x.shape[2:] != x4.shape[2:]:
-            x = F.interpolate(x, size=x4.shape[2:], mode='trilinear', align_corners=False)
-        
+        # Using padding instead of interpolation
+        x = self.up1(bottleneck, dimensions["x4_shape"])
         x = torch.cat([x, x4], dim=1)
         x = self.dec1(x)
         
-        x = self.up2(x)
-        if x.shape[2:] != x3.shape[2:]:
-            x = F.interpolate(x, size=x3.shape[2:], mode='trilinear', align_corners=False)
+        x = self.up2(x, dimensions["x3_shape"])
         x = torch.cat([x, x3], dim=1)
         x = self.dec2(x)
         
-        x = self.up3(x)
-        if x.shape[2:] != x2.shape[2:]:
-            x = F.interpolate(x, size=x2.shape[2:], mode='trilinear', align_corners=False)
+        x = self.up3(x, dimensions["x2_shape"])
         x = torch.cat([x, x2], dim=1)
         x = self.dec3(x)
         
-        x = self.up4(x)
-        if x.shape[2:] != x1.shape[2:]:
-            x = F.interpolate(x, size=x1.shape[2:], mode='trilinear', align_corners=False)
+        x = self.up4(x, dimensions["x1_shape"])
         x = torch.cat([x, x1], dim=1)
         x = self.dec4(x)
         
@@ -214,9 +238,39 @@ class EfficientDecoder3D(nn.Module):
         
         return x
 
+class SliceExtractor(nn.Module):
+    """
+    Module to extract specific slices from a 3D volume,
+    accounting for different dimension orderings.
+    """
+    def __init__(self):
+        super(SliceExtractor, self).__init__()
+    
+    def forward(self, x, indices, depth_dim=2):
+        """
+        Extract slices from a specific dimension of a 3D tensor.
+        """
+        batch_size = x.shape[0]
+        slices = {}
+        
+        for b in range(batch_size):
+            slices[b] = {}
+            for idx in indices:
+                # Extract along the correct dimension
+                if depth_dim == 0:  # Extract from dim1
+                    slice_2d = x[b, :, idx, :, :]
+                elif depth_dim == 1:  # Extract from dim2
+                    slice_2d = x[b, :, :, idx, :]
+                else:  # Extract from dim3
+                    slice_2d = x[b, :, :, :, idx]
+                
+                slices[b][idx] = slice_2d
+        
+        return slices
+
 class AutoSAM2(nn.Module):
     """
-    Hybrid 3D-2D AutoSAM2 model with correct dimension handling.
+    Hybrid 3D-2D AutoSAM2 model with padding-based dimension handling.
     """
     def __init__(self, num_classes=4, slice_interval=10):
         super(AutoSAM2, self).__init__()
@@ -236,6 +290,9 @@ class AutoSAM2(nn.Module):
             base_channels=16,
             out_channels=num_classes
         )
+        
+        # Slice extractor
+        self.slice_extractor = SliceExtractor()
         
         # Initialize SAM2
         if HAS_SAM2:
@@ -268,7 +325,7 @@ class AutoSAM2(nn.Module):
     
     def forward(self, x):
         """
-        Forward pass of the hybrid model with dimension correction.
+        Forward pass of the hybrid model with padding-based dimension handling.
         """
         # Get features from encoder with dimension info
         features = self.encoder(x)
@@ -281,22 +338,6 @@ class AutoSAM2(nn.Module):
         key_indices = dimensions["key_indices"]
         depth_dim_idx = dimensions["depth_dim_idx"]
         
-        # When training with SAM2 enabled (future implementation)
-        if self.has_sam2 and self.training:
-            # Just for demonstration in current phase
-            
-            # Extract sample slice for visualization
-            input_shape = dimensions["input_shape"]
-            middle_idx = input_shape[2 + depth_dim_idx] // 2  # Account for batch and channel dims
-            
-            # Extract slices using correct dimension
-            if depth_dim_idx == 0:
-                sample_slice = x[0, 0, middle_idx, :, :]  # First batch, first channel
-            elif depth_dim_idx == 1:
-                sample_slice = x[0, 0, :, middle_idx, :]
-            else:
-                sample_slice = x[0, 0, :, :, middle_idx]
-                        
         # Apply sigmoid to get probabilities
         output = torch.sigmoid(segmentation)
         
