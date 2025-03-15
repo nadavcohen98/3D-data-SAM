@@ -561,21 +561,40 @@ class AutoSAM2(nn.Module):
             # Log input shapes
             logger.debug(f"Slice {slice_idx} - Image shape: {img_slice.shape}, Embedding shape: {embedding.shape}")
             
+            # Convert tensor to numpy for SAM2
+            # SAM2 expects numpy arrays not torch tensors
+            img_np = img_slice[0, 0].detach().cpu().numpy()
+            
             # Process with SAM2
-            with torch.cuda.amp.autocast(enabled=True):
-                # Here we use SAM2 with the embedding instead of traditional prompts
-                mask = self.sam2.predict_torch(
-                    images=img_slice.to(device),
-                    point_coords=None,
-                    point_labels=None,
-                    boxes=None,
-                    mask_input=None,
-                    multimask_output=False,
-                    embeddings=embedding.to(device)
+            with torch.amp.autocast(device_type=device.type, enabled=True):
+                # 1. First set the image on the predictor
+                self.sam2.set_image(img_np)
+                
+                # 2. Now make a prediction using embeddings
+                # Note: SAM2 doesn't directly accept embeddings as input
+                # We'll use point coordinates as a prompt instead
+                
+                # Create a center point prompt
+                h, w = img_np.shape
+                point_coords = np.array([[w//2, h//2]])  # Center point
+                point_labels = np.array([1])  # 1 for foreground
+                
+                # Get prediction from SAM2
+                masks, scores, low_res_logits = self.sam2.predict(
+                    point_coords=point_coords,
+                    point_labels=point_labels,
+                    multimask_output=False  # Just get one mask
                 )
+                
+                # Convert results back to torch tensor
+                # masks is [num_masks, H, W] in numpy
+                mask = torch.from_numpy(masks).to(device)
+                
+                # Reshape to [1, 1, H, W] for consistency
+                mask = mask.unsqueeze(0)
             
             # Reshape mask to match expected output format [B, C, H, W]
-            # Note: SAM2 outputs masks with shape [1, 1, H, W] but we need [1, num_classes, H, W]
+            # Note: SAM2 outputs masks with shape [1, H, W] but we need [1, num_classes, H, W]
             height, width = mask.shape[2:]
             multi_class_mask = torch.zeros((1, self.num_classes, height, width), device=device)
             
@@ -597,10 +616,6 @@ class AutoSAM2(nn.Module):
                     import matplotlib.pyplot as plt
                     import numpy as np
                     
-                    # Convert tensors to numpy for visualization
-                    img_np = img_slice[0, 0].detach().cpu().numpy()
-                    mask_np = mask[0, 0].detach().cpu().numpy()
-                    
                     # Create debug image
                     plt.figure(figsize=(10, 5))
                     plt.subplot(1, 2, 1)
@@ -610,7 +625,7 @@ class AutoSAM2(nn.Module):
                     
                     plt.subplot(1, 2, 2)
                     plt.imshow(img_np, cmap='gray')
-                    plt.imshow(mask_np, alpha=0.5, cmap='jet')
+                    plt.imshow(masks[0], alpha=0.5, cmap='jet')
                     plt.title(f"SAM2 Segmentation")
                     plt.axis('off')
                     
@@ -624,8 +639,11 @@ class AutoSAM2(nn.Module):
             return multi_class_mask
         except Exception as e:
             logger.error(f"Error processing slice {slice_idx} with SAM2: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
             height, width = img_slice.shape[2:]
             return torch.zeros((1, self.num_classes, height, width), device=device)
+
     
     def create_volume_from_slices(self, sam2_masks, volume_shape, slice_indices, depth_dim_idx):
         """
