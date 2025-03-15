@@ -1,3 +1,413 @@
+
+#model.py
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import numpy as np
+
+# Import SAM2 with error handling
+try:
+    from sam2.sam2_image_predictor import SAM2ImagePredictor
+    HAS_SAM2 = True
+    print("Successfully imported SAM2")
+except ImportError:
+    print("ERROR: sam2 package not available.")
+    HAS_SAM2 = False
+
+class ConvBlock3D(nn.Module):
+    """
+    Enhanced 3D convolutional block with normalization and activation.
+    Inspired by the UNet implementation but extended to 3D.
+    """
+    def __init__(self, in_channels, out_channels, kernel_size=3, padding=1, stride=1, use_batchnorm=True, dropout_p=0.2):
+        super(ConvBlock3D, self).__init__()
+        
+        # Double convolution block with normalization and dropout (similar to the UNet example)
+        self.conv1 = nn.Conv3d(in_channels, out_channels, kernel_size=kernel_size, padding=padding, stride=stride)
+        self.norm1 = nn.InstanceNorm3d(out_channels) if use_batchnorm else nn.Identity()
+        
+        self.conv2 = nn.Conv3d(out_channels, out_channels, kernel_size=kernel_size, padding=padding)
+        self.norm2 = nn.InstanceNorm3d(out_channels) if use_batchnorm else nn.Identity()
+        
+        self.activation = nn.ReLU(inplace=True)
+        self.dropout = nn.Dropout3d(p=dropout_p) if dropout_p > 0 else nn.Identity()
+    
+    def forward(self, x):
+        x = self.conv1(x)
+        x = self.norm1(x)
+        x = self.activation(x)
+        
+        x = self.conv2(x)
+        x = self.norm2(x)
+        x = self.activation(x)
+        
+        x = self.dropout(x)
+        return x
+
+class DownBlock3D(nn.Module):
+    """
+    Downsampling block that reduces spatial dimensions while increasing feature channels.
+    """
+    def __init__(self, in_channels, out_channels, use_batchnorm=True, dropout_p=0.2):
+        super(DownBlock3D, self).__init__()
+        
+        self.conv_block = ConvBlock3D(in_channels, out_channels, kernel_size=3, padding=1, 
+                                     use_batchnorm=use_batchnorm, dropout_p=dropout_p)
+        self.pool = nn.MaxPool3d(kernel_size=2, stride=2)
+    
+    def forward(self, x):
+        features = self.conv_block(x)
+        pooled = self.pool(features)
+        return pooled, features  # Return both pooled output and features for skip connections
+
+class UpBlock3D(nn.Module):
+    """
+    Upsampling block for decoder path.
+    """
+    def __init__(self, in_channels, out_channels, use_batchnorm=True, dropout_p=0.2):
+        super(UpBlock3D, self).__init__()
+        
+        # Upsampling via transposed convolution
+        self.up = nn.ConvTranspose3d(in_channels, out_channels, kernel_size=2, stride=2)
+        
+        # Double convolution after concatenation with skip connection
+        self.conv_block = ConvBlock3D(in_channels, out_channels, use_batchnorm=use_batchnorm, dropout_p=dropout_p)
+    
+    def forward(self, x, skip_features):
+        x = self.up(x)
+        
+        # Handle possible size mismatch with interpolation
+        if x.shape[2:] != skip_features.shape[2:]:
+            x = F.interpolate(x, size=skip_features.shape[2:], mode='trilinear', align_corners=False)
+        
+        # Concatenate with skip connection
+        x = torch.cat([skip_features, x], dim=1)
+        
+        x = self.conv_block(x)
+        return x
+
+class ModalityFusionModule(nn.Module):
+    """
+    Module to intelligently fuse different MRI modalities (T1, T1ce, T2, FLAIR).
+    Uses channel attention mechanism to weigh modality importance.
+    """
+    def __init__(self, channels=4, output_channels=16):
+        super(ModalityFusionModule, self).__init__()
+        
+        # Squeeze and excitation style channel attention
+        self.avg_pool = nn.AdaptiveAvgPool3d(1)
+        self.fc1 = nn.Linear(channels, channels * 2)
+        self.fc2 = nn.Linear(channels * 2, channels)
+        self.sigmoid = nn.Sigmoid()
+        
+        # Initial convolution to process modalities together
+        self.conv = ConvBlock3D(channels, output_channels, kernel_size=3, padding=1)
+    
+    def forward(self, x):
+        # Input x has shape [batch, channels=4, depth, height, width]
+        
+        # Channel attention to determine modality importance
+        b, c, d, h, w = x.size()
+        y = self.avg_pool(x).view(b, c)
+        y = F.relu(self.fc1(y))
+        y = self.sigmoid(self.fc2(y)).view(b, c, 1, 1, 1)
+        
+        # Apply channel attention weights
+        x = x * y
+        
+        # Process modalities together
+        x = self.conv(x)
+        
+        return x
+
+class VolumetricUNet(nn.Module):
+    """
+    Complete 3D UNet architecture for volumetric medical image segmentation.
+    Specifically designed for BraTS data with 4 input modalities.
+    """
+    def __init__(self, in_channels=4, out_channels=4, feature_channels=[32, 64, 128, 256, 512], 
+                use_batchnorm=True, dropout_p=0.2):
+        super(VolumetricUNet, self).__init__()
+        
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.feature_channels = feature_channels
+        
+        # Modality fusion - smartly combine 4 MRI modalities
+        self.modality_fusion = ModalityFusionModule(channels=in_channels, output_channels=feature_channels[0])
+        
+        # Encoder path
+        self.encoder_blocks = nn.ModuleList()
+        prev_channels = feature_channels[0]
+        
+        for i in range(1, len(feature_channels)):
+            self.encoder_blocks.append(
+                DownBlock3D(prev_channels, feature_channels[i], use_batchnorm=use_batchnorm, dropout_p=dropout_p)
+            )
+            prev_channels = feature_channels[i]
+        
+        # Bottleneck
+        self.bottleneck = ConvBlock3D(
+            feature_channels[-1], feature_channels[-1]*2, 
+            use_batchnorm=use_batchnorm, 
+            dropout_p=dropout_p
+        )
+        
+        # Decoder path
+        self.decoder_blocks = nn.ModuleList()
+        prev_channels = feature_channels[-1]*2  # Start with bottleneck output
+        
+        for i in reversed(range(len(feature_channels))):
+            # Skip the last (first in reversed) since we don't need to upsample further
+            if i == 0:
+                break
+            
+            self.decoder_blocks.append(
+                UpBlock3D(prev_channels, feature_channels[i-1], 
+                         use_batchnorm=use_batchnorm, dropout_p=dropout_p)
+            )
+            prev_channels = feature_channels[i-1]
+        
+        # Final convolution
+        self.final_conv = nn.Conv3d(feature_channels[0], out_channels, kernel_size=1)
+        
+    def forward(self, x):
+        """
+        Forward pass of the 3D UNet.
+        
+        Args:
+            x: Input tensor with shape [batch, 4, depth, height, width]
+                representing the 4 MRI modalities
+                
+        Returns:
+            segmentation: Output tensor with shape [batch, out_channels, depth, height, width]
+                representing the tumor segmentation maps
+        """
+        # Modality fusion
+        x = self.modality_fusion(x)
+        
+        # Encoder path with skip connections
+        skip_connections = []
+        
+        for block in self.encoder_blocks:
+            x, features = block(x)
+            skip_connections.append(features)
+        
+        # Bottleneck
+        x = self.bottleneck(x)
+        
+        # Decoder path with skip connections
+        for i, block in enumerate(self.decoder_blocks):
+            # Use skip connections in reverse order
+            skip_idx = len(skip_connections) - i - 1
+            x = block(x, skip_connections[skip_idx])
+        
+        # Final convolution
+        x = self.final_conv(x)
+        
+        return x
+
+class PromptGenerationModule(nn.Module):
+    """
+    Module that takes 3D bottleneck features and generates 2D embeddings suitable for SAM2.
+    """
+    def __init__(self, bottleneck_channels=512, output_channels=256, output_size=(64, 64)):
+        super(PromptGenerationModule, self).__init__()
+        
+        self.output_size = output_size
+        
+        # Adaptive pooling to handle variable input sizes
+        self.adaptive_pool = nn.AdaptiveAvgPool3d((None, output_size[0], output_size[1]))
+        
+        # Convolutional projection layers
+        self.conv1 = nn.Conv3d(bottleneck_channels, 384, kernel_size=3, padding=1)
+        self.norm1 = nn.InstanceNorm3d(384)
+        self.relu1 = nn.ReLU(inplace=True)
+        
+        self.conv2 = nn.Conv3d(384, output_channels, kernel_size=3, padding=1)
+        self.norm2 = nn.InstanceNorm3d(output_channels)
+        self.relu2 = nn.ReLU(inplace=True)
+    
+    def forward(self, x):
+        """
+        Generate SAM2-compatible embeddings from 3D features.
+        
+        Args:
+            x: 3D features tensor of shape [batch, channels, depth, height, width]
+            
+        Returns:
+            embeddings: Tensor of shape [batch, channels, depth, output_height, output_width]
+        """
+        # Project to desired number of channels and spatial size
+        x = self.conv1(x)
+        x = self.norm1(x)
+        x = self.relu1(x)
+        
+        x = self.conv2(x)
+        x = self.norm2(x)
+        x = self.relu2(x)
+        
+        # Resize to target spatial dimensions
+        x = self.adaptive_pool(x)
+        
+        return x
+
+class KeySliceSelector(nn.Module):
+    """
+    Module to intelligently select important slices for SAM2 processing.
+    """
+    def __init__(self, feature_channels=256, num_slices=16):
+        super(KeySliceSelector, self).__init__()
+        
+        self.num_slices = num_slices
+        
+        # Simple slice importance prediction network
+        self.conv = nn.Conv3d(feature_channels, 1, kernel_size=3, padding=1)
+        self.pool = nn.AdaptiveAvgPool3d((None, 1, 1))  # Pool spatially, keep depth
+        
+    def forward(self, x):
+        """
+        Select key slices from the volume.
+        
+        Args:
+            x: Feature tensor of shape [batch, channels, depth, height, width]
+            
+        Returns:
+            indices: List of selected slice indices
+            scores: Importance scores for the selected slices
+        """
+        # Compute importance score for each slice
+        importance = self.conv(x)
+        importance = self.pool(importance).squeeze(-1).squeeze(-1)  # [batch, 1, depth]
+        
+        # Get top-k slice indices
+        batch_size = x.shape[0]
+        indices = []
+        scores = []
+        
+        for b in range(batch_size):
+            # Get importance scores for this batch item
+            batch_importance = importance[b, 0]  # [depth]
+            
+            # Select top-k indices
+            k = min(self.num_slices, batch_importance.shape[0])
+            top_k_values, top_k_indices = torch.topk(batch_importance, k)
+            
+            # Sort indices by position for smoother processing
+            top_k_indices, _ = torch.sort(top_k_indices)
+            
+            indices.append(top_k_indices)
+            scores.append(batch_importance[top_k_indices])
+            
+        return indices, scores
+
+class AutoSAM2(nn.Module):
+    """
+    Complete AutoSAM2 model for 3D medical image segmentation.
+    Combines a volumetric UNet for processing 3D data with SAM2 for selected key slices.
+    """
+    def __init__(self, num_classes=4, embedding_channels=256, embedding_size=(64, 64), key_slices=16):
+        super(AutoSAM2, self).__init__()
+        
+        self.num_classes = num_classes
+        self.embedding_channels = embedding_channels
+        self.embedding_size = embedding_size
+        self.key_slices = key_slices
+        
+        # Volumetric UNet for 3D segmentation
+        self.volumetric_unet = VolumetricUNet(
+            in_channels=4,  # 4 MRI modalities
+            out_channels=num_classes,
+            feature_channels=[32, 64, 128, 256, 512],
+            use_batchnorm=True,
+            dropout_p=0.2
+        )
+        
+        # Key slice selector module
+        self.key_slice_selector = KeySliceSelector(
+            feature_channels=512,  # Using bottleneck features
+            num_slices=key_slices
+        )
+        
+        # Prompt generation for SAM2
+        self.prompt_generator = PromptGenerationModule(
+            bottleneck_channels=512 * 2,  # Match bottleneck size
+            output_channels=embedding_channels,
+            output_size=embedding_size
+        )
+        
+        # Initialize SAM2
+        if HAS_SAM2:
+            try:
+                self.sam2 = SAM2ImagePredictor.from_pretrained("facebook/sam2-hiera-large")
+                print("SAM2 initialized successfully")
+                
+                # Freeze SAM2 weights
+                for param in self.sam2.model.parameters():
+                    param.requires_grad = False
+                
+                self.has_sam2 = True
+            except Exception as e:
+                print(f"Error initializing SAM2: {e}")
+                self.has_sam2 = False
+                self.sam2 = None
+        else:
+            self.has_sam2 = False
+            self.sam2 = None
+    
+    def process_slice_with_sam2(self, img_slice, prompt_embedding, device):
+        """
+        Process a single 2D slice with SAM2
+        This is a placeholder to be expanded in the next implementation step
+        """
+        # In this version, we're just returning a placeholder
+        # Will be implemented fully in the next improvement step
+        height, width = img_slice.shape[1:]
+        placeholder = torch.zeros((height, width), device=device)
+        return placeholder
+    
+    def forward(self, x):
+        """
+        Forward pass of the AutoSAM2 model.
+        
+        Args:
+            x: Input tensor of shape [batch, 4, depth, height, width]
+               representing the 4 MRI modalities
+                
+        Returns:
+            segmentations: Output tensor with shape [batch, num_classes, depth, height, width]
+                representing the tumor segmentation maps
+        """
+        batch_size, channels, depth, height, width = x.shape
+        device = x.device
+        
+        # Generate base segmentation with the volumetric UNet
+        # In a production implementation, we would use hooks to save intermediate features
+        # For simplicity, we'll just run the UNet forward pass
+        base_segmentations = self.volumetric_unet(x)
+        
+        # In training mode, also process key slices with SAM2
+        if self.training and self.has_sam2:
+            # Extract features from the UNet - just a placeholder for now
+            bottleneck_features = torch.zeros((batch_size, 512*2, depth//16, height//16, width//16), 
+                                             device=device)
+            
+            # Select key slices
+            slice_indices, _ = self.key_slice_selector(bottleneck_features)
+            
+            # Generate prompt embeddings
+            embeddings = self.prompt_generator(bottleneck_features)
+            
+            # Print information for debugging
+            print(f"Selected {len(slice_indices[0])} key slices from volume with depth {depth}")
+        
+        # Apply sigmoid to get probabilities
+        output = torch.sigmoid(base_segmentations)
+        
+        return output
+        
+
+
 #dataset.py
 import os
 import torch
@@ -306,218 +716,6 @@ def get_brats_dataloader(root_dir, batch_size=1, train=True, normalize=True, max
     return loader
 
 
-#model.py
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-import numpy as np
-
-# Import SAM2 with error handling
-try:
-    from sam2.sam2_image_predictor import SAM2ImagePredictor
-    HAS_SAM2 = True
-    print("Successfully imported SAM2")
-except ImportError:
-    print("ERROR: sam2 package not available.")
-    HAS_SAM2 = False
-
-class SimpleEncoder3D(nn.Module):
-    """
-    Simple 3D encoder with minimal complexity
-    """
-    def __init__(self, in_channels=4, base_channels=16):
-        super().__init__()
-        
-        # First encoder block
-        self.enc1 = nn.Sequential(
-            nn.Conv3d(in_channels, base_channels, kernel_size=3, padding=1),
-            nn.InstanceNorm3d(base_channels),
-            nn.ReLU(inplace=True),
-            nn.Conv3d(base_channels, base_channels, kernel_size=3, padding=1),
-            nn.InstanceNorm3d(base_channels),
-            nn.ReLU(inplace=True)
-        )
-        self.pool1 = nn.MaxPool3d(kernel_size=2, stride=2)
-        
-        # Second encoder block
-        self.enc2 = nn.Sequential(
-            nn.Conv3d(base_channels, base_channels*2, kernel_size=3, padding=1),
-            nn.InstanceNorm3d(base_channels*2),
-            nn.ReLU(inplace=True),
-            nn.Conv3d(base_channels*2, base_channels*2, kernel_size=3, padding=1),
-            nn.InstanceNorm3d(base_channels*2),
-            nn.ReLU(inplace=True)
-        )
-        self.pool2 = nn.MaxPool3d(kernel_size=2, stride=2)
-        
-        # Bottleneck
-        self.bottleneck = nn.Sequential(
-            nn.Conv3d(base_channels*2, base_channels*4, kernel_size=3, padding=1),
-            nn.InstanceNorm3d(base_channels*4),
-            nn.ReLU(inplace=True),
-            nn.Conv3d(base_channels*4, base_channels*4, kernel_size=3, padding=1),
-            nn.InstanceNorm3d(base_channels*4),
-            nn.ReLU(inplace=True)
-        )
-    
-    def forward(self, x):
-        
-        # Encoder pathway with skip connections
-        x1 = self.enc1(x)
-        x = self.pool1(x1)
-        
-        x2 = self.enc2(x)
-        x = self.pool2(x2)
-        
-        x = self.bottleneck(x)
-        
-        return [x1, x2, x]
-
-class SimpleDecoder3D(nn.Module):
-    """
-    Simple decoder that ensures proper size handling
-    """
-    def __init__(self, base_channels=16, out_channels=4):
-        super().__init__()
-        
-        # Upsampling block 1 - add output_padding to fix dimension mismatch
-        self.up1 = nn.ConvTranspose3d(
-            base_channels*4, base_channels*2, 
-            kernel_size=2, stride=2,
-            output_padding=(0, 0, 1)  # Add padding in depth dimension
-        )
-        self.dec1 = nn.Sequential(
-            nn.Conv3d(base_channels*4, base_channels*2, kernel_size=3, padding=1),
-            nn.InstanceNorm3d(base_channels*2),
-            nn.ReLU(inplace=True),
-            nn.Conv3d(base_channels*2, base_channels*2, kernel_size=3, padding=1),
-            nn.InstanceNorm3d(base_channels*2),
-            nn.ReLU(inplace=True)
-        )
-        
-        # Upsampling block 2 - also add output_padding to fix potential dimension mismatch
-        self.up2 = nn.ConvTranspose3d(
-            base_channels*2, base_channels,
-            kernel_size=2, stride=2,
-            output_padding=(0, 0, 1)  # Add padding in depth dimension
-        )
-        self.dec2 = nn.Sequential(
-            nn.Conv3d(base_channels*2, base_channels, kernel_size=3, padding=1),
-            nn.InstanceNorm3d(base_channels),
-            nn.ReLU(inplace=True),
-            nn.Conv3d(base_channels, base_channels, kernel_size=3, padding=1),
-            nn.InstanceNorm3d(base_channels),
-            nn.ReLU(inplace=True)
-        )
-        
-        # Final layer
-        self.final = nn.Conv3d(base_channels, out_channels, kernel_size=1)
-    
-    def forward(self, features):
-        x1, x2, x = features
-    
-        
-        # First upsampling with output_padding
-        x = self.up1(x)
-        
-        # Only use interpolation if dimensions still don't match after output_padding
-        if x.shape[2:] != x2.shape[2:]:
-            print(f"Size mismatch in decoder. Interpolating {x.shape} to match {x2.shape}")
-            x = F.interpolate(x, size=x2.shape[2:], mode='trilinear', align_corners=False)
-            print(f"After interpolation to match x2: {x.shape}")
-        
-        # Concatenate and process
-        x = torch.cat([x, x2], dim=1)
-        x = self.dec1(x)
-        
-        # Second upsampling with output_padding
-        x = self.up2(x)
-        
-        # Only use interpolation if dimensions still don't match after output_padding
-        if x.shape[2:] != x1.shape[2:]:
-            print(f"Size mismatch in decoder. Interpolating {x.shape} to match {x1.shape}")
-            x = F.interpolate(x, size=x1.shape[2:], mode='trilinear', align_corners=False)
-            print(f"After interpolation to match x1: {x.shape}")
-        
-        # Concatenate and process
-        x = torch.cat([x, x1], dim=1)
-        x = self.dec2(x)
-        
-        # Final convolution
-        x = self.final(x)
-        
-        return x
-class AutoSAM2(nn.Module):
-    """
-    Simplified version of AutoSAM2 to verify data flow
-    """
-    def __init__(self, num_classes=4):
-        super().__init__()
-        
-        # Store configuration
-        self.num_classes = num_classes
-        
-        # Create encoder and decoder
-        self.encoder = SimpleEncoder3D(in_channels=4, base_channels=16)
-        self.decoder = SimpleDecoder3D(base_channels=16, out_channels=num_classes)
-        
-        # Initialize SAM2
-        if HAS_SAM2:
-            try:
-                self.sam2 = SAM2ImagePredictor.from_pretrained("facebook/sam2-hiera-large")
-                print("SAM2 initialized successfully")
-                
-                # Freeze SAM2 weights
-                for param in self.sam2.model.parameters():
-                    param.requires_grad = False
-                
-                self.has_sam2 = True
-            except Exception as e:
-                print(f"Error initializing SAM2: {e}")
-                self.has_sam2 = False
-                self.sam2 = None
-        else:
-            self.has_sam2 = False
-            self.sam2 = None
-    
-    def process_slice_with_sam2(self, img_slice, device):
-        """
-        Process a single 2D slice with SAM2
-        This is just a placeholder in the simple model version
-        """
-        # In this simple version, we'll just return a placeholder
-        # We just want to verify that the data dimensions are correct
-        height, width = img_slice.shape[1:]
-        placeholder = torch.zeros((height, width), device=device)
-        return placeholder
-    
-    def forward(self, x):
-        """
-        Forward pass - simplified to focus on data flow
-        """
-        batch_size, channels, height, width, depth = x.shape
-        
-        # Get features from encoder
-        features = self.encoder(x)
-        
-        # Get segmentation from decoder
-        segmentation = self.decoder(features)
-        
-        # Select middle slice for demonstration
-        if self.has_sam2 and self.training:
-            # Calculate middle slice
-            middle_slice = depth // 2
-            #print(f"In full model, would process slice {middle_slice} with SAM2")
-            
-            # Get some data from middle slice for demonstration
-            for b in range(batch_size):
-                sample_slice = x[b, 0, :, :, middle_slice]  # Get FLAIR modality
-                #print(f"Middle slice {middle_slice} shape: {sample_slice.shape}")
-        
-        # Apply sigmoid to get probabilities
-        output = torch.sigmoid(segmentation)
-        
-        return output
 
 #train.py - Enhanced version with optimizations
 import os
