@@ -1,3 +1,333 @@
+import torch
+import torch.nn as nn
+import numpy as np
+import time
+import logging
+from torch.cuda import max_memory_allocated, reset_peak_memory_stats
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler("sam2_integration.log"),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger("SAM2Integration")
+
+# Import SAM2 with error handling
+try:
+    from sam2.sam2_image_predictor import SAM2ImagePredictor
+    HAS_SAM2 = True
+    logger.info("Successfully imported SAM2")
+except ImportError:
+    logger.error("SAM2 package not available. Please install it to use full functionality.")
+    HAS_SAM2 = False
+
+class SAM2Integration(nn.Module):
+    """
+    Handles the integration of SAM2 for processing slices from 3D volumes.
+    This module processes slices with SAM2 and tracks performance metrics.
+    """
+    def __init__(self, sam2_model_name="facebook/sam2-hiera-base", freeze_sam2=True):
+        super().__init__()
+        
+        self.sam2_model_name = sam2_model_name
+        self.has_sam2 = False
+        self.sam2 = None
+        self.freeze_sam2 = freeze_sam2
+        
+        # Performance tracking
+        self.processing_times = []
+        self.memory_usages = []
+        
+        # Initialize SAM2
+        self._initialize_sam2()
+        
+        # Bridge from 3D UNet features to SAM2 embeddings
+        self.embedding_bridge = nn.Sequential(
+            nn.Conv2d(256, 256, kernel_size=3, padding=1),
+            nn.GroupNorm(32, 256),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(256, 256, kernel_size=1),
+            nn.GroupNorm(32, 256),
+            nn.ReLU(inplace=True)
+        )
+        
+        # Adaptive pooling to ensure correct output size for SAM2
+        self.adaptive_pool = nn.AdaptiveAvgPool2d((64, 64))
+        
+    def _initialize_sam2(self):
+        """Initialize the SAM2 model with proper error handling"""
+        if not HAS_SAM2:
+            logger.warning("SAM2 package not available. Running without SAM2 integration.")
+            return
+            
+        try:
+            logger.info(f"Initializing SAM2 with model: {self.sam2_model_name}")
+            self.sam2 = SAM2ImagePredictor.from_pretrained(self.sam2_model_name)
+            
+            # Freeze SAM2 weights if specified
+            if self.freeze_sam2:
+                for param in self.sam2.model.parameters():
+                    param.requires_grad = False
+                logger.info("SAM2 weights frozen")
+            else:
+                logger.info("SAM2 weights will be fine-tuned")
+                
+            self.has_sam2 = True
+            logger.info("SAM2 initialized successfully")
+        except Exception as e:
+            logger.error(f"Error initializing SAM2: {e}")
+            self.has_sam2 = False
+            self.sam2 = None
+    
+    def extract_slice(self, volume, idx, depth_dim=2):
+        """
+        Extract a specific slice from a 3D volume
+        
+        Args:
+            volume: The 3D volume tensor [B, C, D, H, W]
+            idx: The slice index
+            depth_dim: The dimension representing depth (0, 1, or 2)
+            
+        Returns:
+            The 2D slice as a tensor
+        """
+        if depth_dim == 0:
+            return volume[:, :, idx, :, :]
+        elif depth_dim == 1:
+            return volume[:, :, :, idx, :]
+        else:  # default to dim 2
+            return volume[:, :, :, :, idx]
+    
+    def prepare_slice_for_sam2(self, features, idx, depth_dim):
+        """
+        Prepare a single slice for SAM2 processing
+        
+        Args:
+            features: The feature volume from the 3D UNet [B, C, D, H, W]
+            idx: The slice index
+            depth_dim: The dimension representing depth
+            
+        Returns:
+            The prepared 2D embedding for SAM2
+        """
+        # Extract slice
+        slice_2d = self.extract_slice(features, idx, depth_dim)
+        
+        # Ensure slice is 2D with correct dimensions by squeezing the depth dimension
+        if len(slice_2d.shape) > 4:  # [B, C, H, W]
+            slice_2d = slice_2d.squeeze(depth_dim + 1)  # +1 because batch dimension
+        
+        # Apply embedding bridge to transform features for SAM2
+        slice_2d = self.embedding_bridge(slice_2d)
+        
+        # Apply adaptive pooling to ensure correct size for SAM2 (64x64)
+        slice_2d = self.adaptive_pool(slice_2d)
+        
+        return slice_2d
+    
+    def process_slice(self, img_slice, embedding, device):
+        """
+        Process a single slice with SAM2
+        
+        Args:
+            img_slice: The image slice to visualize [B, C, H, W]
+            embedding: The embedding for SAM2 [B, C, H, W]
+            device: The compute device
+            
+        Returns:
+            The segmentation mask
+        """
+        if not self.has_sam2:
+            # Return placeholder if SAM2 not available
+            height, width = img_slice.shape[2:]
+            return torch.zeros((1, 1, height, width), device=device)
+            
+        try:
+            # Process with SAM2
+            mask = self.sam2.predict_torch(
+                images=img_slice.to(device),
+                point_coords=None,
+                point_labels=None,
+                boxes=None,
+                mask_input=None,
+                multimask_output=False,
+                embeddings=embedding.to(device)
+            )
+            
+            return mask
+        except Exception as e:
+            logger.error(f"Error processing slice with SAM2: {e}")
+            height, width = img_slice.shape[2:]
+            return torch.zeros((1, 1, height, width), device=device)
+    
+    def process_volume(self, volume_features, original_volume, metadata, device):
+        """
+        Process an entire volume through SAM2, slice by slice
+        
+        Args:
+            volume_features: Features from the 3D UNet (B, C, D, H, W)
+            original_volume: Original input volume for visualization/reference
+            metadata: Dictionary containing info about volume dimensions
+            device: Torch device for processing
+            
+        Returns:
+            Dictionary with processed slices, metrics, and error information
+        """
+        if not self.has_sam2:
+            logger.warning("SAM2 not available. Returning empty results.")
+            return {
+                "success": False,
+                "error": "SAM2 not initialized",
+                "results": None,
+                "metrics": {
+                    "avg_time_per_slice": 0,
+                    "total_time": 0,
+                    "max_memory_mb": 0,
+                    "slices_processed": 0,
+                    "slices_failed": 0
+                }
+            }
+        
+        # Reset performance tracking
+        reset_peak_memory_stats(device)
+        self.processing_times = []
+        
+        # Get dimensions
+        batch_size, channels, depth, height, width = volume_features.shape
+        depth_dim_idx = metadata.get("depth_dim_idx", 2)  # Default to 2
+        
+        # Dictionary to store results
+        results = {
+            "segmentation_masks": {},
+            "processing_times": {},
+            "errors": {}
+        }
+        
+        # Track metrics
+        total_start_time = time.time()
+        slices_processed = 0
+        slices_failed = 0
+        
+        # Process each slice in the volume
+        logger.info(f"Processing volume with {depth} slices")
+        
+        # For each batch item (typically just 1)
+        for b in range(batch_size):
+            results["segmentation_masks"][b] = {}
+            
+            # Process each slice
+            for slice_idx in range(depth):
+                try:
+                    # Track time and memory for this slice
+                    slice_start_time = time.time()
+                    
+                    # Get the input image slice for visualization (from original volume)
+                    input_slice = self.extract_slice(original_volume, slice_idx, depth_dim_idx)[b].cpu()
+                    
+                    # First modality is typically FLAIR in BraTS
+                    flair_slice = input_slice[0].unsqueeze(0).unsqueeze(0)  # Add batch and channel dims
+                    
+                    # Normalize for visualization
+                    flair_slice = (flair_slice - flair_slice.min()) / (flair_slice.max() - flair_slice.min() + 1e-8)
+                    
+                    # Prepare features for SAM2
+                    sam2_embedding = self.prepare_slice_for_sam2(
+                        volume_features[b:b+1], slice_idx, depth_dim_idx
+                    )
+                    
+                    # Process the slice with SAM2
+                    # This is the key part where we send the embedding to SAM2
+                    with torch.cuda.amp.autocast(enabled=True):
+                        mask = self.process_slice(
+                            flair_slice.to(device),
+                            sam2_embedding,
+                            device
+                        )
+                    
+                    # Record the mask
+                    results["segmentation_masks"][b][slice_idx] = mask.to(device)
+                    
+                    # Track processing time
+                    slice_process_time = time.time() - slice_start_time
+                    self.processing_times.append(slice_process_time)
+                    results["processing_times"][slice_idx] = slice_process_time
+                    
+                    slices_processed += 1
+                    
+                    # Log progress
+                    if slice_idx % 10 == 0:
+                        logger.info(f"Processed slice {slice_idx}/{depth} in {slice_process_time:.4f}s")
+                
+                except Exception as e:
+                    logger.error(f"Error processing slice {slice_idx}: {str(e)}")
+                    results["errors"][slice_idx] = str(e)
+                    slices_failed += 1
+        
+        # Calculate metrics
+        total_time = time.time() - total_start_time
+        avg_time_per_slice = np.mean(self.processing_times) if self.processing_times else 0
+        max_memory_mb = max_memory_allocated(device) / (1024 * 1024)  # Convert to MB
+        
+        # Record metrics
+        metrics = {
+            "avg_time_per_slice": avg_time_per_slice,
+            "total_time": total_time,
+            "max_memory_mb": max_memory_mb,
+            "slices_processed": slices_processed,
+            "slices_failed": slices_failed,
+            "slice_times": self.processing_times
+        }
+        
+        logger.info(f"Processed {slices_processed}/{depth} slices in {total_time:.2f}s")
+        logger.info(f"Average time per slice: {avg_time_per_slice:.4f}s")
+        logger.info(f"Peak memory usage: {max_memory_mb:.2f} MB")
+        
+        return {
+            "success": slices_failed == 0,
+            "error": None if slices_failed == 0 else f"{slices_failed} slices failed processing",
+            "results": results,
+            "metrics": metrics
+        }
+    
+    def combine_masks(self, sam2_masks, unet_output, metadata, device):
+        """
+        Combine the SAM2 processed masks with the UNet output
+        
+        This is a placeholder implementation for now - we'll refine the blending
+        strategy once we have real results and can analyze the best approach.
+        
+        Args:
+            sam2_masks: Dictionary of SAM2 segmentation masks by slice
+            unet_output: The UNet segmentation output
+            metadata: Dictionary with volume information
+            device: Compute device
+            
+        Returns:
+            Combined segmentation mask
+        """
+        # For now, just return the UNet output as we evaluate performance
+        # We'll implement a proper blending strategy once we have real results
+        return unet_output
+    
+    def forward(self, volume_features, original_volume, metadata, device):
+        """
+        Forward pass for SAM2 integration
+        
+        Args:
+            volume_features: Features from the 3D UNet
+            original_volume: Original input volume
+            metadata: Dictionary with volume information
+            device: Compute device
+            
+        Returns:
+            Dictionary with results and metrics
+        """
+        return self.process_volume(volume_features, original_volume, metadata, device)
+
 #model.py
 import torch
 import torch.nn as nn
