@@ -1121,7 +1121,7 @@ def validate(model, val_loader, criterion, device, epoch):
                 else:
                     print(f"\nError in validation batch {batch_idx}: {str(e)}")
                     raise e
-            
+        
         # Calculate average metrics
         avg_loss = total_loss / len(val_loader)
         avg_metrics = {
@@ -1135,9 +1135,9 @@ def validate(model, val_loader, criterion, device, epoch):
             'iou_et': np.mean([m['iou_et'] for m in all_metrics]) if all_metrics else 0.0,
             'iou_wt': np.mean([m['iou_wt'] for m in all_metrics]) if all_metrics else 0.0,
             'iou_tc': np.mean([m['iou_tc'] for m in all_metrics]) if all_metrics else 0.0
-       }
+        }
 
-       return avg_loss, avg_metrics
+        return avg_loss, avg_metrics
 
 def visualize_batch(images, masks, outputs, epoch, prefix=""):
    """
