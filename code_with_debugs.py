@@ -883,7 +883,7 @@ class BraTSDiceLoss(nn.Module):
             # No valid regions found
             return torch.tensor(0.0, requires_grad=True, device=device)
 
-class CombinedLoss(nn.Module):
+class BraTSCombinedLoss(nn.Module):
     """
     Combined loss function for BraTS segmentation task.
     Combines Dice loss, BCE loss, and Focal loss with configurable weights.
