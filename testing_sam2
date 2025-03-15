@@ -9,191 +9,138 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
-logger = logging.getLogger("SAM2Test")
+logger = logging.getLogger("SAM2Explorer")
 
-def test_sam2():
-    logger.info("Starting SAM2 initialization test")
+def explore_sam2_api():
+    """Explore SAM2's API in detail to understand how to use it"""
+    logger.info("Starting SAM2 API exploration")
     
-    # Check if the sam2 module is importable
     try:
-        logger.info("Attempting to import sam2 module")
-        import sam2
-        logger.info(f"SAM2 module imported successfully: {sam2.__file__}")
+        # Import SAM2
+        from sam2.sam2_image_predictor import SAM2ImagePredictor
+        from sam2.build_sam import build_sam2_hf
+        import torch
         
-        # Print module path and version if available
-        if hasattr(sam2, '__version__'):
-            logger.info(f"SAM2 version: {sam2.__version__}")
+        # Initialize SAM2 - we know this works from previous tests
+        logger.info("Initializing SAM2 with facebook/sam2-hiera-large")
+        sam2_model = build_sam2_hf("facebook/sam2-hiera-large")
+        predictor = SAM2ImagePredictor(sam2_model)
+        logger.info("SAM2 initialized successfully")
         
-        # Show module contents
-        logger.info("SAM2 module contents:")
-        for item in dir(sam2):
-            if not item.startswith('_'):
-                logger.info(f"  - {item}")
-        
-        # Check for sam2_image_predictor
-        try:
-            logger.info("Attempting to import SAM2ImagePredictor")
-            from sam2.sam2_image_predictor import SAM2ImagePredictor
-            logger.info("SAM2ImagePredictor imported successfully")
-            
-            # Examine the from_pretrained method
-            logger.info("Examining from_pretrained method:")
-            try:
-                signature = str(inspect.signature(SAM2ImagePredictor.from_pretrained))
-                logger.info(f"Method signature: {signature}")
+        # Examine available methods
+        logger.info("Available methods on SAM2ImagePredictor instance:")
+        for method_name in dir(predictor):
+            if not method_name.startswith('_'):
+                logger.info(f"  - {method_name}")
                 
+                # For each method, get its signature
                 try:
-                    source = inspect.getsource(SAM2ImagePredictor.from_pretrained)
-                    logger.info(f"Method source code:\n{source}")
+                    method = getattr(predictor, method_name)
+                    if callable(method):
+                        signature = inspect.signature(method)
+                        logger.info(f"    Signature: {signature}")
+                        
+                        # Get docstring if available
+                        if method.__doc__:
+                            doc = method.__doc__.strip().split('\n')[0]  # First line only
+                            logger.info(f"    Doc: {doc}")
                 except Exception as e:
-                    logger.warning(f"Could not get source code: {e}")
-            except Exception as e:
-                logger.warning(f"Error examining method: {e}")
-            
-            # Try direct initialization
-            logger.info("Trying direct initialization without from_pretrained:")
-            try:
-                sam2_instance = SAM2ImagePredictor()
-                logger.info("SUCCESS! Direct initialization worked")
-                
-                # Check instance attributes
-                if hasattr(sam2_instance, 'model'):
-                    logger.info("Instance has 'model' attribute")
-                if hasattr(sam2_instance, 'predict'):
-                    logger.info("Instance has 'predict' method")
-                    
-            except Exception as e:
-                logger.warning(f"Direct initialization failed: {e}")
-            
-            # Try to find model files locally
-            logger.info("Checking for model files in common locations:")
-            potential_paths = [
-                os.path.join(os.path.dirname(sam2.__file__), "models"),
-                os.path.expanduser("~/.cache/torch/hub/checkpoints/"),
-                os.path.expanduser("~/.cache/huggingface/"),
-                os.path.expanduser("~/sam2/models/"),
-                "models/",
-                "weights/",
-                "checkpoints/"
-            ]
-            
-            model_files = []
-            for path in potential_paths:
-                if os.path.exists(path):
-                    logger.info(f"Checking directory: {path}")
-                    try:
-                        for root, dirs, files in os.walk(path):
-                            for file in files:
-                                if file.endswith('.pth') or file.endswith('.pt') or file.endswith('.bin'):
-                                    full_path = os.path.join(root, file)
-                                    logger.info(f"Found model file: {full_path}")
-                                    model_files.append(full_path)
-                    except Exception as e:
-                        logger.warning(f"Error scanning {path}: {e}")
-            
-            # Try initialization with local paths
-            if model_files:
-                logger.info("Trying initialization with local model files:")
-                for model_path in model_files:
-                    try:
-                        logger.info(f"Trying to initialize with file: {model_path}")
-                        sam2_instance = SAM2ImagePredictor.from_pretrained(model_path)
-                        logger.info(f"SUCCESS! Initialized with local file: {model_path}")
-                        break
-                    except Exception as e:
-                        logger.warning(f"Failed to initialize with file {model_path}: {e}")
-            
-            # Check for available models
-            logger.info("Checking for available models")
-            
-            # Try to initialize with various model names
-            model_names = [
-                "facebook/sam2-hiera-base",
-                "SAM2",
-                "sam2",
-                "sam2-base",
-                "facebook/sam2-base",
-                "facebook/sam2-small",
-                "sam2-l",
-                "sam2_l"
-            ]
-            
-            success = False
-            for name in model_names:
-                try:
-                    logger.info(f"Trying to initialize SAM2 with model name: {name}")
-                    sam2_model = SAM2ImagePredictor.from_pretrained(name)
-                    logger.info(f"SUCCESS! Initialized SAM2 with model: {name}")
-                    success = True
-                    
-                    # Optional: Check if the model has expected attributes
-                    logger.info("Checking model attributes")
-                    if hasattr(sam2_model, 'model'):
-                        logger.info("Model has 'model' attribute")
-                    if hasattr(sam2_model, 'predict_torch'):
-                        logger.info("Model has 'predict_torch' method")
-                    
-                    break
-                except Exception as e:
-                    logger.warning(f"Failed to initialize with model name {name}: {str(e)}")
-            
-            if not success:
-                # Try to check if there's a from_config method instead
-                if hasattr(SAM2ImagePredictor, 'from_config'):
-                    logger.info("SAM2ImagePredictor has from_config method, trying that instead")
-                    try:
-                        sam2_model = SAM2ImagePredictor.from_config({})
-                        logger.info("SUCCESS! Initialized SAM2 with from_config")
-                    except Exception as e:
-                        logger.warning(f"Failed to initialize with from_config: {str(e)}")
-                
-                # Check if there's API documentation or help
-                logger.info("Checking for API information:")
-                logger.info(f"SAM2ImagePredictor docstring: {SAM2ImagePredictor.__doc__}")
-                
-                # List all methods of the class
-                logger.info("Available methods on SAM2ImagePredictor:")
-                for method_name in dir(SAM2ImagePredictor):
-                    if not method_name.startswith('_'):
-                        logger.info(f"  - {method_name}")
-                
-                # Print SAM2ImagePredictor module contents
-                logger.info("SAM2ImagePredictor module contents:")
-                import sam2.sam2_image_predictor
-                for item in dir(sam2.sam2_image_predictor):
-                    if not item.startswith('_'):
-                        logger.info(f"  - {item}")
-            
-        except ImportError as e:
-            logger.error(f"Failed to import SAM2ImagePredictor: {str(e)}")
-            logger.info("Looking for alternatives in the module")
-            
-            # List all contents of sam2 module to find predictor classes
-            logger.info("Contents of sam2 module:")
-            for item in dir(sam2):
-                if not item.startswith('_'):
-                    logger.info(f"  - {item}")
-            
-    except ImportError as e:
-        logger.error(f"Failed to import sam2 module: {str(e)}")
+                    logger.warning(f"    Error examining method: {e}")
         
-        # Check if the package is installed
-        logger.info("Checking if SAM2 is installed via pip")
+        # Look deeper at predict method specifically
+        if hasattr(predictor, 'predict'):
+            logger.info("\nDetailed analysis of the 'predict' method:")
+            predict_method = getattr(predictor, 'predict')
+            logger.info(f"Full signature: {inspect.signature(predict_method)}")
+            logger.info(f"Full docstring:\n{predict_method.__doc__}")
+            
+            # Examine any example usage in the docstring
+            if predict_method.__doc__ and "Example" in predict_method.__doc__:
+                example_section = predict_method.__doc__.split("Example")[1]
+                logger.info(f"Example usage from docstring:\n{example_section}")
+        
+        # Test if we can make a simple prediction with a random image
+        logger.info("\nTesting prediction with a random image:")
         try:
-            import subprocess
-            result = subprocess.run(["pip", "list"], capture_output=True, text=True)
-            logger.info("Installed packages:")
-            for line in result.stdout.split('\n'):
-                if 'sam2' in line.lower():
-                    logger.info(f"  {line}")
+            # Create a simple random image (1x3x256x256)
+            random_image = torch.rand(1, 3, 256, 256).to(device="cuda" if torch.cuda.is_available() else "cpu")
+            
+            # Create a simple embedding (if needed)
+            random_embedding = torch.rand(1, 256, 64, 64).to(device="cuda" if torch.cuda.is_available() else "cpu")
+            
+            # Set the image
+            logger.info("Setting image on predictor")
+            predictor.set_image(random_image)
+            
+            # Try different prediction approaches
+            logger.info("Trying different prediction approaches:")
+            
+            # Approach 1: Using predict method directly
+            logger.info("Approach 1: Using predict() method")
+            try:
+                # Try with point prompts
+                points = torch.tensor([[[128, 128]]], dtype=torch.float32)
+                point_labels = torch.tensor([[1]])
+                result = predictor.predict(
+                    point_coords=points,
+                    point_labels=point_labels
+                )
+                logger.info(f"Success! predict() returned result of type: {type(result)}")
+                logger.info(f"Result structure: {result.keys() if isinstance(result, dict) else 'not a dict'}")
+            except Exception as e:
+                logger.warning(f"predict() method failed: {e}")
+            
+            # Approach 2: Try predict_batch
+            logger.info("Approach 2: Using predict_batch() method")
+            try:
+                result = predictor.predict_batch(
+                    point_coords=points,
+                    point_labels=point_labels
+                )
+                logger.info(f"Success! predict_batch() returned result of type: {type(result)}")
+            except Exception as e:
+                logger.warning(f"predict_batch() method failed: {e}")
+            
+            # Approach 3: Try passing embeddings
+            logger.info("Approach 3: Using predict() with embeddings")
+            try:
+                result = predictor.predict(
+                    point_coords=None,
+                    point_labels=None,
+                    embeddings=random_embedding
+                )
+                logger.info(f"Success! predict() with embeddings returned result of type: {type(result)}")
+            except Exception as e:
+                logger.warning(f"predict() with embeddings failed: {e}")
+                
+            # Extract and analyze the results
+            if 'result' in locals() and result is not None:
+                logger.info("Analyzing prediction result:")
+                
+                # Check if it's a dictionary
+                if isinstance(result, dict):
+                    for key, value in result.items():
+                        if isinstance(value, torch.Tensor):
+                            logger.info(f"  - {key}: Tensor of shape {value.shape}, dtype {value.dtype}")
+                        else:
+                            logger.info(f"  - {key}: {type(value)}")
+                
+                # If it's a tensor or has specific attributes
+                elif hasattr(result, 'shape'):
+                    logger.info(f"Result is a tensor of shape {result.shape}")
+                
+                else:
+                    logger.info(f"Result is of type {type(result)}")
+        
         except Exception as e:
-            logger.error(f"Error checking pip packages: {str(e)}")
+            logger.error(f"Error during prediction test: {e}")
+            logger.error(traceback.format_exc())
     
     except Exception as e:
-        logger.error(f"Unexpected error: {str(e)}")
+        logger.error(f"Error during SAM2 API exploration: {e}")
         logger.error(traceback.format_exc())
     
-    logger.info("SAM2 initialization test complete")
+    logger.info("SAM2 API exploration complete")
 
 if __name__ == "__main__":
-    test_sam2()
+    explore_sam2_api()
