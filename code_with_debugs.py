@@ -13,9 +13,10 @@ except ImportError:
     print("ERROR: sam2 package not available.")
     HAS_SAM2 = False
 
-class SimpleEncoder3D(nn.Module):
+class EnhancedEncoder3D(nn.Module):
     """
-    Simple 3D encoder with minimal complexity and added key slice tracking
+    Enhanced 3D encoder with deeper features (up to 128 channels)
+    and multi-slice processing capability
     """
     def __init__(self, in_channels=4, base_channels=16, slice_interval=10):
         super().__init__()
@@ -45,8 +46,8 @@ class SimpleEncoder3D(nn.Module):
         )
         self.pool2 = nn.MaxPool3d(kernel_size=2, stride=2)
         
-        # Bottleneck - UNCHANGED
-        self.bottleneck = nn.Sequential(
+        # Third encoder block - NEW
+        self.enc3 = nn.Sequential(
             nn.Conv3d(base_channels*2, base_channels*4, kernel_size=3, padding=1),
             nn.InstanceNorm3d(base_channels*4),
             nn.ReLU(inplace=True),
@@ -54,9 +55,20 @@ class SimpleEncoder3D(nn.Module):
             nn.InstanceNorm3d(base_channels*4),
             nn.ReLU(inplace=True)
         )
+        self.pool3 = nn.MaxPool3d(kernel_size=2, stride=2)
         
-        # Add projection for SAM2 embeddings
-        self.slice_projection = nn.Conv3d(base_channels*4, 256, kernel_size=1)
+        # Bottleneck - Modified to use 128 channels
+        self.bottleneck = nn.Sequential(
+            nn.Conv3d(base_channels*4, base_channels*8, kernel_size=3, padding=1),
+            nn.InstanceNorm3d(base_channels*8),
+            nn.ReLU(inplace=True),
+            nn.Conv3d(base_channels*8, base_channels*8, kernel_size=3, padding=1),
+            nn.InstanceNorm3d(base_channels*8),
+            nn.ReLU(inplace=True)
+        )
+        
+        # Projection layer for SAM2
+        self.slice_projection = nn.Conv3d(base_channels*8, 256, kernel_size=1)
     
     def forward(self, x):
         # Get batch dimensions
@@ -79,21 +91,24 @@ class SimpleEncoder3D(nn.Module):
             key_indices.append(middle_idx)
             key_indices.sort()
         
-        # Encoder pathway - UNCHANGED from original model
+        # Encoder pathway with the additional layer
         x1 = self.enc1(x)
-        x = self.pool1(x1)
+        p1 = self.pool1(x1)
         
-        x2 = self.enc2(x)
-        x = self.pool2(x2)
+        x2 = self.enc2(p1)
+        p2 = self.pool2(x2)
         
-        x = self.bottleneck(x)
+        x3 = self.enc3(p2)
+        p3 = self.pool3(x3)
         
-        # Project features for SAM2 key slices
-        key_features = self.slice_projection(x)
+        x4 = self.bottleneck(p3)
+        
+        # Generate embeddings for SAM2
+        key_features = self.slice_projection(x4)
         
         # Calculate downsampled key indices
-        downsampled_depth = depth // 4  # After 2 pooling layers
-        ds_key_indices = [min(idx // 4, downsampled_depth-1) for idx in key_indices]
+        downsampled_depth = depth // 8  # After 3 pooling layers
+        ds_key_indices = [min(idx // 8, downsampled_depth-1) for idx in key_indices]
         
         # Store metadata for key slice processing
         metadata = {
@@ -102,25 +117,38 @@ class SimpleEncoder3D(nn.Module):
             "depth_dim_idx": depth_idx
         }
         
-        # Return same format as original model, plus key_features and metadata
-        return [x1, x2, x, key_features, metadata]
+        return [x1, x2, x3, x4, key_features, metadata]
 
-class SimpleDecoder3D(nn.Module):
+class EnhancedDecoder3D(nn.Module):
     """
-    Simple decoder that ensures proper size handling
-    Keeping the original implementation unchanged
+    Enhanced decoder with additional upsampling level to handle 128 channels
     """
     def __init__(self, base_channels=16, out_channels=4):
         super().__init__()
         
-        # Upsampling block 1 - UNCHANGED
+        # First upsampling block (128 → 64)
         self.up1 = nn.ConvTranspose3d(
-            base_channels*4, base_channels*2, 
+            base_channels*8, base_channels*4, 
             kernel_size=2, stride=2,
-            output_padding=(0, 0, 1)  # Add padding in depth dimension
+            output_padding=(0, 0, 1)  # Add padding in depth dimension for odd sizes
         )
         self.dec1 = nn.Sequential(
-            nn.Conv3d(base_channels*4, base_channels*2, kernel_size=3, padding=1),
+            nn.Conv3d(base_channels*8, base_channels*4, kernel_size=3, padding=1), # concat: 4+4=8
+            nn.InstanceNorm3d(base_channels*4),
+            nn.ReLU(inplace=True),
+            nn.Conv3d(base_channels*4, base_channels*4, kernel_size=3, padding=1),
+            nn.InstanceNorm3d(base_channels*4),
+            nn.ReLU(inplace=True)
+        )
+        
+        # Second upsampling block (64 → 32)
+        self.up2 = nn.ConvTranspose3d(
+            base_channels*4, base_channels*2,
+            kernel_size=2, stride=2,
+            output_padding=(0, 0, 1)  # Add padding in depth dimension for odd sizes
+        )
+        self.dec2 = nn.Sequential(
+            nn.Conv3d(base_channels*4, base_channels*2, kernel_size=3, padding=1), # concat: 2+2=4
             nn.InstanceNorm3d(base_channels*2),
             nn.ReLU(inplace=True),
             nn.Conv3d(base_channels*2, base_channels*2, kernel_size=3, padding=1),
@@ -128,14 +156,14 @@ class SimpleDecoder3D(nn.Module):
             nn.ReLU(inplace=True)
         )
         
-        # Upsampling block 2 - UNCHANGED
-        self.up2 = nn.ConvTranspose3d(
+        # Third upsampling block (32 → 16)
+        self.up3 = nn.ConvTranspose3d(
             base_channels*2, base_channels,
             kernel_size=2, stride=2,
-            output_padding=(0, 0, 1)  # Add padding in depth dimension
+            output_padding=(0, 0, 1)  # Add padding in depth dimension for odd sizes
         )
-        self.dec2 = nn.Sequential(
-            nn.Conv3d(base_channels*2, base_channels, kernel_size=3, padding=1),
+        self.dec3 = nn.Sequential(
+            nn.Conv3d(base_channels*2, base_channels, kernel_size=3, padding=1), # concat: 1+1=2
             nn.InstanceNorm3d(base_channels),
             nn.ReLU(inplace=True),
             nn.Conv3d(base_channels, base_channels, kernel_size=3, padding=1),
@@ -143,43 +171,116 @@ class SimpleDecoder3D(nn.Module):
             nn.ReLU(inplace=True)
         )
         
-        # Final layer - UNCHANGED
+        # Final layer
         self.final = nn.Conv3d(base_channels, out_channels, kernel_size=1)
     
     def forward(self, features):
-        # Extract core features from the extended feature list
-        x1, x2, x = features[0], features[1], features[2]
+        # Extract features
+        x1, x2, x3, x4, _, _ = features
         
-        # First upsampling with output_padding - UNCHANGED
-        x = self.up1(x)
+        # First upsampling (128 → 64)
+        x = self.up1(x4)
         
-        # Only use interpolation if dimensions still don't match after output_padding
+        # Handle dimension mismatch if needed
+        if x.shape[2:] != x3.shape[2:]:
+            x = F.interpolate(x, size=x3.shape[2:], mode='trilinear', align_corners=False)
+        
+        # Combine features and process
+        x = torch.cat([x, x3], dim=1)
+        x = self.dec1(x)
+        
+        # Second upsampling (64 → 32)
+        x = self.up2(x)
+        
+        # Handle dimension mismatch if needed
         if x.shape[2:] != x2.shape[2:]:
             x = F.interpolate(x, size=x2.shape[2:], mode='trilinear', align_corners=False)
         
-        # Concatenate and process
+        # Combine features and process
         x = torch.cat([x, x2], dim=1)
-        x = self.dec1(x)
+        x = self.dec2(x)
         
-        # Second upsampling with output_padding - UNCHANGED
-        x = self.up2(x)
+        # Third upsampling (32 → 16)
+        x = self.up3(x)
         
-        # Only use interpolation if dimensions still don't match after output_padding
+        # Handle dimension mismatch if needed
         if x.shape[2:] != x1.shape[2:]:
             x = F.interpolate(x, size=x1.shape[2:], mode='trilinear', align_corners=False)
         
-        # Concatenate and process
+        # Combine features and process
         x = torch.cat([x, x1], dim=1)
-        x = self.dec2(x)
+        x = self.dec3(x)
         
         # Final convolution
         x = self.final(x)
         
         return x
 
+class SliceProcessor(nn.Module):
+    """
+    Process key slices for SAM2 integration
+    """
+    def __init__(self, input_channels=256, output_size=(64, 64)):
+        super().__init__()
+        
+        self.output_size = output_size
+        
+        # Simple refinement for slice features
+        self.refine = nn.Sequential(
+            nn.Conv2d(input_channels, input_channels, kernel_size=3, padding=1),
+            nn.InstanceNorm2d(input_channels),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(input_channels, input_channels, kernel_size=1),
+            nn.InstanceNorm2d(input_channels),
+            nn.ReLU(inplace=True)
+        )
+        
+        # Adaptive pooling to ensure correct output size
+        self.adaptive_pool = nn.AdaptiveAvgPool2d(output_size)
+    
+    def extract_slice(self, volume, idx, depth_dim=2):
+        """
+        Extract a specific slice from a 3D volume
+        """
+        if depth_dim == 0:
+            return volume[:, :, idx]
+        elif depth_dim == 1:
+            return volume[:, :, :, idx]
+        else:  # default to dim 2
+            return volume[:, :, :, :, idx]
+    
+    def forward(self, features, indices, depth_dim):
+        """
+        Process slices for SAM2
+        """
+        batch_size = features.shape[0]
+        processed_slices = {}
+        
+        for b in range(batch_size):
+            processed_slices[b] = {}
+            for idx in indices:
+                # Extract slice
+                slice_2d = self.extract_slice(features[b:b+1], idx, depth_dim)
+                
+                # Ensure slice is 2D with correct dimensions
+                if len(slice_2d.shape) > 3:
+                    slice_2d = slice_2d.squeeze(depth_dim)
+                
+                # Adaptive pooling to ensure correct output size
+                if slice_2d.shape[1:] != self.output_size:
+                    slice_2d = self.adaptive_pool(slice_2d)
+                
+                # Apply refinement
+                slice_2d = self.refine(slice_2d)
+                
+                # Store processed slice
+                processed_slices[b][idx] = slice_2d
+        
+        return processed_slices
+
 class AutoSAM2(nn.Module):
     """
-    AutoSAM2 with minimal changes to support key slice selection
+    Enhanced AutoSAM2 with 128-channel features and multi-slice processing
     """
     def __init__(self, num_classes=4, slice_interval=10):
         super().__init__()
@@ -188,19 +289,25 @@ class AutoSAM2(nn.Module):
         self.num_classes = num_classes
         self.slice_interval = slice_interval
         
-        # Create encoder and decoder with slice interval param
-        self.encoder = SimpleEncoder3D(
+        # Create enhanced encoder and decoder
+        self.encoder = EnhancedEncoder3D(
             in_channels=4, 
-            base_channels=16, 
+            base_channels=16,
             slice_interval=slice_interval
         )
         
-        self.decoder = SimpleDecoder3D(
+        self.decoder = EnhancedDecoder3D(
             base_channels=16, 
             out_channels=num_classes
         )
         
-        # Initialize SAM2 - UNCHANGED
+        # Slice processor for SAM2 integration
+        self.slice_processor = SliceProcessor(
+            input_channels=256,
+            output_size=(64, 64)
+        )
+        
+        # Initialize SAM2
         if HAS_SAM2:
             try:
                 self.sam2 = SAM2ImagePredictor.from_pretrained("facebook/sam2-hiera-large")
@@ -219,10 +326,10 @@ class AutoSAM2(nn.Module):
             self.has_sam2 = False
             self.sam2 = None
     
-    def process_slice_with_sam2(self, img_slice, device):
+    def process_slice_with_sam2(self, img_slice, embedding, device):
         """
         Process a single 2D slice with SAM2
-        This is just a placeholder in the simple model version
+        This will be fully implemented in the next phase
         """
         # In this simple version, we'll just return a placeholder
         height, width = img_slice.shape[1:]
@@ -231,9 +338,10 @@ class AutoSAM2(nn.Module):
     
     def forward(self, x):
         """
-        Forward pass with key slice tracking
+        Forward pass with proper multi-slice support
         """
-        batch_size, channels, depth, height, width = x.shape
+        batch_size, channels, height, width, depth = x.shape
+        device = x.device
         
         # Get features from encoder
         features = self.encoder(x)
@@ -241,11 +349,32 @@ class AutoSAM2(nn.Module):
         # Get segmentation from decoder
         segmentation = self.decoder(features)
         
-        # Extract key slice info
-        key_features = features[3]
-        metadata = features[4]
+        # Get key slice info
+        key_features = features[4]
+        metadata = features[5]
         key_indices = metadata["key_indices"]
         depth_dim_idx = metadata["depth_dim_idx"]
+        ds_key_indices = metadata["ds_key_indices"]
+        
+        # Process key slices with SAM2 (will be implemented fully in next phase)
+        if self.has_sam2 and self.training:
+            # Process key slices
+            processed_slices = self.slice_processor(
+                key_features, 
+                ds_key_indices, 
+                depth_dim_idx
+            )
+            
+            # Just for demonstration - using middle slice
+            middle_idx = key_indices[len(key_indices)//2]
+            
+            # Get original image slice
+            if depth_dim_idx == 0:
+                sample_slice = x[0, 0, middle_idx]
+            elif depth_dim_idx == 1:
+                sample_slice = x[0, 0, :, middle_idx]
+            else:
+                sample_slice = x[0, 0, :, :, middle_idx]
         
         # Apply sigmoid to get probabilities
         output = torch.sigmoid(segmentation)
