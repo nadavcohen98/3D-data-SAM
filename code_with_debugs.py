@@ -13,178 +13,74 @@ except ImportError:
     print("ERROR: sam2 package not available.")
     HAS_SAM2 = False
 
-class ResidualConvBlock3D(nn.Module):
+class ConvBlock3D(nn.Module):
     """
-    Enhanced 3D convolutional block with residual connection.
-    Allows for better gradient flow during training.
+    Basic 3D convolutional block with normalization and activation.
     """
     def __init__(self, in_channels, out_channels, kernel_size=3, padding=1, dropout_p=0.3):
-        super(ResidualConvBlock3D, self).__init__()
+        super(ConvBlock3D, self).__init__()
         
-        # First convolutional layer
+        # Double convolution with batch normalization and ReLU
         self.conv1 = nn.Conv3d(in_channels, out_channels, kernel_size=kernel_size, padding=padding)
-        self.norm1 = nn.InstanceNorm3d(out_channels)  # InstanceNorm works better for small batch sizes
+        self.norm1 = nn.InstanceNorm3d(out_channels)  # InstanceNorm better for small batches
         self.relu1 = nn.ReLU(inplace=True)
         
-        # Second convolutional layer
         self.conv2 = nn.Conv3d(out_channels, out_channels, kernel_size=kernel_size, padding=padding)
         self.norm2 = nn.InstanceNorm3d(out_channels)
-        
-        # Residual connection with projection if needed
-        self.skip = nn.Identity()
-        if in_channels != out_channels:
-            self.skip = nn.Sequential(
-                nn.Conv3d(in_channels, out_channels, kernel_size=1, bias=False),
-                nn.InstanceNorm3d(out_channels)
-            )
-        
-        # Final activation and dropout
         self.relu2 = nn.ReLU(inplace=True)
+        
+        # Dropout for regularization
         self.dropout = nn.Dropout3d(p=dropout_p) if dropout_p > 0 else nn.Identity()
     
     def forward(self, x):
-        identity = self.skip(x)
+        x = self.conv1(x)
+        x = self.norm1(x)
+        x = self.relu1(x)
         
-        out = self.conv1(x)
-        out = self.norm1(out)
-        out = self.relu1(out)
+        x = self.conv2(x)
+        x = self.norm2(x)
+        x = self.relu2(x)
         
-        out = self.conv2(out)
-        out = self.norm2(out)
-        
-        # Add residual connection
-        out += identity
-        out = self.relu2(out)
-        out = self.dropout(out)
-        
-        return out
-
-class EnhancedDownBlock3D(nn.Module):
-    """
-    Improved downsampling block with residual connections.
-    """
-    def __init__(self, in_channels, out_channels, dropout_p=0.3):
-        super(EnhancedDownBlock3D, self).__init__()
-        
-        # Enhanced convolutional block with residual connection
-        self.conv_block = ResidualConvBlock3D(in_channels, out_channels, dropout_p=dropout_p)
-        
-        # Max pooling for downsampling
-        self.pool = nn.MaxPool3d(kernel_size=2, stride=2)
-    
-    def forward(self, x):
-        features = self.conv_block(x)
-        pooled = self.pool(features)
-        return pooled, features
-
-class EnhancedUpBlock3D(nn.Module):
-    """
-    Improved upsampling block with better feature fusion.
-    """
-    def __init__(self, in_channels, out_channels, dropout_p=0.3):
-        super(EnhancedUpBlock3D, self).__init__()
-        
-        # Upsampling via transposed convolution
-        self.up = nn.ConvTranspose3d(in_channels, out_channels, kernel_size=2, stride=2)
-        
-        # Enhanced residual block after concatenation
-        self.conv_block = ResidualConvBlock3D(out_channels*2, out_channels, dropout_p=dropout_p)
-        
-        # Debug print flag
-        self.print_shapes = True
-    
-    def forward(self, x, skip_features):
-        if self.print_shapes:
-            print(f"UP - Input: {x.shape}, Skip: {skip_features.shape}")
-        
-        # Upsampling
-        x = self.up(x)
-        
-        # Handle size mismatch with interpolation
-        if x.shape[2:] != skip_features.shape[2:]:
-            if self.print_shapes:
-                print(f"  - Size mismatch. Interpolating from {x.shape} to match {skip_features.shape[2:]}")
-            x = F.interpolate(x, size=skip_features.shape[2:], mode='trilinear', align_corners=False)
-        
-        # Concatenate with skip connection
-        x = torch.cat([x, skip_features], dim=1)
-        
-        # Process combined features
-        x = self.conv_block(x)
-        
-        if self.print_shapes:
-            print(f"  - Output: {x.shape}")
-            self.print_shapes = False  # Only print once
-        
+        x = self.dropout(x)
         return x
 
-class EnhancedBottleneck3D(nn.Module):
+class EfficientEncoder3D(nn.Module):
     """
-    Enhanced bottleneck with dilated convolutions for larger receptive field.
+    Efficient 3D encoder with correct dimension handling.
     """
-    def __init__(self, channels, dropout_p=0.3):
-        super(EnhancedBottleneck3D, self).__init__()
-        
-        # First residual block
-        self.block1 = ResidualConvBlock3D(channels, channels, dropout_p=dropout_p)
-        
-        # Dilated convolution to increase receptive field
-        self.dilated_conv = nn.Sequential(
-            nn.Conv3d(channels, channels, kernel_size=3, padding=2, dilation=2),
-            nn.InstanceNorm3d(channels),
-            nn.ReLU(inplace=True)
-        )
-        
-        # Second residual block
-        self.block2 = ResidualConvBlock3D(channels, channels, dropout_p=dropout_p)
-    
-    def forward(self, x):
-        x = self.block1(x)
-        x = self.dilated_conv(x)
-        x = self.block2(x)
-        return x
-
-class EnhancedEncoder3D(nn.Module):
-    """
-    Enhanced 3D encoder with improved architecture.
-    """
-    def __init__(self, in_channels=4, base_channels=16, depth=4, slice_interval=10):
-        super(EnhancedEncoder3D, self).__init__()
+    def __init__(self, in_channels=4, base_channels=16, slice_interval=10):
+        super(EfficientEncoder3D, self).__init__()
         
         self.slice_interval = slice_interval
-        self.depth = depth
         
-        # Initial convolution to process input channels
-        self.initial_conv = nn.Sequential(
-            nn.Conv3d(in_channels, base_channels, kernel_size=3, padding=1),
-            nn.InstanceNorm3d(base_channels),
-            nn.ReLU(inplace=True)
-        )
+        # First encoder block
+        self.enc1 = ConvBlock3D(in_channels, base_channels)
+        self.pool1 = nn.MaxPool3d(kernel_size=2, stride=2)
         
-        # Encoder blocks with increasing number of channels
-        self.down_blocks = nn.ModuleList()
-        channels = [base_channels * (2**i) for i in range(depth+1)]
+        # Second encoder block
+        self.enc2 = ConvBlock3D(base_channels, base_channels*2)
+        self.pool2 = nn.MaxPool3d(kernel_size=2, stride=2)
         
-        for i in range(depth):
-            self.down_blocks.append(
-                EnhancedDownBlock3D(channels[i], channels[i+1])
-            )
+        # Third encoder block
+        self.enc3 = ConvBlock3D(base_channels*2, base_channels*4)
+        self.pool3 = nn.MaxPool3d(kernel_size=2, stride=2)
         
-        # Enhanced bottleneck
-        self.bottleneck = EnhancedBottleneck3D(channels[-1])
+        # Fourth encoder block
+        self.enc4 = ConvBlock3D(base_channels*4, base_channels*8)
+        self.pool4 = nn.MaxPool3d(kernel_size=2, stride=2)
+        
+        # Bottleneck
+        self.bottleneck = ConvBlock3D(base_channels*8, base_channels*16)
         
         # 2D projection for key slices - will be used later with SAM2
-        self.slice_projection = nn.Conv3d(channels[-1], 256, kernel_size=1)
-        
-        # Debug print flag
-        self.print_shapes = True
+        self.slice_projection = nn.Conv3d(base_channels*16, 256, kernel_size=1)
     
     def forward(self, x):
+        # Debug print input shape
+        print(f"DEBUG - Input shape: {x.shape}")
+        
         # We need to determine the depth dimension correctly
         batch_size, channels, dim1, dim2, dim3 = x.shape
-        
-        if self.print_shapes:
-            print(f"Input shape: {x.shape}")
         
         # BraTS data typically has shape [batch, channels, depth, height, width]
         # Where depth is around 155 and height/width are around 240
@@ -193,8 +89,8 @@ class EnhancedEncoder3D(nn.Module):
         depth_idx = dims.index(min(dims))
         depth = dims[depth_idx]
         
-        if self.print_shapes:
-            print(f"Identified depth: {depth} (dimension index {depth_idx})")
+        # Print identified depth
+        print(f"DEBUG - Identified depth: {depth} (dimension index {depth_idx})")
         
         # Store key slice indices (approximately every slice_interval slices)
         key_indices = []
@@ -208,163 +104,164 @@ class EnhancedEncoder3D(nn.Module):
             key_indices.append(middle_idx)
             key_indices.sort()  # Keep indices in order
         
-        if self.print_shapes:
-            print(f"Selected {len(key_indices)} key slices at depths: {key_indices}")
-        
-        # Initial convolution
-        x = self.initial_conv(x)
+        print(f"DEBUG - Selected {len(key_indices)} key slices at depths: {key_indices}")
         
         # Encoder pathway with skip connections
-        skip_connections = [x]
+        print(f"DEBUG - Before enc1: {x.shape}")
+        x1 = self.enc1(x)
+        print(f"DEBUG - After enc1: {x1.shape}")
+        p1 = self.pool1(x1)
+        print(f"DEBUG - After pool1: {p1.shape}")
         
-        for i, block in enumerate(self.down_blocks):
-            if self.print_shapes:
-                print(f"Down block {i+1} - Input: {x.shape}")
-            
-            x, skip = block(x)
-            skip_connections.append(skip)
-            
-            if self.print_shapes:
-                print(f"  - Skip connection: {skip.shape}")
-                print(f"  - Downsampled: {x.shape}")
+        x2 = self.enc2(p1)
+        print(f"DEBUG - After enc2: {x2.shape}")
+        p2 = self.pool2(x2)
+        print(f"DEBUG - After pool2: {p2.shape}")
         
-        # Apply bottleneck
-        bottleneck = self.bottleneck(x)
+        x3 = self.enc3(p2)
+        print(f"DEBUG - After enc3: {x3.shape}")
+        p3 = self.pool3(x3)
+        print(f"DEBUG - After pool3: {p3.shape}")
         
-        if self.print_shapes:
-            print(f"Bottleneck: {bottleneck.shape}")
+        x4 = self.enc4(p3)
+        print(f"DEBUG - After enc4: {x4.shape}")
+        p4 = self.pool4(x4)
+        print(f"DEBUG - After pool4: {p4.shape}")
+        
+        bottleneck = self.bottleneck(p4)
+        print(f"DEBUG - After bottleneck: {bottleneck.shape}")
         
         # Project features for key slices (to be used with SAM2 later)
         key_features = self.slice_projection(bottleneck)
         
         # Calculate downsampled depth
-        downsampled_depth = depth // (2**self.depth)  # After all pooling layers
+        downsampled_depth = depth // 16  # After 4 pooling layers with stride 2
         
         # Calculate downsampled key indices
-        ds_key_indices = [min(idx // (2**self.depth), downsampled_depth-1) for idx in key_indices]
+        ds_key_indices = [min(idx // 16, downsampled_depth-1) for idx in key_indices]
         
         # Store dimensions at each level for the decoder
         encoder_dimensions = {
             "input_shape": x.shape,
-            "skip_shapes": [s.shape for s in skip_connections],
+            "enc1_shape": x1.shape,
+            "enc2_shape": x2.shape,
+            "enc3_shape": x3.shape,
+            "enc4_shape": x4.shape,
             "bottleneck_shape": bottleneck.shape,
             "key_indices": key_indices,
             "ds_key_indices": ds_key_indices,
             "depth_dim_idx": depth_idx  # Store which dimension is depth
         }
         
-        # Turn off debug printing after first forward pass
-        if self.print_shapes:
-            self.print_shapes = False
-        
-        return skip_connections, bottleneck, key_features, encoder_dimensions
+        return [x1, x2, x3, x4, bottleneck, key_features, encoder_dimensions]
 
-class EnhancedDecoder3D(nn.Module):
+class EfficientDecoder3D(nn.Module):
     """
-    Enhanced 3D decoder with improved feature handling.
+    Efficient 3D decoder that works with the encoded features.
     """
-    def __init__(self, base_channels=16, depth=4, out_channels=4):
-        super(EnhancedDecoder3D, self).__init__()
+    def __init__(self, base_channels=16, out_channels=4):
+        super(EfficientDecoder3D, self).__init__()
         
-        self.depth = depth
-        
-        # Channels at each level
-        channels = [base_channels * (2**i) for i in range(depth+1)]
-        
-        # Create upsampling blocks
-        self.up_blocks = nn.ModuleList()
-        
-        for i in range(depth):
-            # Upsampling from deeper level to shallower level
-            self.up_blocks.append(
-                EnhancedUpBlock3D(
-                    channels[depth-i],     # Input channels
-                    channels[depth-i-1]    # Output channels
-                )
-            )
-        
-        # Final convolution to get segmentation maps
-        self.final_conv = nn.Sequential(
-            nn.Conv3d(channels[0], out_channels, kernel_size=1),
-            nn.Dropout3d(p=0.2)  # Final dropout for regularization
+        # Upsampling block 1
+        self.up1 = nn.ConvTranspose3d(
+            base_channels*16, base_channels*8, 
+            kernel_size=2, stride=2
         )
-    
-    def forward(self, skip_connections, bottleneck):
-        x = bottleneck
+        self.dec1 = ConvBlock3D(base_channels*16, base_channels*8)
         
-        # Upsampling path with skip connections
-        for i, block in enumerate(self.up_blocks):
-            # Get corresponding skip connection
-            skip_idx = self.depth - i
-            x = block(x, skip_connections[skip_idx])
+        # Upsampling block 2
+        self.up2 = nn.ConvTranspose3d(
+            base_channels*8, base_channels*4,
+            kernel_size=2, stride=2
+        )
+        self.dec2 = ConvBlock3D(base_channels*8, base_channels*4)
+        
+        # Upsampling block 3
+        self.up3 = nn.ConvTranspose3d(
+            base_channels*4, base_channels*2,
+            kernel_size=2, stride=2
+        )
+        self.dec3 = ConvBlock3D(base_channels*4, base_channels*2)
+        
+        # Upsampling block 4
+        self.up4 = nn.ConvTranspose3d(
+            base_channels*2, base_channels,
+            kernel_size=2, stride=2
+        )
+        self.dec4 = ConvBlock3D(base_channels*2, base_channels)
+        
+        # Final layer
+        self.final = nn.Conv3d(base_channels, out_channels, kernel_size=1)
+    
+    def forward(self, features):
+        x1, x2, x3, x4, bottleneck, key_features, dimensions = features
+        
+        print(f"DEBUG - Decoder: bottleneck shape = {bottleneck.shape}, x4 shape = {x4.shape}")
+        
+        # Upsampling with skip connections
+        x = self.up1(bottleneck)
+        print(f"DEBUG - After up1: {x.shape}")
+        
+        # Handle size mismatch with interpolation if needed
+        if x.shape[2:] != x4.shape[2:]:
+            print(f"DEBUG - Size mismatch in up1. Interpolating from {x.shape} to {x4.shape[2:]}")
+            x = F.interpolate(x, size=x4.shape[2:], mode='trilinear', align_corners=False)
+            print(f"DEBUG - After interpolation: {x.shape}")
+        
+        x = torch.cat([x, x4], dim=1)
+        print(f"DEBUG - After concat in up1: {x.shape}")
+        x = self.dec1(x)
+        print(f"DEBUG - After dec1: {x.shape}")
+        
+        x = self.up2(x)
+        print(f"DEBUG - After up2: {x.shape}")
+        if x.shape[2:] != x3.shape[2:]:
+            print(f"DEBUG - Size mismatch in up2. Interpolating from {x.shape} to {x3.shape[2:]}")
+            x = F.interpolate(x, size=x3.shape[2:], mode='trilinear', align_corners=False)
+        x = torch.cat([x, x3], dim=1)
+        x = self.dec2(x)
+        
+        x = self.up3(x)
+        if x.shape[2:] != x2.shape[2:]:
+            print(f"DEBUG - Size mismatch in up3. Interpolating from {x.shape} to {x2.shape[2:]}")
+            x = F.interpolate(x, size=x2.shape[2:], mode='trilinear', align_corners=False)
+        x = torch.cat([x, x2], dim=1)
+        x = self.dec3(x)
+        
+        x = self.up4(x)
+        if x.shape[2:] != x1.shape[2:]:
+            print(f"DEBUG - Size mismatch in up4. Interpolating from {x.shape} to {x1.shape[2:]}")
+            x = F.interpolate(x, size=x1.shape[2:], mode='trilinear', align_corners=False)
+        x = torch.cat([x, x1], dim=1)
+        x = self.dec4(x)
         
         # Final convolution
-        x = self.final_conv(x)
+        x = self.final(x)
         
         return x
 
-class SliceExtractor(nn.Module):
-    """
-    Module to extract specific slices from a 3D volume,
-    accounting for different dimension orderings.
-    """
-    def __init__(self):
-        super(SliceExtractor, self).__init__()
-    
-    def forward(self, x, indices, depth_dim=2):
-        """
-        Extract slices from a specific dimension of a 3D tensor.
-        """
-        batch_size = x.shape[0]
-        slices = {}
-        
-        for b in range(batch_size):
-            slices[b] = {}
-            for idx in indices:
-                # Extract along the correct dimension
-                if depth_dim == 0:  # Extract from dim1
-                    slice_2d = x[b, :, idx, :, :]
-                elif depth_dim == 1:  # Extract from dim2
-                    slice_2d = x[b, :, :, idx, :]
-                else:  # Extract from dim3
-                    slice_2d = x[b, :, :, :, idx]
-                
-                slices[b][idx] = slice_2d
-        
-        return slices
-
 class AutoSAM2(nn.Module):
     """
-    Enhanced AutoSAM2 model with improved architecture.
+    Hybrid 3D-2D AutoSAM2 model with correct dimension handling.
     """
-    def __init__(self, num_classes=4, base_channels=16, depth=4, slice_interval=10):
+    def __init__(self, num_classes=4, slice_interval=10):
         super(AutoSAM2, self).__init__()
         
         # Store configuration
         self.num_classes = num_classes
         self.slice_interval = slice_interval
         
-        # Create enhanced encoder
-        self.encoder = EnhancedEncoder3D(
+        # Create efficient encoder and decoder
+        self.encoder = EfficientEncoder3D(
             in_channels=4,
-            base_channels=base_channels,
-            depth=depth,
+            base_channels=16,
             slice_interval=slice_interval
         )
         
-        # Create dummy decoder variable to maintain compatibility with train.py
-        # The actual decoder is created below
-        self.decoder = None
-        
-        # Create enhanced decoder
-        self._decoder = EnhancedDecoder3D(
-            base_channels=base_channels,
-            depth=depth,
+        self.decoder = EfficientDecoder3D(
+            base_channels=16,
             out_channels=num_classes
         )
-        
-        # Slice extractor
-        self.slice_extractor = SliceExtractor()
         
         # Initialize SAM2
         if HAS_SAM2:
@@ -397,26 +294,27 @@ class AutoSAM2(nn.Module):
     
     def forward(self, x):
         """
-        Forward pass of the enhanced model.
+        Forward pass of the hybrid model with dimension correction.
         """
-        # Get features from encoder
-        skip_connections, bottleneck, key_features, dimensions = self.encoder(x)
+        # Get features from encoder with dimension info
+        features = self.encoder(x)
         
         # Process through decoder for basic segmentation
-        segmentation = self._decoder(skip_connections, bottleneck)
+        segmentation = self.decoder(features)
         
-        # Extract key info
+        # Extract dimensions and key info
+        _, _, _, _, _, key_features, dimensions = features
         key_indices = dimensions["key_indices"]
         depth_dim_idx = dimensions["depth_dim_idx"]
         
         # When training with SAM2 enabled (future implementation)
         if self.has_sam2 and self.training:
             # Just for demonstration in current phase
-            print(f"In future implementation: would process {len(key_indices)} key slices with SAM2")
+            print(f"DEBUG - Future implementation: would process {len(key_indices)} key slices with SAM2")
             
             # Extract sample slice for visualization
             input_shape = dimensions["input_shape"]
-            middle_idx = dimensions["key_indices"][len(key_indices)//2]  # Get middle key index
+            middle_idx = input_shape[2 + depth_dim_idx] // 2  # Account for batch and channel dims
             
             # Extract slices using correct dimension
             if depth_dim_idx == 0:
@@ -425,6 +323,8 @@ class AutoSAM2(nn.Module):
                 sample_slice = x[0, 0, :, middle_idx, :]
             else:
                 sample_slice = x[0, 0, :, :, middle_idx]
+                
+            print(f"DEBUG - Shape of middle slice: {sample_slice.shape}")
         
         # Apply sigmoid to get probabilities
         output = torch.sigmoid(segmentation)
