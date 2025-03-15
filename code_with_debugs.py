@@ -558,121 +558,141 @@ torch.serialization.add_safe_globals([np.core.multiarray.scalar])
 
 def calculate_dice_score(y_pred, y_true):
     """
-    Efficient Dice score calculation with minimal printing
+    Enhanced Dice score calculation for BraTS data with correct class mapping.
+    
+    BraTS label convention:
+    - 0: Background
+    - 1: Necrotic Tumor Core (NCR)
+    - 2: Peritumoral Edema (ED)
+    - 4: Enhancing Tumor (ET) (represented at index 3 in tensors)
+    
+    Regions:
+    - ET: Enhancing Tumor (class 4)
+    - WT: Whole Tumor (classes 1+2+4)
+    - TC: Tumor Core (classes 1+4)
+    
+    Args:
+        y_pred (Tensor): Model predictions of shape [B, C, D, H, W]
+        y_true (Tensor): Ground truth masks of shape [B, C, D, H, W]
+        
+    Returns:
+        dict: Dictionary with Dice metrics
     """
-    # For raw logits, apply softmax first
+    # For raw logits, apply sigmoid first
     if not torch.is_tensor(y_pred):
         y_pred = torch.tensor(y_pred)
     
     # Check if input contains logits or probabilities
     if torch.min(y_pred) < 0 or torch.max(y_pred) > 1:
-        probs = F.softmax(y_pred, dim=1)
+        probs = torch.sigmoid(y_pred)
     else:
         probs = y_pred
     
     # Apply threshold to get binary predictions
     preds = (probs > 0.5).float()
     
-    # Calculate Dice for each class except background (class 0)
-    dice_scores = []
+    # Initialize results dictionary
+    result = {}
     
-    # Iterate over all non-background classes
-    for c in range(1, y_pred.size(1)):
-        # Flatten tensors
-        pred_c = preds[:, c].reshape(preds.size(0), -1)
-        true_c = y_true[:, c].reshape(y_true.size(0), -1)
+    # Store all per-sample Dice scores for statistics
+    all_dice_scores = {
+        'class_1': [],  # NCR
+        'class_2': [],  # ED
+        'class_4': [],  # ET (at index 3)
+        'ET': [],       # Enhancing Tumor (class 4, at index 3)
+        'WT': [],       # Whole Tumor (classes 1+2+4)
+        'TC': []        # Tumor Core (classes 1+4)
+    }
+    
+    batch_size = y_pred.size(0)
+    
+    # Calculate per-sample Dice scores for each class and region
+    for b in range(batch_size):
+        # Calculate per-class Dice (assuming 4 channels: 0=background, 1=NCR, 2=ED, 3=ET)
+        # Class 1 (NCR) - at index 1
+        pred_ncr = preds[b, 1].reshape(-1)
+        true_ncr = y_true[b, 1].reshape(-1)
+        if true_ncr.sum() > 0 or pred_ncr.sum() > 0:
+            intersection_ncr = (pred_ncr * true_ncr).sum()
+            dice_ncr = (2.0 * intersection_ncr / (pred_ncr.sum() + true_ncr.sum() + 1e-5)).item() * 100
+            all_dice_scores['class_1'].append(dice_ncr)
+            
+        # Class 2 (ED) - at index 2
+        pred_ed = preds[b, 2].reshape(-1)
+        true_ed = y_true[b, 2].reshape(-1)
+        if true_ed.sum() > 0 or pred_ed.sum() > 0:
+            intersection_ed = (pred_ed * true_ed).sum()
+            dice_ed = (2.0 * intersection_ed / (pred_ed.sum() + true_ed.sum() + 1e-5)).item() * 100
+            all_dice_scores['class_2'].append(dice_ed)
+            
+        # Class 4 (ET) - at index 3
+        pred_et = preds[b, 3].reshape(-1)
+        true_et = y_true[b, 3].reshape(-1)
+        if true_et.sum() > 0 or pred_et.sum() > 0:
+            intersection_et = (pred_et * true_et).sum()
+            dice_et = (2.0 * intersection_et / (pred_et.sum() + true_et.sum() + 1e-5)).item() * 100
+            all_dice_scores['class_4'].append(dice_et)
+            all_dice_scores['ET'].append(dice_et)  # ET is the same as class 4
         
-        # Calculate intersection and union
-        intersection = (pred_c * true_c).sum(1)
-        pred_sum = pred_c.sum(1)
-        true_sum = true_c.sum(1)
+        # Calculate WT (Whole Tumor) - Classes 1+2+4 (indices 1,2,3)
+        pred_wt = (preds[b, 1:4].sum(dim=0) > 0).float().reshape(-1)
+        true_wt = (y_true[b, 1:4].sum(dim=0) > 0).float().reshape(-1)
+        if true_wt.sum() > 0 or pred_wt.sum() > 0:
+            intersection_wt = (pred_wt * true_wt).sum()
+            dice_wt = (2.0 * intersection_wt / (pred_wt.sum() + true_wt.sum() + 1e-5)).item() * 100
+            all_dice_scores['WT'].append(dice_wt)
         
-        # Skip if no ground truth or prediction
-        valid_samples = ((pred_sum > 0) | (true_sum > 0))
-        
-        if valid_samples.sum() > 0:
-            # Calculate Dice: (2 * intersection) / (pred_sum + true_sum)
-            dice_c = (2.0 * intersection[valid_samples] / (pred_sum[valid_samples] + true_sum[valid_samples] + 1e-5)).mean().item()
-            dice_scores.append(dice_c)
+        # Calculate TC (Tumor Core) - Classes 1+4 (indices 1,3)
+        # Create TC masks by combining NCR and ET
+        pred_tc = ((preds[b, 1] + preds[b, 3]) > 0).float().reshape(-1)
+        true_tc = ((y_true[b, 1] + y_true[b, 3]) > 0).float().reshape(-1)
+        if true_tc.sum() > 0 or pred_tc.sum() > 0:
+            intersection_tc = (pred_tc * true_tc).sum()
+            dice_tc = (2.0 * intersection_tc / (pred_tc.sum() + true_tc.sum() + 1e-5)).item() * 100
+            all_dice_scores['TC'].append(dice_tc)
+    
+    # Calculate statistics for each class and region
+    for key, scores in all_dice_scores.items():
+        if scores:  # Only calculate if we have scores
+            scores_tensor = torch.tensor(scores)
+            result[f'{key}_mean'] = scores_tensor.mean().item()
+            result[f'{key}_std'] = scores_tensor.std().item()
+            result[f'{key}_median'] = torch.median(scores_tensor).item()
+            
+            # Calculate IQR (75th percentile - 25th percentile)
+            q1, q3 = torch.tensor(scores_tensor.tolist()).quantile(torch.tensor([0.25, 0.75])).tolist()
+            result[f'{key}_iqr'] = q3 - q1
         else:
-            # No valid samples, add 0
-            dice_scores.append(0.0)
+            # Set default values if no scores available
+            result[f'{key}_mean'] = 0.0
+            result[f'{key}_std'] = 0.0
+            result[f'{key}_median'] = 0.0
+            result[f'{key}_iqr'] = 0.0
     
-    # If no valid classes, return 0
-    if len(dice_scores) == 0:
-        return {'mean': 0.0}
-    
-    # Return average
-    mean_dice = sum(dice_scores) / len(dice_scores)
-    
-    result = {'mean': mean_dice}
-    
-    # Add per-class metrics
-    for i, score in enumerate(dice_scores, 1):
-        result[f'class_{i}'] = score
+    # Calculate overall mean Dice across all regions
+    region_means = [result.get(f'{region}_mean', 0.0) for region in ['ET', 'WT', 'TC']]
+    result['mean'] = sum(region_means) / len(region_means) if region_means else 0.0
     
     return result
 
-# Simple dice loss for multiclass segmentation with improved numeric stability
-class DiceLoss(nn.Module):
-    def __init__(self, smooth=1.0, ignore_background=True):
-        super(DiceLoss, self).__init__()
-        self.smooth = smooth
-        self.ignore_background = ignore_background
-        
-    def forward(self, y_pred, y_true):
-        # Get dimensions
-        batch_size, num_classes = y_pred.size(0), y_pred.size(1)
-        
-        # Check if input is probabilities or logits
-        if torch.min(y_pred) < 0 or torch.max(y_pred) > 1:
-            y_pred = F.softmax(y_pred, dim=1)
-        
-        # Calculate Dice for each class
-        dice_per_class = []
-        
-        # Start from class 1 if ignoring background
-        start_class = 1 if self.ignore_background else 0
-        
-        for c in range(start_class, num_classes):
-            # Get predictions and targets for this class
-            pred_c = y_pred[:, c]
-            true_c = y_true[:, c]
-            
-            # Flatten
-            pred_c = pred_c.contiguous().view(-1)
-            true_c = true_c.contiguous().view(-1)
-            
-            # Calculate intersection and union
-            intersection = (pred_c * true_c).sum()
-            pred_sum = pred_c.sum()
-            true_sum = true_c.sum()
-            
-            # Only calculate loss for non-empty masks to avoid division by zero
-            if true_sum > 0 or pred_sum > 0:
-                # Calculate Dice
-                dice = (2.0 * intersection + self.smooth) / (pred_sum + true_sum + self.smooth)
-                dice_per_class.append(1.0 - dice)
-        
-        # Return mean Dice loss
-        if len(dice_per_class) == 0:
-            # Return zero tensor if no valid classes
-            return torch.tensor(0.0, requires_grad=True, device=y_pred.device)
-        else:
-            return torch.stack(dice_per_class).mean()
-        
 def calculate_iou(y_pred, y_true, threshold=0.5, eps=1e-6):
     """
-    Calculate Intersection over Union (IoU) for each class.
-
+    Calculate IoU for BraTS tumor regions with correct class mapping.
+    
+    BraTS label convention:
+    - 0: Background
+    - 1: Necrotic Tumor Core (NCR)
+    - 2: Peritumoral Edema (ED)
+    - 4: Enhancing Tumor (ET) (represented at index 3 in tensors)
+    
     Args:
-        y_pred (Tensor): Model predictions (logits or probabilities) of shape [B, C, D, H, W]
+        y_pred (Tensor): Model predictions of shape [B, C, D, H, W]
         y_true (Tensor): Ground truth masks of shape [B, C, D, H, W]
         threshold (float): Threshold for binarization of predictions.
         eps (float): Small value to avoid division by zero.
 
     Returns:
-        dict: Mean IoU and per-class IoU.
+        dict: IoU metrics for individual classes and tumor regions.
     """
     if y_pred.shape != y_true.shape:
         raise ValueError("Shape mismatch: y_pred and y_true must have the same shape.")
@@ -680,45 +700,208 @@ def calculate_iou(y_pred, y_true, threshold=0.5, eps=1e-6):
     # Apply threshold to convert probability predictions into binary masks
     y_pred_bin = (torch.sigmoid(y_pred) > threshold).float()
 
-    iou_scores = []
+    batch_size = y_pred.shape[0]
+    result = {}
     
-    # Loop over each class (excluding background)
-    for c in range(1, y_pred.shape[1]):
-        pred_c = y_pred_bin[:, c]
-        true_c = y_true[:, c]
-
-        intersection = (pred_c * true_c).sum(dim=(1, 2, 3))
-        union = (pred_c + true_c).clamp(0, 1).sum(dim=(1, 2, 3))
-
-        iou_c = (intersection + eps) / (union + eps)  # Compute IoU per sample
-        iou_scores.append(iou_c.mean().item())  # Get mean IoU for this class
-
-    # Compute mean IoU across all classes
-    mean_iou = sum(iou_scores) / len(iou_scores) if iou_scores else 0.0
-
-    result = {'mean_iou': mean_iou}
-    for i, iou in enumerate(iou_scores, 1):
-        result[f'class_{i}_iou'] = iou
-
+    # For storing per-sample IoU values
+    all_iou_values = {
+        'class_1': [],  # NCR
+        'class_2': [],  # ED
+        'class_4': [],  # ET (at index 3)
+        'ET': [],       # Enhancing Tumor (class 4)
+        'WT': [],       # Whole Tumor (classes 1+2+4)
+        'TC': []        # Tumor Core (classes 1+4)
+    }
+    
+    for b in range(batch_size):
+        # Class 1 (NCR) - at index 1
+        pred_ncr = y_pred_bin[b, 1].reshape(-1)
+        true_ncr = y_true[b, 1].reshape(-1)
+        intersection_ncr = (pred_ncr * true_ncr).sum()
+        union_ncr = (pred_ncr + true_ncr).clamp(0, 1).sum()
+        if union_ncr > eps:
+            iou_ncr = (intersection_ncr / union_ncr).item() * 100
+            all_iou_values['class_1'].append(iou_ncr)
+        
+        # Class 2 (ED) - at index 2
+        pred_ed = y_pred_bin[b, 2].reshape(-1)
+        true_ed = y_true[b, 2].reshape(-1)
+        intersection_ed = (pred_ed * true_ed).sum()
+        union_ed = (pred_ed + true_ed).clamp(0, 1).sum()
+        if union_ed > eps:
+            iou_ed = (intersection_ed / union_ed).item() * 100
+            all_iou_values['class_2'].append(iou_ed)
+        
+        # Class 4 (ET) - at index 3
+        pred_et = y_pred_bin[b, 3].reshape(-1)
+        true_et = y_true[b, 3].reshape(-1)
+        intersection_et = (pred_et * true_et).sum()
+        union_et = (pred_et + true_et).clamp(0, 1).sum()
+        if union_et > eps:
+            iou_et = (intersection_et / union_et).item() * 100
+            all_iou_values['class_4'].append(iou_et)
+            all_iou_values['ET'].append(iou_et)  # ET is the same as class 4
+        
+        # Calculate WT (Whole Tumor) - Classes 1+2+4 (indices 1,2,3)
+        pred_wt = (y_pred_bin[b, 1:4].sum(dim=0) > 0).float().reshape(-1)
+        true_wt = (y_true[b, 1:4].sum(dim=0) > 0).float().reshape(-1)
+        intersection_wt = (pred_wt * true_wt).sum()
+        union_wt = (pred_wt + true_wt).clamp(0, 1).sum()
+        if union_wt > eps:
+            iou_wt = (intersection_wt / union_wt).item() * 100
+            all_iou_values['WT'].append(iou_wt)
+        
+        # Calculate TC (Tumor Core) - Classes 1+4 (indices 1,3)
+        pred_tc = ((y_pred_bin[b, 1] + y_pred_bin[b, 3]) > 0).float().reshape(-1)
+        true_tc = ((y_true[b, 1] + y_true[b, 3]) > 0).float().reshape(-1)
+        intersection_tc = (pred_tc * true_tc).sum()
+        union_tc = (pred_tc + true_tc).clamp(0, 1).sum()
+        if union_tc > eps:
+            iou_tc = (intersection_tc / union_tc).item() * 100
+            all_iou_values['TC'].append(iou_tc)
+    
+    # Calculate statistics for each category
+    for key, values in all_iou_values.items():
+        if values:  # Only calculate if we have values
+            values_tensor = torch.tensor(values)
+            result[f'{key}_mean'] = values_tensor.mean().item()
+            result[f'{key}_std'] = values_tensor.std().item()
+            result[f'{key}_median'] = torch.median(values_tensor).item()
+            
+            # Calculate IQR
+            q1, q3 = torch.tensor(values_tensor.tolist()).quantile(torch.tensor([0.25, 0.75])).tolist()
+            result[f'{key}_iqr'] = q3 - q1
+        else:
+            # Set default values if no scores available
+            result[f'{key}_mean'] = 0.0
+            result[f'{key}_std'] = 0.0
+            result[f'{key}_median'] = 0.0
+            result[f'{key}_iqr'] = 0.0
+    
+    # Calculate mean IoU across regions
+    region_means = [result.get(f'{region}_mean', 0.0) for region in ['ET', 'WT', 'TC']]
+    result['mean_iou'] = sum(region_means) / len(region_means) if region_means else 0.0
+    
     return result
 
-# Combined loss for better convergence
+# Simple dice loss for multiclass segmentation with improved numeric stability
+class BraTSDiceLoss(nn.Module):
+    def __init__(self, smooth=1.0, region_weights={'ET': 1.0, 'WT': 1.0, 'TC': 1.0}):
+        super(BraTSDiceLoss, self).__init__()
+        self.smooth = smooth
+        self.region_weights = region_weights
+        
+    def forward(self, y_pred, y_true):
+        # Get sigmoid activation for binary predictions
+        if torch.min(y_pred) < 0 or torch.max(y_pred) > 1:
+            probs = torch.sigmoid(y_pred)
+        else:
+            probs = y_pred
+        
+        batch_size = y_pred.size(0)
+        device = y_pred.device
+        
+        # Initialize per-region losses
+        et_loss = torch.tensor(0.0, device=device, requires_grad=True)
+        wt_loss = torch.tensor(0.0, device=device, requires_grad=True)
+        tc_loss = torch.tensor(0.0, device=device, requires_grad=True)
+        
+        # Count valid samples for each region
+        et_count = 0
+        wt_count = 0
+        tc_count = 0
+        
+        for b in range(batch_size):
+            # ET (Enhancing Tumor) - Class 4 at index 3
+            pred_et = probs[b, 3].reshape(-1)
+            true_et = y_true[b, 3].reshape(-1)
+            
+            # Only calculate if there's something to predict
+            if true_et.sum() > 0 or pred_et.sum() > 0:
+                intersection_et = (pred_et * true_et).sum()
+                dice_et = (2. * intersection_et + self.smooth) / (pred_et.sum() + true_et.sum() + self.smooth)
+                et_loss = et_loss + (1. - dice_et)
+                et_count += 1
+            
+            # WT (Whole Tumor) - Classes 1+2+4 (indices 1,2,3)
+            # Combine predictions across class channels
+            pred_wt = (probs[b, 1:4].sum(dim=0) > 0.5).float().reshape(-1)
+            true_wt = (y_true[b, 1:4].sum(dim=0) > 0.5).float().reshape(-1)
+            
+            if true_wt.sum() > 0 or pred_wt.sum() > 0:
+                intersection_wt = (pred_wt * true_wt).sum()
+                dice_wt = (2. * intersection_wt + self.smooth) / (pred_wt.sum() + true_wt.sum() + self.smooth)
+                wt_loss = wt_loss + (1. - dice_wt)
+                wt_count += 1
+            
+            # TC (Tumor Core) - Classes 1+4 (indices 1,3)
+            # Combine predictions for relevant classes
+            pred_tc = ((probs[b, 1] + probs[b, 3]) > 0.5).float().reshape(-1)
+            true_tc = ((y_true[b, 1] + y_true[b, 3]) > 0.5).float().reshape(-1)
+            
+            if true_tc.sum() > 0 or pred_tc.sum() > 0:
+                intersection_tc = (pred_tc * true_tc).sum()
+                dice_tc = (2. * intersection_tc + self.smooth) / (pred_tc.sum() + true_tc.sum() + self.smooth)
+                tc_loss = tc_loss + (1. - dice_tc)
+                tc_count += 1
+        
+        # Calculate average loss per region
+        if et_count > 0:
+            et_loss = et_loss / et_count
+        if wt_count > 0:
+            wt_loss = wt_loss / wt_count
+        if tc_count > 0:
+            tc_loss = tc_loss / tc_count
+        
+        # Apply region weights
+        weighted_loss = (
+            self.region_weights.get('ET', 1.0) * et_loss +
+            self.region_weights.get('WT', 1.0) * wt_loss +
+            self.region_weights.get('TC', 1.0) * tc_loss
+        )
+        
+        # Calculate mean across regions that have samples
+        valid_regions = (et_count > 0) + (wt_count > 0) + (tc_count > 0)
+        if valid_regions > 0:
+            return weighted_loss / valid_regions
+        else:
+            # No valid regions found
+            return torch.tensor(0.0, requires_grad=True, device=device)
+
 class CombinedLoss(nn.Module):
-    def __init__(self, dice_weight=0.6, bce_weight=0.2, focal_weight=0.2):
+    def __init__(self, dice_weight=0.7, bce_weight=0.2, focal_weight=0.1, 
+                 region_weights={'ET': 1.2, 'WT': 1.0, 'TC': 1.0}):
         super().__init__()
         self.dice_weight = dice_weight
         self.bce_weight = bce_weight
         self.focal_weight = focal_weight
-        self.dice_loss = DiceLoss()
-        self.bce_loss = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([5.0]).cuda())  # Higher weight for tumors
-        self.focal_loss = nn.CrossEntropyLoss()
+        self.brats_dice_loss = BraTSDiceLoss(region_weights=region_weights)
+        
+        # Set class weights for BCE - higher weight for tumor classes
+        # For BraTS with channels 0,1,2,3 representing classes 0,1,2,4
+        pos_weight = torch.ones(4)
+        pos_weight[1:] = 5.0  # Higher weight for tumor classes (1,2,4)
+        self.bce_loss = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+        
+        # Focal loss for handling class imbalance
+        self.focal_loss = nn.CrossEntropyLoss(weight=torch.tensor([0.1, 1.0, 1.0, 1.2]))
 
     def forward(self, y_pred, y_true):
+        # Dice loss calculation
+        dice = self.brats_dice_loss(y_pred, y_true)
+        
+        # BCE loss calculation
         bce = self.bce_loss(y_pred, y_true)
-        dice = self.dice_loss(y_pred, y_true)
-        focal = self.focal_loss(y_pred, y_true.argmax(dim=1))
-
+        
+        # Focal loss calculation - convert multi-class mask to class indices
+        # First create target with shape [B, H, W, D] with class indices
+        target = y_true.argmax(dim=1)
+        focal = self.focal_loss(y_pred, target)
+        
+        # Return weighted sum of losses
         return self.dice_weight * dice + self.bce_weight * bce + self.focal_weight * focal
+        
+
 
 def preprocess_batch(batch, device=None):
     """
@@ -786,7 +969,7 @@ def train_epoch(model, train_loader, optimizer, criterion, device, epoch, schedu
             
             # Compute BCE Loss and Dice Loss
             bce_loss = nn.BCEWithLogitsLoss()(outputs, masks)
-            dice_loss = DiceLoss()(outputs, masks)
+            dice_loss = BraTSDiceLoss()(outputs, masks)
 
             # Compute combined loss
             loss = 0.7 * dice_loss + 0.3 * bce_loss
@@ -885,7 +1068,7 @@ def validate(model, val_loader, criterion, device, epoch):
                 
                 # Compute BCE Loss and Dice Loss
                 bce_loss = nn.BCEWithLogitsLoss()(outputs, masks)
-                dice_loss = DiceLoss()(outputs, masks)
+                dice_loss = BraTSDiceLoss()(outputs, masks)
 
                 # Compute combined loss
                 loss = 0.7 * dice_loss + 0.3 * bce_loss
