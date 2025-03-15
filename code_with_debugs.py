@@ -396,20 +396,42 @@ class AutoSAM2(nn.Module):
                    f"slice interval {slice_interval}, SAM2 enabled: {self.has_sam2 if hasattr(self, 'has_sam2') else False}")
         
     def initialize_sam2(self, model_name):
-        """Initialize SAM2 with error handling"""
+        """Initialize SAM2 with improved error handling"""
         if HAS_SAM2 and self.enable_sam2:
             try:
                 logger.info(f"Initializing SAM2 with model: {model_name}")
-                self.sam2 = SAM2ImagePredictor.from_pretrained(model_name)
                 
+                # Try different model names if the specified one fails
+                model_names_to_try = [
+                    model_name,
+                    "SAM2", 
+                    "sam2",
+                    "sam2-image-predictor",
+                    "facebook/sam2-base",
+                    "facebook/sam2-small"
+                ]
+                
+                for name in model_names_to_try:
+                    try:
+                        logger.info(f"Trying to initialize SAM2 with model name: {name}")
+                        self.sam2 = SAM2ImagePredictor.from_pretrained(name)
+                        logger.info(f"Successfully initialized SAM2 with model: {name}")
+                        break
+                    except Exception as e:
+                        logger.warning(f"Failed to initialize with model name {name}: {e}")
+                
+                # Check if any model was successfully loaded
+                if not hasattr(self, 'sam2') or self.sam2 is None:
+                    raise ValueError("Failed to initialize SAM2 with any of the attempted model names")
+                    
                 # Freeze SAM2 weights
                 for param in self.sam2.model.parameters():
                     param.requires_grad = False
                 
                 self.has_sam2 = True
-                logger.info("SAM2 initialized successfully")
+                logger.info("SAM2 initialization complete")
             except Exception as e:
-                logger.error(f"Error initializing SAM2: {e}")
+                logger.error(f"Error initializing SAM2: {str(e)}")
                 self.has_sam2 = False
                 self.sam2 = None
         else:
