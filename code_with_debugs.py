@@ -76,8 +76,7 @@ class EfficientEncoder3D(nn.Module):
         self.slice_projection = nn.Conv3d(base_channels*16, 256, kernel_size=1)
     
     def forward(self, x):
-        # Debug print input shape
-        print(f"DEBUG - Input shape: {x.shape}")
+
         
         # We need to determine the depth dimension correctly
         batch_size, channels, dim1, dim2, dim3 = x.shape
@@ -88,9 +87,6 @@ class EfficientEncoder3D(nn.Module):
         dims = [dim1, dim2, dim3]
         depth_idx = dims.index(min(dims))
         depth = dims[depth_idx]
-        
-        # Print identified depth
-        print(f"DEBUG - Identified depth: {depth} (dimension index {depth_idx})")
         
         # Store key slice indices (approximately every slice_interval slices)
         key_indices = []
@@ -103,33 +99,21 @@ class EfficientEncoder3D(nn.Module):
         if middle_idx not in key_indices:
             key_indices.append(middle_idx)
             key_indices.sort()  # Keep indices in order
-        
-        print(f"DEBUG - Selected {len(key_indices)} key slices at depths: {key_indices}")
-        
+                
         # Encoder pathway with skip connections
-        print(f"DEBUG - Before enc1: {x.shape}")
         x1 = self.enc1(x)
-        print(f"DEBUG - After enc1: {x1.shape}")
         p1 = self.pool1(x1)
-        print(f"DEBUG - After pool1: {p1.shape}")
         
         x2 = self.enc2(p1)
-        print(f"DEBUG - After enc2: {x2.shape}")
         p2 = self.pool2(x2)
-        print(f"DEBUG - After pool2: {p2.shape}")
         
         x3 = self.enc3(p2)
-        print(f"DEBUG - After enc3: {x3.shape}")
         p3 = self.pool3(x3)
-        print(f"DEBUG - After pool3: {p3.shape}")
         
         x4 = self.enc4(p3)
-        print(f"DEBUG - After enc4: {x4.shape}")
         p4 = self.pool4(x4)
-        print(f"DEBUG - After pool4: {p4.shape}")
         
         bottleneck = self.bottleneck(p4)
-        print(f"DEBUG - After bottleneck: {bottleneck.shape}")
         
         # Project features for key slices (to be used with SAM2 later)
         key_features = self.slice_projection(bottleneck)
@@ -196,41 +180,31 @@ class EfficientDecoder3D(nn.Module):
     def forward(self, features):
         x1, x2, x3, x4, bottleneck, key_features, dimensions = features
         
-        print(f"DEBUG - Decoder: bottleneck shape = {bottleneck.shape}, x4 shape = {x4.shape}")
         
         # Upsampling with skip connections
         x = self.up1(bottleneck)
-        print(f"DEBUG - After up1: {x.shape}")
         
         # Handle size mismatch with interpolation if needed
         if x.shape[2:] != x4.shape[2:]:
-            print(f"DEBUG - Size mismatch in up1. Interpolating from {x.shape} to {x4.shape[2:]}")
             x = F.interpolate(x, size=x4.shape[2:], mode='trilinear', align_corners=False)
-            print(f"DEBUG - After interpolation: {x.shape}")
         
         x = torch.cat([x, x4], dim=1)
-        print(f"DEBUG - After concat in up1: {x.shape}")
         x = self.dec1(x)
-        print(f"DEBUG - After dec1: {x.shape}")
         
         x = self.up2(x)
-        print(f"DEBUG - After up2: {x.shape}")
         if x.shape[2:] != x3.shape[2:]:
-            print(f"DEBUG - Size mismatch in up2. Interpolating from {x.shape} to {x3.shape[2:]}")
             x = F.interpolate(x, size=x3.shape[2:], mode='trilinear', align_corners=False)
         x = torch.cat([x, x3], dim=1)
         x = self.dec2(x)
         
         x = self.up3(x)
         if x.shape[2:] != x2.shape[2:]:
-            print(f"DEBUG - Size mismatch in up3. Interpolating from {x.shape} to {x2.shape[2:]}")
             x = F.interpolate(x, size=x2.shape[2:], mode='trilinear', align_corners=False)
         x = torch.cat([x, x2], dim=1)
         x = self.dec3(x)
         
         x = self.up4(x)
         if x.shape[2:] != x1.shape[2:]:
-            print(f"DEBUG - Size mismatch in up4. Interpolating from {x.shape} to {x1.shape[2:]}")
             x = F.interpolate(x, size=x1.shape[2:], mode='trilinear', align_corners=False)
         x = torch.cat([x, x1], dim=1)
         x = self.dec4(x)
@@ -310,7 +284,6 @@ class AutoSAM2(nn.Module):
         # When training with SAM2 enabled (future implementation)
         if self.has_sam2 and self.training:
             # Just for demonstration in current phase
-            print(f"DEBUG - Future implementation: would process {len(key_indices)} key slices with SAM2")
             
             # Extract sample slice for visualization
             input_shape = dimensions["input_shape"]
@@ -323,9 +296,7 @@ class AutoSAM2(nn.Module):
                 sample_slice = x[0, 0, :, middle_idx, :]
             else:
                 sample_slice = x[0, 0, :, :, middle_idx]
-                
-            print(f"DEBUG - Shape of middle slice: {sample_slice.shape}")
-        
+                        
         # Apply sigmoid to get probabilities
         output = torch.sigmoid(segmentation)
         
