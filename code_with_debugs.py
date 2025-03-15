@@ -239,7 +239,6 @@ def get_brats_dataloader(root_dir, batch_size=1, train=True, normalize=True, max
     """Create a DataLoader for BraTS dataset with a proper train/validation split"""
     
     # Step 1: Load ALL available data from the training directory
-    # We ensure no filtering/limiting happens at this stage
     full_dataset = BraTSDataset(
         root_dir=root_dir, 
         train=True,  # Always load from training directory
@@ -251,25 +250,20 @@ def get_brats_dataloader(root_dir, batch_size=1, train=True, normalize=True, max
         verbose=False  # Turn off verbose in dataset to avoid double messages
     )
     
-    # Force class variable reset for clean split
-    if hasattr(full_dataset, 'max_samples'):
-        full_dataset.max_samples = None
-    
     # Step 2: Determine the total number of samples
     total_samples = len(full_dataset)
     if verbose:
         print(f"Full dataset contains {total_samples} samples")
     
-    # Step 3: Create fixed indices for reproducible splits
+    # Step 3: Create fixed indices for reproducible but random splits
     import random
     random.seed(42)
     
     # Get shuffled indices for the entire dataset
     all_indices = list(range(total_samples))
-    random.shuffle(all_indices)
+    random.shuffle(all_indices)  # This ensures random selection
     
     # Step 4: Calculate the split sizes (80% train, 20% validation)
-    # Use all data unless max_samples is specified
     if max_samples is not None and max_samples < total_samples:
         effective_total = max_samples
     else:
@@ -279,15 +273,14 @@ def get_brats_dataloader(root_dir, batch_size=1, train=True, normalize=True, max
     train_size = int(0.8 * effective_total)
     val_size = min(effective_total - train_size, total_samples - train_size)
     
-    # Step 5: Create the actual indices for train and validation
+    # Step 5: Create the actual indices for train and validation (randomly)
     train_indices = all_indices[:train_size]
     val_indices = all_indices[train_size:train_size + val_size]
     
-    # Step 6: Create the appropriate subset based on 'train' parameter
+    # Step 6: Create the appropriate subset
     from torch.utils.data import Subset
     if train:
         dataset = Subset(full_dataset, train_indices)
-        # Apply augmentation if requested
         if use_augmentation:
             full_dataset.use_augmentation = True
         if verbose:
@@ -310,7 +303,7 @@ def get_brats_dataloader(root_dir, batch_size=1, train=True, normalize=True, max
     if verbose:
         print(f"Created {'training' if train else 'validation'} dataloader with {len(loader)} batches")
     
-    return loader   
+    return loader
 
 
 #model.py
