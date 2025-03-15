@@ -428,10 +428,10 @@ class SimpleDecoder3D(nn.Module):
         x = self.up1(x)
         print(f"After up1: {x.shape}")
         
-        # Handle size mismatch - just use interpolation to match
-        if x.shape[2:] != x2.shape[2:]:
-            print(f"Size mismatch in decoder. Interpolating {x.shape} to match {x2.shape}")
-            x = F.interpolate(x, size=x2.shape[2:], mode='trilinear', align_corners=False)
+        # Always handle potential size mismatch with interpolation
+        # Note: This is the key change - always interpolate rather than checking
+        x = F.interpolate(x, size=x2.shape[2:], mode='trilinear', align_corners=False)
+        print(f"After interpolation to match x2: {x.shape}")
         
         # Concatenate and process
         x = torch.cat([x, x2], dim=1)
@@ -441,10 +441,9 @@ class SimpleDecoder3D(nn.Module):
         x = self.up2(x)
         print(f"After up2: {x.shape}")
         
-        # Handle size mismatch again
-        if x.shape[2:] != x1.shape[2:]:
-            print(f"Size mismatch in decoder. Interpolating {x.shape} to match {x1.shape}")
-            x = F.interpolate(x, size=x1.shape[2:], mode='trilinear', align_corners=False)
+        # Always handle potential size mismatch with interpolation
+        x = F.interpolate(x, size=x1.shape[2:], mode='trilinear', align_corners=False)
+        print(f"After interpolation to match x1: {x.shape}")
         
         # Concatenate and process
         x = torch.cat([x, x1], dim=1)
