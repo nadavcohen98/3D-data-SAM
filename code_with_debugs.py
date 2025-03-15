@@ -234,21 +234,6 @@ class AutoSAM2(nn.Module):
         # Get segmentation from decoder
         segmentation = self.decoder(features)
         
-        # Print shape information for debugging
-        if self.training:
-            print(f"Processing volume with shape: {x.shape}")
-            print(f"Output segmentation shape: {segmentation.shape}")
-        
-        # Select middle slice for demonstration with SAM2
-        if self.has_sam2 and self.training:
-            # Calculate middle slice
-            middle_slice = depth // 2
-            print(f"In full model, would process slice {middle_slice} with SAM2")
-            
-            # Get some data from middle slice for demonstration
-            for b in range(batch_size):
-                sample_slice = x[b, 0, :, :, middle_slice]  # Get FLAIR modality
-                print(f"Middle slice {middle_slice} shape: {sample_slice.shape}")
         
         # Apply sigmoid to get probabilities
         output = torch.sigmoid(segmentation)
