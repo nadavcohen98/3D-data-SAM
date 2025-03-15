@@ -1,5 +1,5 @@
 #model.py
-# model.py - Minimal version with debug prints
+# model.py - Fixed minimal version
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -71,6 +71,32 @@ class DecoderBlock3D(nn.Module):
         x = torch.cat([x2, x1], dim=1)
         return self.conv(x)
 
+class UNet3DEncoder(nn.Module):
+    def __init__(self, in_channels=4, base_channels=16):
+        super(UNet3DEncoder, self).__init__()
+        print(f"Initializing UNet3DEncoder: in_channels={in_channels}")
+        
+        self.in_channels = in_channels
+        self.base_channels = base_channels
+        
+        self.initial_conv = ResidualBlock3D(in_channels, base_channels)
+        self.enc1 = EncoderBlock3D(base_channels, base_channels * 2)
+        self.enc2 = EncoderBlock3D(base_channels * 2, base_channels * 4)
+        self.enc3 = EncoderBlock3D(base_channels * 4, base_channels * 8)
+        self.enc4 = EncoderBlock3D(base_channels * 8, base_channels * 8)
+    
+    def forward(self, x):
+        print(f"UNet3DEncoder forward: input shape {x.shape}")
+        x1 = self.initial_conv(x)
+        x2 = self.enc1(x1)
+        x3 = self.enc2(x2)
+        x4 = self.enc3(x3)
+        x5 = self.enc4(x4)
+        
+        # Return a tuple of features from different levels
+        metadata = {"shape": x.shape}
+        return x1, x2, x3, x4, x5, metadata
+
 class FullUNet3D(nn.Module):
     def __init__(self, in_channels=4, n_classes=4, base_channels=16, trilinear=True):
         super(FullUNet3D, self).__init__()
@@ -122,6 +148,13 @@ class AutoSAM2(nn.Module):
         self.base_channels = base_channels
         self.slice_interval = slice_interval
         
+        # Create encoder - CRITICAL: train.py expects this attribute
+        print("Creating UNet3DEncoder")
+        self.encoder = UNet3DEncoder(
+            in_channels=4,
+            base_channels=base_channels
+        )
+        
         # Create fallback UNet3D model
         print("Creating fallback UNet3D model")
         self.fallback_model = FullUNet3D(
@@ -140,7 +173,7 @@ class AutoSAM2(nn.Module):
         print(f"AutoSAM2 forward returning output shape: {output.shape}")
         return output
     
-    # Compatibility with train.py
+    # Compatibility with train.py - this method is essential
     def decoder(self, x_tuple):
         print(f"AutoSAM2 decoder method called with type: {type(x_tuple)}")
         if isinstance(x_tuple, tuple):
