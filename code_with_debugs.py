@@ -86,9 +86,6 @@ class EfficientEncoder3D(nn.Module):
         depth_idx = dims.index(min(dims))
         depth = dims[depth_idx]
         
-        # Print input shape analysis
-        print(f"Input shape: {x.shape}, identified depth: {depth} (dimension index {depth_idx})")
-        
         # Store key slice indices (approximately every slice_interval slices)
         key_indices = []
         for i in range(0, depth, self.slice_interval):
@@ -100,9 +97,6 @@ class EfficientEncoder3D(nn.Module):
         if middle_idx not in key_indices:
             key_indices.append(middle_idx)
             key_indices.sort()  # Keep indices in order
-        
-        # Print key slice information
-        print(f"Selected {len(key_indices)} key slices at depths: {key_indices}")
         
         # Encoder pathway with skip connections
         x1 = self.enc1(x)
@@ -326,7 +320,7 @@ class AutoSAM2(nn.Module):
         # When training with SAM2 enabled (future implementation)
         if self.has_sam2 and self.training:
             # Just for demonstration in current phase
-            print(f"In future implementation: would process {len(key_indices)} key slices with SAM2")
+            #print(f"In future implementation: would process {len(key_indices)} key slices with SAM2")
             
             # Extract sample slice for visualization
             input_shape = dimensions["input_shape"]
@@ -340,7 +334,7 @@ class AutoSAM2(nn.Module):
             else:
                 sample_slice = x[0, 0, :, :, middle_idx]
                 
-            print(f"Shape of middle slice: {sample_slice.shape}")
+            #print(f"Shape of middle slice: {sample_slice.shape}")
         
         # Apply sigmoid to get probabilities
         output = torch.sigmoid(segmentation)
