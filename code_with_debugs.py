@@ -9,7 +9,7 @@ import logging
 import os
 import glob
 
-# Configure logging
+# Configure logging with reduced verbosity
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -179,9 +179,6 @@ class UNet3DEncoder(nn.Module):
         # Get batch dimensions
         batch_size, channels, dim1, dim2, dim3 = x.shape
         
-        # Log input dimensions
-        logger.info(f"Input volume dimensions: {x.shape}")
-        
         # Identify depth dimension (smallest one)
         dims = [dim1, dim2, dim3]
         depth_idx = dims.index(min(dims))
@@ -199,8 +196,6 @@ class UNet3DEncoder(nn.Module):
             key_indices.append(middle_idx)
             key_indices.sort()
         
-        logger.info(f"Selected {len(key_indices)} key slices: {key_indices}")
-        
         # Encoder pathway
         x1 = self.initial_conv(x)  # Full resolution
         x2 = self.enc1(x1)         # 1/2 resolution
@@ -211,8 +206,6 @@ class UNet3DEncoder(nn.Module):
         # Calculate downsampled indices for bottleneck
         downsampled_depth = depth // 16  # After 4 encoder blocks
         ds_key_indices = [min(idx // 16, downsampled_depth-1) for idx in key_indices]
-        
-        logger.info(f"Downsampled key indices: {ds_key_indices}")
         
         # Store metadata for key slice processing
         metadata = {
@@ -277,8 +270,6 @@ class EmbeddingProcessor(nn.Module):
         
         # Ensure correct size with adaptive pooling
         slice_embedding = self.adaptive_pool(slice_embedding)
-        
-        logger.debug(f"Processed embedding for slice {slice_idx}, shape: {slice_embedding.shape}")
         
         return slice_embedding
 
@@ -397,47 +388,6 @@ class AutoSAM2(nn.Module):
         logger.info(f"Initialized AutoSAM2 with {base_channels} base channels, "
                    f"slice interval {slice_interval}, SAM2 enabled: {self.has_sam2 if hasattr(self, 'has_sam2') else False}")
         
-    def find_sam2_model_file(self):
-        """Find a SAM2 model file on the system"""
-        # Start with the provided path if any
-        if self.sam2_model_path and os.path.exists(self.sam2_model_path):
-            return self.sam2_model_path
-            
-        # Look in common locations
-        potential_paths = [
-            # Direct path to the model we found in the tests
-            "/home/erezhuberman/.cache/huggingface/hub/models--facebook--sam2-hiera-large/snapshots/eba9be237c463eb950e64b65c223ad55c878c2ac/sam2_hiera_large.pt",
-            # Other potential cache locations
-            os.path.expanduser("~/.cache/huggingface/hub/"),
-            os.path.expanduser("~/.cache/torch/hub/checkpoints/"),
-            os.path.expanduser("~/sam2/models/"),
-            os.path.join(os.path.dirname(sam2.__file__), "models"),
-            "models/",
-            "weights/",
-            "checkpoints/"
-        ]
-        
-        # Check direct paths first
-        for path in potential_paths:
-            if os.path.isfile(path) and (path.endswith('.pt') or path.endswith('.pth')):
-                logger.info(f"Found SAM2 model file: {path}")
-                return path
-        
-        # Search directories
-        for dir_path in potential_paths:
-            if os.path.isdir(dir_path):
-                logger.info(f"Searching for SAM2 model in: {dir_path}")
-                for root, dirs, files in os.walk(dir_path):
-                    for file in files:
-                        if file.endswith('.pt') or file.endswith('.pth'):
-                            if 'sam2' in file.lower() or 'sam' in file.lower():
-                                full_path = os.path.join(root, file)
-                                logger.info(f"Found potential SAM2 model file: {full_path}")
-                                return full_path
-        
-        # If nothing is found
-        return None
-        
     def initialize_sam2(self):
         """Initialize SAM2 with improved approach"""
         self.has_sam2 = False
@@ -451,81 +401,21 @@ class AutoSAM2(nn.Module):
             return
             
         try:
-            logger.info("Attempting to initialize SAM2")
-            
-            # Try multiple approaches to initialize SAM2
-            
-            # Approach 1: Try direct initialization with sam2_model member variable
-            logger.info("Approach 1: Trying to initialize a SAM2 model instance directly")
+            # Try using build_sam2_hf directly - the approach that worked in tests
+            logger.info("Attempting to initialize SAM2 with build_sam2_hf")
             try:
-                from sam2.modeling.sam2_model import SAM2
-                sam2_model = SAM2()
+                model_id = "facebook/sam2-hiera-large"
+                logger.info(f"Building SAM2 with model_id: {model_id}")
+                sam2_model = build_sam2_hf(model_id)
                 self.sam2 = SAM2ImagePredictor(sam2_model)
-                logger.info("SUCCESS! Initialized SAM2 directly")
                 self.has_sam2 = True
+                logger.info("SAM2 initialized successfully")
                 return
             except Exception as e:
-                logger.warning(f"Direct SAM2 initialization failed: {e}")
-            
-            # Approach 2: Find a model file and try to load it directly
-            logger.info("Approach 2: Looking for SAM2 model files")
-            model_file = self.find_sam2_model_file()
-            if model_file:
-                try:
-                    # Try loading with torch first
-                    logger.info(f"Trying to load model file with torch: {model_file}")
-                    state_dict = torch.load(model_file)
-                    
-                    # Try to initialize SAM2 and load state dict
-                    from sam2.modeling.sam2_model import SAM2
-                    sam2_model = SAM2()
-                    sam2_model.load_state_dict(state_dict)
-                    self.sam2 = SAM2ImagePredictor(sam2_model)
-                    logger.info("SUCCESS! Initialized SAM2 with model file")
-                    self.has_sam2 = True
-                    return
-                except Exception as e:
-                    logger.warning(f"Failed to load model file with torch: {e}")
-                    
-                    # Try using SAM2ImagePredictor.from_pretrained with file path
-                    try:
-                        logger.info(f"Trying from_pretrained with file path: {model_file}")
-                        self.sam2 = SAM2ImagePredictor.from_pretrained(model_file)
-                        logger.info("SUCCESS! Initialized SAM2 with from_pretrained")
-                        self.has_sam2 = True
-                        return
-                    except Exception as e:
-                        logger.warning(f"Failed to initialize with from_pretrained: {e}")
-            
-            # Approach 3: Try using build_sam2_hf directly
-            logger.info("Approach 3: Trying to use build_sam2_hf directly")
-            try:
-                logger.info("Trying to import build_sam2_hf and initialize model")
-                model_ids = ["facebook/sam2-hiera-large", "facebook/sam2-base", "facebook/sam2-small"]
+                logger.error(f"Failed to initialize SAM2 with build_sam2_hf: {e}")
                 
-                for model_id in model_ids:
-                    try:
-                        logger.info(f"Trying to build SAM2 with model_id: {model_id}")
-                        sam2_model = build_sam2_hf(model_id)
-                        self.sam2 = SAM2ImagePredictor(sam2_model)
-                        logger.info(f"SUCCESS! Built SAM2 with model_id: {model_id}")
-                        self.has_sam2 = True
-                        return
-                    except Exception as e:
-                        logger.warning(f"Failed to build with model_id {model_id}: {e}")
-            
-            except Exception as e:
-                logger.warning(f"Failed to use build_sam2_hf: {e}")
-            
-            # If all approaches failed
-            logger.error("All SAM2 initialization approaches failed")
-            self.has_sam2 = False
-            self.sam2 = None
-            
         except Exception as e:
             logger.error(f"Error in SAM2 initialization: {e}")
-            import traceback
-            logger.error(traceback.format_exc())
             self.has_sam2 = False
             self.sam2 = None
             
@@ -557,9 +447,6 @@ class AutoSAM2(nn.Module):
         try:
             logger.info(f"Processing slice {slice_idx} with SAM2")
             start_time = time.time()
-            
-            # Log input shapes
-            logger.debug(f"Slice {slice_idx} - Image shape: {img_slice.shape}, Embedding shape: {embedding.shape}")
             
             # Convert tensor to numpy for SAM2
             # SAM2 expects numpy arrays not torch tensors
@@ -614,7 +501,6 @@ class AutoSAM2(nn.Module):
             if self.debug_mode:
                 try:
                     import matplotlib.pyplot as plt
-                    import numpy as np
                     
                     # Create debug image
                     plt.figure(figsize=(10, 5))
@@ -631,19 +517,14 @@ class AutoSAM2(nn.Module):
                     
                     plt.savefig(f"autosam2_debug/slice_{slice_idx}.png")
                     plt.close()
-                    
-                    logger.debug(f"Saved debug visualization for slice {slice_idx}")
                 except Exception as e:
                     logger.warning(f"Failed to create debug visualization: {e}")
             
             return multi_class_mask
         except Exception as e:
             logger.error(f"Error processing slice {slice_idx} with SAM2: {e}")
-            import traceback
-            logger.error(traceback.format_exc())
             height, width = img_slice.shape[2:]
             return torch.zeros((1, self.num_classes, height, width), device=device)
-
     
     def create_volume_from_slices(self, sam2_masks, volume_shape, slice_indices, depth_dim_idx):
         """
@@ -732,7 +613,7 @@ class AutoSAM2(nn.Module):
         
         # Check if we should use SAM2 or fallback mode
         if not hasattr(self, 'has_sam2') or not self.has_sam2 or not self.training:
-            logger.warning("Using fallback UNet3D model")
+            logger.info("Using fallback UNet3D model")
             output = self.fallback_model(x)
             output = torch.sigmoid(output)
             return output
@@ -751,7 +632,6 @@ class AutoSAM2(nn.Module):
         # 2. Run partial decoder to get embeddings
         decoder_start = time.time()
         embeddings_3d = self.partial_decoder(x5, x4, x3)
-        logger.info(f"Generated 3D embeddings with shape {embeddings_3d.shape}")
         
         # Process slices with SAM2
         sam2_masks = {}
@@ -793,8 +673,7 @@ class AutoSAM2(nn.Module):
         total_time = time.time() - start_time
         self.performance_metrics["total_time"].append(total_time)
         
-        logger.info(f"Forward pass completed in {total_time:.4f}s "
-                   f"(Encoder: {encoder_time:.4f}s, Decoder+SAM2: {decoder_time:.4f}s)")
+        logger.info(f"Forward pass completed in {total_time:.4f}s")
         
         return output
     
@@ -818,25 +697,6 @@ class AutoSAM2(nn.Module):
         if self.performance_metrics["total_time"]:
             stats["avg_total_time"] = np.mean(self.performance_metrics["total_time"])
         
-        # Format for logging
-        logger_msg = ["AutoSAM2 Performance Statistics:"]
-        logger_msg.append(f"SAM2 Integration: {'Enabled' if stats['has_sam2'] else 'Disabled'}")
-        logger_msg.append(f"Total slices processed with SAM2: {stats['sam2_slices_processed']}")
-        
-        if 'avg_sam2_time_per_slice' in stats:
-            logger_msg.append(f"Average time per slice: {stats['avg_sam2_time_per_slice']:.4f}s")
-            logger_msg.append(f"Total SAM2 processing time: {stats['total_sam2_time']:.2f}s")
-        
-        if 'avg_encoder_time' in stats:
-            logger_msg.append(f"Average encoder time: {stats['avg_encoder_time']:.4f}s")
-        
-        if 'avg_decoder_time' in stats:
-            logger_msg.append(f"Average decoder+SAM2 time: {stats['avg_decoder_time']:.4f}s")
-        
-        if 'avg_total_time' in stats:
-            logger_msg.append(f"Average total processing time: {stats['avg_total_time']:.4f}s")
-        
-        logger.info("\n".join(logger_msg))
         return stats
         
     # Create compatibility with train.py
@@ -853,6 +713,10 @@ class AutoSAM2(nn.Module):
         if isinstance(x_tuple, tuple):
             return x_tuple[0]
         return x_tuple
+
+
+
+
 #dataset.py
 import os
 import torch
