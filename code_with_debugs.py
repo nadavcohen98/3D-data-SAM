@@ -7,7 +7,6 @@ import numpy as np
 # Import SAM2 with error handling
 try:
     from sam2.sam2_image_predictor import SAM2ImagePredictor
-    from sam2.modeling import Sam2
     HAS_SAM2 = True
     print("Successfully imported SAM2")
 except ImportError:
@@ -56,232 +55,306 @@ class EncoderBlock3D(nn.Module):
     def forward(self, x):
         return self.encoder(x)
 
-class PromptEncoder3D(nn.Module):
+class DecoderBlock3D(nn.Module):
     """
-    3D encoder that generates embeddings for SAM2.
-    This is the auxiliary encoder that replaces SAM2's prompt encoder.
+    Decoder block with upsampling and residual convolutions.
+    Includes option for trilinear upsampling or transposed convolutions.
     """
-    def __init__(self, in_channels=4, base_channels=16, embedding_dim=256):
-        super(PromptEncoder3D, self).__init__()
+    def __init__(self, in_channels, out_channels, num_groups=8, trilinear=True):
+        super(DecoderBlock3D, self).__init__()
         
-        # Initial convolution with residual connection
+        # Upsampling method
+        if trilinear:
+            self.up = nn.Upsample(scale_factor=2, mode='trilinear', align_corners=True)
+        else:
+            self.up = nn.ConvTranspose3d(in_channels // 2, in_channels // 2, kernel_size=2, stride=2)
+        
+        # Residual convolution block after concatenation
+        self.conv = ResidualBlock3D(in_channels, out_channels, num_groups)
+    
+    def forward(self, x1, x2):
+        # Upsample x1
+        x1 = self.up(x1)
+        
+        # Pad x1 if needed to match x2 dimensions
+        diffZ = x2.size()[2] - x1.size()[2]
+        diffY = x2.size()[3] - x1.size()[3]
+        diffX = x2.size()[4] - x1.size()[4]
+        
+        x1 = F.pad(x1, [
+            diffX // 2, diffX - diffX // 2,  # Left, Right
+            diffY // 2, diffY - diffY // 2,  # Top, Bottom
+            diffZ // 2, diffZ - diffZ // 2   # Front, Back
+        ])
+        
+        # Concatenate x2 (encoder features) with x1 (decoder features)
+        x = torch.cat([x2, x1], dim=1)
+        
+        # Apply residual convolution block
+        return self.conv(x)
+
+class EnhancedUNet3D(nn.Module):
+    """
+    Enhanced UNet3D to serve as the auxiliary encoder for AutoSAM2.
+    This generates features that will be converted to prompts for SAM2.
+    """
+    def __init__(self, in_channels=4, base_channels=16, embedding_dim=256, slice_interval=10, trilinear=True):
+        super(EnhancedUNet3D, self).__init__()
+        
+        # Configuration
+        self.in_channels = in_channels
+        self.base_channels = base_channels
+        self.embedding_dim = embedding_dim
+        self.slice_interval = slice_interval
+        
+        # Initial convolution block
         self.initial_conv = ResidualBlock3D(in_channels, base_channels)
         
-        # Encoder blocks
+        # Encoder pathway
         self.enc1 = EncoderBlock3D(base_channels, base_channels * 2)
         self.enc2 = EncoderBlock3D(base_channels * 2, base_channels * 4)
         self.enc3 = EncoderBlock3D(base_channels * 4, base_channels * 8)
-        self.enc4 = EncoderBlock3D(base_channels * 8, base_channels * 16)
+        self.enc4 = EncoderBlock3D(base_channels * 8, base_channels * 8)  # Keep channel count at 128
         
-        # Projection to embedding dimension for SAM2
-        self.projection = nn.Conv3d(base_channels * 16, embedding_dim, kernel_size=1)
+        # Bottleneck
+        self.bottleneck = ResidualBlock3D(base_channels * 8, base_channels * 16)
         
-        # Final embedding size adjustment
-        self.final_conv = nn.Conv2d(embedding_dim, embedding_dim, kernel_size=1)
+        # Decoder pathway with skip connections - used during training for auxiliary segmentation
+        self.dec1 = DecoderBlock3D(base_channels * 24, base_channels * 4, trilinear=trilinear)  # 16 + 8 = 24
+        self.dec2 = DecoderBlock3D(base_channels * 8, base_channels * 2, trilinear=trilinear)   # 4 + 4 = 8
+        self.dec3 = DecoderBlock3D(base_channels * 4, base_channels, trilinear=trilinear)       # 2 + 2 = 4
+        self.dec4 = DecoderBlock3D(base_channels * 2, base_channels, trilinear=trilinear)       # 1 + 1 = 2
+        
+        # Final output layer for segmentation during training
+        self.output_conv = nn.Conv3d(base_channels, in_channels, kernel_size=1)
+        
+        # Projection for SAM2 embeddings
+        self.sam_projection = nn.Conv3d(base_channels * 16, embedding_dim, kernel_size=1)
+        
+        # Projection for 2D slice embeddings
+        self.slice_projection = nn.Sequential(
+            nn.Conv2d(embedding_dim, embedding_dim, kernel_size=3, padding=1),
+            nn.GroupNorm(num_groups=min(8, embedding_dim), num_channels=embedding_dim),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(embedding_dim, embedding_dim, kernel_size=1)
+        )
     
     def forward(self, x):
         """
-        Generate embeddings for SAM2 from 3D volume.
-        Returns embeddings for all slices in the volume.
-        
-        Args:
-            x: Input tensor of shape [batch, channels, depth, height, width]
-            
-        Returns:
-            Dictionary of embeddings for each slice in the volume
+        Forward pass of the UNet3D encoder.
+        Returns both segmentation (for training) and embeddings (for SAM2).
         """
         batch_size, channels, depth, height, width = x.shape
         
+        # Identify depth dimension (smallest one)
+        dims = [depth, height, width]
+        depth_idx = 0  # Default to first dimension
+        depth_val = dims[0]
+        
+        # Select key slices at regular intervals
+        key_indices = []
+        for i in range(0, depth_val, self.slice_interval):
+            if i < depth_val:
+                key_indices.append(i)
+        
+        # Add middle slice if not included
+        middle_idx = depth_val // 2
+        if middle_idx not in key_indices:
+            key_indices.append(middle_idx)
+            key_indices.sort()
+        
+        # Store original input for reference
+        original_input = x
+        
         # Encoder pathway
-        x = self.initial_conv(x)
-        x = self.enc1(x)
-        x = self.enc2(x)
-        x = self.enc3(x)
-        x = self.enc4(x)
+        x1 = self.initial_conv(x)
+        x2 = self.enc1(x1)
+        x3 = self.enc2(x2)
+        x4 = self.enc3(x3)
+        x5 = self.enc4(x4)
         
-        # Project to embedding dimension
-        embeddings = self.projection(x)
+        # Bottleneck
+        bottleneck = self.bottleneck(x5)
         
-        # Process each slice
+        # Generate SAM2 embeddings
+        embeddings_3d = self.sam_projection(bottleneck)
+        
+        # Process slices to get 2D embeddings for SAM2
         slice_embeddings = {}
-        
         for b in range(batch_size):
             slice_embeddings[b] = {}
             
-            for d in range(depth):
-                # Extract slice along depth dimension (assumed to be dim 2)
-                slice_3d = embeddings[b:b+1, :, :, :, d]
-                
-                # Average across depth dimension to get 2D representation
-                # This is a simplification - we could use a more sophisticated approach
-                slice_2d = torch.mean(slice_3d, dim=2)
+            # Process all slices (for full integration)
+            for d in range(depth_val):
+                # Extract the slice from 3D embeddings
+                if depth_idx == 0:
+                    slice_embedding = embeddings_3d[b, :, d, :, :]
+                else:
+                    # Handle other dimension orderings if needed
+                    slice_embedding = embeddings_3d[b, :, :, :, d] if depth_idx == 2 else embeddings_3d[b, :, :, d, :]
                 
                 # Resize to SAM2's expected input size (64x64)
-                slice_2d_resized = F.interpolate(
-                    slice_2d, 
-                    size=(64, 64), 
-                    mode='bilinear', 
-                    align_corners=False
-                )
+                # Make sure to handle dimensions correctly
+                if len(slice_embedding.shape) == 2:  # If we got a 2D tensor directly
+                    slice_embedding = slice_embedding.unsqueeze(0)  # Add channel dim
                 
-                # Apply final convolution
-                slice_2d_final = self.final_conv(slice_2d_resized)
-                
-                # Store embedding
-                slice_embeddings[b][d] = slice_2d_final
+                # Ensure we have a 3D tensor [C, H, W]
+                if len(slice_embedding.shape) == 3:
+                    # Resize properly
+                    slice_embedding = F.interpolate(
+                        slice_embedding.unsqueeze(0),  # Add batch dim [1, C, H, W]
+                        size=(64, 64),
+                        mode='bilinear',
+                        align_corners=False
+                    ).squeeze(0)  # Remove batch dim [C, 64, 64]
+                    
+                    # Apply final projection
+                    slice_embedding = self.slice_projection(slice_embedding.unsqueeze(0)).squeeze(0)
+                    
+                    # Store embedding
+                    slice_embeddings[b][d] = slice_embedding
         
-        return slice_embeddings
+        # Decoder pathway for segmentation (used during training)
+        x = self.dec1(bottleneck, x5)
+        x = self.dec2(x, x4)
+        x = self.dec3(x, x3)
+        x = self.dec4(x, x2)
+        
+        # Final convolution
+        segmentation = self.output_conv(x)
+        
+        # Store metadata
+        metadata = {
+            "key_indices": key_indices,
+            "depth_idx": depth_idx,
+            "original_input": original_input
+        }
+        
+        return segmentation, slice_embeddings, metadata
 
 class AutoSAM2(nn.Module):
     """
-    AutoSAM2 implementation following the original AutoSAM concept:
-    1. Use a custom 3D encoder to generate embeddings
-    2. Replace SAM2's prompt encoder with these embeddings
-    3. Let SAM2 predict masks for each slice
+    Enhanced AutoSAM2 that follows the original AutoSAM approach.
+    Uses UNet3D as auxiliary encoder to generate prompts for SAM2.
     """
-    def __init__(self, num_classes=4, base_channels=16):
+    def __init__(self, num_classes=4, base_channels=16, slice_interval=10, trilinear=True):
         super(AutoSAM2, self).__init__()
         
         # Store configuration
         self.num_classes = num_classes
+        self.slice_interval = slice_interval
         
-        # Create prompt encoder
-        self.prompt_encoder = PromptEncoder3D(
+        # Create the auxiliary encoder (UNet3D with embedding generation)
+        self.auxiliary_encoder = EnhancedUNet3D(
             in_channels=4,
             base_channels=base_channels,
-            embedding_dim=256  # SAM2's embedding dimension
+            embedding_dim=256,  # SAM2's embedding dimension
+            slice_interval=slice_interval,
+            trilinear=trilinear
         )
         
         # Create encoder/decoder variables to maintain compatibility with train.py
-        self.encoder = self.prompt_encoder
+        self.encoder = self.auxiliary_encoder
         
-        # Dummy decoder function to maintain compatibility
-        def dummy_decoder(x):
-            if isinstance(x, dict):
-                # Return zeros with the right shape during training
-                if self.training:
-                    return torch.zeros((1, num_classes, 240, 240, 155), device=x[0][0].device)
-                return x  # During inference, actual processing happens in forward
+        # Decoder function to return appropriate output
+        def aux_decoder(x):
+            if isinstance(x, tuple) and len(x) >= 1:
+                return x[0]  # Return segmentation for compatibility
             return x
-        self.decoder = dummy_decoder
+        
+        self.decoder = aux_decoder
         
         # Initialize SAM2
         if HAS_SAM2:
             try:
-                self.sam2_predictor = SAM2ImagePredictor.from_pretrained("facebook/sam2-hiera-large")
+                self.sam2 = SAM2ImagePredictor.from_pretrained("facebook/sam2-hiera-large")
+                print("SAM2 initialized successfully")
                 
-                # Save raw model for direct control
-                self.sam2 = self.sam2_predictor.model
-                
-                # Freeze SAM2 weights (except possibly the image embedding encoder)
-                for param in self.sam2.parameters():
+                # Freeze SAM2 weights
+                for param in self.sam2.model.parameters():
                     param.requires_grad = False
                 
-                print("SAM2 initialized successfully")
                 self.has_sam2 = True
             except Exception as e:
                 print(f"Error initializing SAM2: {e}")
                 self.has_sam2 = False
                 self.sam2 = None
-                self.sam2_predictor = None
         else:
             self.has_sam2 = False
             self.sam2 = None
-            self.sam2_predictor = None
     
-    def process_slice_with_sam2(self, img_slice, embedding):
+    def process_with_sam2(self, image_slice, embedding):
         """
-        Process a single 2D slice with SAM2 using our custom prompt encoder
-        
-        Args:
-            img_slice: Input image slice tensor [height, width]
-            embedding: Embedding tensor from our prompt encoder [256, 64, 64]
-            
-        Returns:
-            Segmentation mask from SAM2
+        Process a single slice with SAM2 using our generated embedding
         """
-        if not self.has_sam2:
-            # Return empty mask if SAM2 is not available
-            return torch.zeros_like(img_slice).unsqueeze(0)
+        # Convert tensors to numpy for SAM2
+        if torch.is_tensor(image_slice):
+            image_slice = image_slice.detach().cpu().numpy()
         
-        try:
-            # Set image
-            self.sam2_predictor.set_image(img_slice.cpu().numpy())
-            
-            # Generate mask using custom embedding as prompt
-            masks, scores, _ = self.sam2_predictor.predict(
-                embedding=embedding.squeeze(0).cpu().numpy()  # Remove batch dimension
-            )
-            
-            # Return best mask
-            if len(masks) > 0:
-                mask = torch.from_numpy(masks[0]).float().to(img_slice.device)
-                return mask.unsqueeze(0)  # Add channel dimension
-            else:
-                return torch.zeros_like(img_slice).unsqueeze(0)
-                
-        except Exception as e:
-            print(f"Error in SAM2 prediction: {e}")
-            return torch.zeros_like(img_slice).unsqueeze(0)
+        if torch.is_tensor(embedding):
+            embedding = embedding.detach().cpu().numpy()
+        
+        # Set image in SAM2
+        self.sam2.set_image(image_slice)
+        
+        # Generate mask using embedding
+        masks, scores, _ = self.sam2.predict(embedding=embedding)
+        
+        # Return best mask
+        if len(masks) > 0:
+            mask = torch.from_numpy(masks[0]).float()
+            return mask
+        
+        # Return empty mask if none found
+        return torch.zeros_like(torch.tensor(image_slice))
     
     def forward(self, x):
         """
-        Forward pass using the AutoSAM2 approach
-        
-        Args:
-            x: Input tensor of shape [batch, 4, depth, height, width]
-            
-        Returns:
-            Segmentation tensor of shape [batch, num_classes, depth, height, width]
+        Forward pass - use UNet3D for training, SAM2 for inference
         """
-        batch_size, channels, depth, height, width = x.shape
+        # Get device
         device = x.device
         
-        # Get embeddings from prompt encoder
-        slice_embeddings = self.prompt_encoder(x)
+        # Process with auxiliary encoder
+        segmentation, slice_embeddings, metadata = self.auxiliary_encoder(x)
         
-        # During training, we don't need to run SAM2 - just return the embeddings
-        # for the loss function (this follows AutoSAM approach)
+        # During training, use UNet3D segmentation directly
         if self.training:
-            return torch.zeros((batch_size, self.num_classes, depth, height, width), device=device)
+            return torch.sigmoid(segmentation)
         
-        # During inference, process each slice with SAM2
-        # This is the expensive part and only happens during inference
+        # For inference, process slices with SAM2 if available
         if self.has_sam2:
-            # Create tensor to hold all segmentation masks
-            all_masks = torch.zeros((batch_size, self.num_classes, depth, height, width), device=device)
+            # Get batch and dimension info
+            batch_size, channels, depth, height, width = x.shape
             
+            # Initialize output tensor
+            sam_masks = torch.zeros((batch_size, self.num_classes, depth, height, width), device=device)
+            
+            # Process each slice with SAM2
             for b in range(batch_size):
                 for d in range(depth):
-                    # Skip if this slice doesn't have an embedding (shouldn't happen)
+                    # Skip if this slice doesn't have an embedding
                     if d not in slice_embeddings[b]:
                         continue
                     
-                    # Get embedding for this slice
-                    embedding = slice_embeddings[b][d]
-                    
-                    # Get original image slice
-                    img_slice = x[b, 0, d]  # Use first channel (FLAIR)
+                    # Get embedding and original image for this slice
+                    embedding = slice_embeddings[b][d].cpu()
+                    image_slice = x[b, 0, d].cpu()  # Use first modality (FLAIR)
                     
                     # Process with SAM2
-                    mask = self.process_slice_with_sam2(img_slice, embedding)
+                    mask = self.process_with_sam2(image_slice, embedding)
                     
-                    # Resize mask to original dimensions if needed
-                    if mask.shape[1:] != (height, width):
-                        mask = F.interpolate(
-                            mask.unsqueeze(0),  # Add batch dimension
-                            size=(height, width),
-                            mode='bilinear',
-                            align_corners=False
-                        ).squeeze(0)  # Remove batch dimension
+                    # Move mask to device and add to output
+                    mask = mask.to(device)
                     
-                    # Store mask for each class (simplified - adapt for multi-class)
-                    all_masks[b, :, d] = mask.expand(self.num_classes, -1, -1)
+                    # Repeat mask for each class
+                    for c in range(self.num_classes):
+                        sam_masks[b, c, d] = mask
             
-            return all_masks
+            return sam_masks
         
-        # If SAM2 is not available, return zeros
-        return torch.zeros((batch_size, self.num_classes, depth, height, width), device=device)
+        # If SAM2 not available, return UNet segmentation
+        return torch.sigmoid(segmentation)
 
 
 
