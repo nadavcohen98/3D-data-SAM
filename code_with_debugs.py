@@ -503,9 +503,19 @@ class AutoSAM2(nn.Module):
         """
         Forward pass - simplified to focus on data flow
         """
-        # Print input dimensions to verify
-        batch_size, channels, depth, height, width = x.shape
-        print(f"Input dimensions: batch_size={batch_size}, channels={channels}, depth={depth}, height={height}, width={width}")
+        # Get tensor dimensions
+        b, c, d1, d2, d3 = x.shape
+        
+        # Determine which dimension is which based on BraTS standard dimensions
+        # Standard BraTS: 155 slices, 240x240 image dimensions
+        if d1 == 155:
+            depth, height, width = d1, d2, d3
+        elif d3 == 155:
+            depth, height, width = d3, d1, d2
+        else:
+            # If unsure, use standard assumption
+            depth, height, width = d3, d1, d2
+        print(f"Input dimensions: batch_size={b}, channels={c}, depth={depth}, height={height}, width={width}")
         
         # Get features from encoder
         features = self.encoder(x)
