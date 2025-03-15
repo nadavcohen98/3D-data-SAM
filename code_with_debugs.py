@@ -656,12 +656,15 @@ def calculate_dice_score(y_pred, y_true):
         if scores:  # Only calculate if we have scores
             scores_tensor = torch.tensor(scores)
             result[f'{key}_mean'] = scores_tensor.mean().item()
-            result[f'{key}_std'] = scores_tensor.std().item()
+            result[f'{key}_std'] = scores_tensor.std().item() if len(scores_tensor) > 1 else 0.0
             result[f'{key}_median'] = torch.median(scores_tensor).item()
             
             # Calculate IQR (75th percentile - 25th percentile)
-            q1, q3 = torch.tensor(scores_tensor.tolist()).quantile(torch.tensor([0.25, 0.75])).tolist()
-            result[f'{key}_iqr'] = q3 - q1
+            if len(scores_tensor) > 1:
+                q1, q3 = torch.tensor(scores_tensor.tolist()).quantile(torch.tensor([0.25, 0.75])).tolist()
+                result[f'{key}_iqr'] = q3 - q1
+            else:
+                result[f'{key}_iqr'] = 0.0
         else:
             # Set default values if no scores available
             result[f'{key}_mean'] = 0.0
@@ -765,12 +768,15 @@ def calculate_iou(y_pred, y_true, threshold=0.5, eps=1e-6):
         if values:  # Only calculate if we have values
             values_tensor = torch.tensor(values)
             result[f'{key}_mean'] = values_tensor.mean().item()
-            result[f'{key}_std'] = values_tensor.std().item()
+            result[f'{key}_std'] = values_tensor.std().item() if len(values_tensor) > 1 else 0.0
             result[f'{key}_median'] = torch.median(values_tensor).item()
             
             # Calculate IQR
-            q1, q3 = torch.tensor(values_tensor.tolist()).quantile(torch.tensor([0.25, 0.75])).tolist()
-            result[f'{key}_iqr'] = q3 - q1
+            if len(values_tensor) > 1:
+                q1, q3 = torch.tensor(values_tensor.tolist()).quantile(torch.tensor([0.25, 0.75])).tolist()
+                result[f'{key}_iqr'] = q3 - q1
+            else:
+                result[f'{key}_iqr'] = 0.0
         else:
             # Set default values if no scores available
             result[f'{key}_mean'] = 0.0
@@ -784,8 +790,17 @@ def calculate_iou(y_pred, y_true, threshold=0.5, eps=1e-6):
     
     return result
 
-# Simple dice loss for multiclass segmentation with improved numeric stability
 class BraTSDiceLoss(nn.Module):
+    """
+    Dice Loss specifically designed for BraTS segmentation task.
+    Calculates loss for the three tumor regions: ET, WT, and TC.
+    
+    BraTS label convention:
+    - 0: Background
+    - 1: Necrotic Tumor Core (NCR)
+    - 2: Peritumoral Edema (ED)
+    - 4: Enhancing Tumor (ET) (represented at index 3 in tensors)
+    """
     def __init__(self, smooth=1.0, region_weights={'ET': 1.0, 'WT': 1.0, 'TC': 1.0}):
         super(BraTSDiceLoss, self).__init__()
         self.smooth = smooth
@@ -869,6 +884,16 @@ class BraTSDiceLoss(nn.Module):
             return torch.tensor(0.0, requires_grad=True, device=device)
 
 class CombinedLoss(nn.Module):
+    """
+    Combined loss function for BraTS segmentation task.
+    Combines Dice loss, BCE loss, and Focal loss with configurable weights.
+    
+    BraTS label convention:
+    - 0: Background
+    - 1: Necrotic Tumor Core (NCR)
+    - 2: Peritumoral Edema (ED)
+    - 4: Enhancing Tumor (ET) (represented at index 3 in tensors)
+    """
     def __init__(self, dice_weight=0.7, bce_weight=0.2, focal_weight=0.1, 
                  region_weights={'ET': 1.2, 'WT': 1.0, 'TC': 1.0}):
         super().__init__()
@@ -881,10 +906,13 @@ class CombinedLoss(nn.Module):
         # For BraTS with channels 0,1,2,3 representing classes 0,1,2,4
         pos_weight = torch.ones(4)
         pos_weight[1:] = 5.0  # Higher weight for tumor classes (1,2,4)
-        self.bce_loss = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+        self.bce_loss = nn.BCEWithLogitsLoss(pos_weight=pos_weight.cuda() if torch.cuda.is_available() else pos_weight)
         
         # Focal loss for handling class imbalance
-        self.focal_loss = nn.CrossEntropyLoss(weight=torch.tensor([0.1, 1.0, 1.0, 1.2]))
+        class_weights = torch.tensor([0.1, 1.0, 1.0, 1.2])
+        self.focal_loss = nn.CrossEntropyLoss(
+            weight=class_weights.cuda() if torch.cuda.is_available() else class_weights
+        )
 
     def forward(self, y_pred, y_true):
         # Dice loss calculation
@@ -900,49 +928,12 @@ class CombinedLoss(nn.Module):
         
         # Return weighted sum of losses
         return self.dice_weight * dice + self.bce_weight * bce + self.focal_weight * focal
-        
 
 
-def preprocess_batch(batch, device=None):
-    """
-    Preprocess batch for binary masks
-    """
-    images, masks = batch
-    
-    # Convert binary masks to multi-class format
-    if masks.shape[1] == 1:
-        # For binary masks with just tumor/no-tumor
-        multi_class_masks = torch.zeros((masks.shape[0], 4, *masks.shape[2:]), dtype=torch.float32)
-        
-        # Class 0: Background (where mask is 0)
-        multi_class_masks[:, 0] = (masks[:, 0] == 0).float()
-        
-        # Class 1: Primary tumor region (all tumor pixels)
-        multi_class_masks[:, 1] = (masks[:, 0] == 1).float()
-        
-        # For training completeness, create synthetic values for classes 2 and 3
-        # This is only for demonstration - you may want to adjust or remove this
-        if torch.sum(multi_class_masks[:, 1]) > 0:
-            # Use a portion of class 1 for classes 2 and 3
-            rnd = torch.rand_like(multi_class_masks[:, 1])
-            multi_class_masks[:, 2] = (multi_class_masks[:, 1] * (rnd < 0.2)).float()
-            multi_class_masks[:, 3] = (multi_class_masks[:, 1] * (rnd < 0.1) * (rnd > 0.05)).float()
-        
-        masks = multi_class_masks
-    
-    # Ensure mask values are within expected range
-    masks = torch.clamp(masks, 0, 1)
-    
-    # Move to device if specified
-    if device is not None:
-        images = images.to(device)
-        masks = masks.to(device)
-    
-    return images, masks
 
 def train_epoch(model, train_loader, optimizer, criterion, device, epoch, scheduler=None):
     """
-    Training epoch function with proper logging of Dice Loss, Dice Score, IoU, and BCE Loss.
+    Training epoch function with comprehensive BraTS metrics.
     """
     model.train()
     total_loss = 0
@@ -985,7 +976,13 @@ def train_epoch(model, train_loader, optimizer, criterion, device, epoch, schedu
                 'bce_loss': bce_loss.item(),
                 'dice_loss': dice_loss.item(),
                 'mean_dice': dice_metrics['mean'],
-                'mean_iou': iou_metrics['mean_iou']
+                'mean_iou': iou_metrics['mean_iou'],
+                'dice_et': dice_metrics.get('ET_mean', 0.0),
+                'dice_wt': dice_metrics.get('WT_mean', 0.0),
+                'dice_tc': dice_metrics.get('TC_mean', 0.0),
+                'iou_et': iou_metrics.get('ET_mean', 0.0),
+                'iou_wt': iou_metrics.get('WT_mean', 0.0),
+                'iou_tc': iou_metrics.get('TC_mean', 0.0)
             })
 
             # Backward and optimize
@@ -999,12 +996,12 @@ def train_epoch(model, train_loader, optimizer, criterion, device, epoch, schedu
             if scheduler is not None and isinstance(scheduler, torch.optim.lr_scheduler.OneCycleLR):
                 scheduler.step()
 
-            # Update progress bar
+            # Update progress bar - now include tumor region metrics
             pbar.set_postfix({
                 'loss': f"{loss.item():.4f}",
-                'dice': f"{dice_metrics['mean']:.4f}",
-                'iou': f"{iou_metrics['mean_iou']:.4f}",
-                'bce': f"{bce_loss.item():.4f}"
+                'WT': f"{dice_metrics.get('WT_mean', 0.0):.1f}%",
+                'TC': f"{dice_metrics.get('TC_mean', 0.0):.1f}%",
+                'ET': f"{dice_metrics.get('ET_mean', 0.0):.1f}%"
             })
                 
             # Visualize first batch
@@ -1036,14 +1033,20 @@ def train_epoch(model, train_loader, optimizer, criterion, device, epoch, schedu
         'mean_dice': np.mean([m['mean_dice'] for m in all_metrics]) if all_metrics else 0.0,
         'mean_iou': np.mean([m['mean_iou'] for m in all_metrics]) if all_metrics else 0.0,
         'bce_loss': np.mean([m['bce_loss'] for m in all_metrics]) if all_metrics else 0.0,
-        'dice_loss': np.mean([m['dice_loss'] for m in all_metrics]) if all_metrics else 0.0
+        'dice_loss': np.mean([m['dice_loss'] for m in all_metrics]) if all_metrics else 0.0,
+        'dice_et': np.mean([m['dice_et'] for m in all_metrics]) if all_metrics else 0.0,
+        'dice_wt': np.mean([m['dice_wt'] for m in all_metrics]) if all_metrics else 0.0,
+        'dice_tc': np.mean([m['dice_tc'] for m in all_metrics]) if all_metrics else 0.0,
+        'iou_et': np.mean([m['iou_et'] for m in all_metrics]) if all_metrics else 0.0,
+        'iou_wt': np.mean([m['iou_wt'] for m in all_metrics]) if all_metrics else 0.0,
+        'iou_tc': np.mean([m['iou_tc'] for m in all_metrics]) if all_metrics else 0.0
     }
 
     return avg_loss, avg_metrics
 
 def validate(model, val_loader, criterion, device, epoch):
     """
-    Validate the model while logging Dice Loss, Dice Score, IoU, and BCE Loss.
+    Validate the model with comprehensive BraTS metrics.
     """
     model.eval()
     total_loss = 0
@@ -1084,15 +1087,21 @@ def validate(model, val_loader, criterion, device, epoch):
                     'bce_loss': bce_loss.item(),
                     'dice_loss': dice_loss.item(),
                     'mean_dice': dice_metrics['mean'],
-                    'mean_iou': iou_metrics['mean_iou']
+                    'mean_iou': iou_metrics['mean_iou'],
+                    'dice_et': dice_metrics.get('ET_mean', 0.0),
+                    'dice_wt': dice_metrics.get('WT_mean', 0.0),
+                    'dice_tc': dice_metrics.get('TC_mean', 0.0),
+                    'iou_et': iou_metrics.get('ET_mean', 0.0),
+                    'iou_wt': iou_metrics.get('WT_mean', 0.0),
+                    'iou_tc': iou_metrics.get('TC_mean', 0.0)
                 })
                                 
                 # Update progress bar
                 pbar.set_postfix({
                     'loss': f"{loss.item():.4f}",
-                    'dice': f"{dice_metrics['mean']:.4f}",
-                    'iou': f"{iou_metrics['mean_iou']:.4f}",
-                    'bce': f"{bce_loss.item():.4f}"
+                    'WT': f"{dice_metrics.get('WT_mean', 0.0):.1f}%",
+                    'TC': f"{dice_metrics.get('TC_mean', 0.0):.1f}%",
+                    'ET': f"{dice_metrics.get('ET_mean', 0.0):.1f}%"
                 })
                 
                 # Visualize first batch
@@ -1119,132 +1128,228 @@ def validate(model, val_loader, criterion, device, epoch):
             'mean_dice': np.mean([m['mean_dice'] for m in all_metrics]) if all_metrics else 0.0,
             'mean_iou': np.mean([m['mean_iou'] for m in all_metrics]) if all_metrics else 0.0,
             'bce_loss': np.mean([m['bce_loss'] for m in all_metrics]) if all_metrics else 0.0,
-            'dice_loss': np.mean([m['dice_loss'] for m in all_metrics]) if all_metrics else 0.0
-        }
+            'dice_loss': np.mean([m['dice_loss'] for m in all_metrics]) if all_metrics else 0.0,
+            'dice_et': np.mean([m['dice_et'] for m in all_metrics]) if all_metrics else 0.0,
+            'dice_wt': np.mean([m['dice_wt'] for m in all_metrics]) if all_metrics else 0.0,
+            'dice_tc': np.mean([m['dice_tc'] for m in all_metrics]) if all_metrics else 0.0,
+            'iou_et': np.mean([m['iou_et'] for m in all_metrics]) if all_metrics else 0.0,
+            'iou_wt': np.mean([m['iou_wt'] for m in all_metrics]) if all_metrics else 0.0,
+            'iou_tc': np.mean([m['iou_tc'] for m in all_metrics]) if all_metrics else 0.0
+       }
 
-        return avg_loss, avg_metrics
-        
+       return avg_loss, avg_metrics
+
 def visualize_batch(images, masks, outputs, epoch, prefix=""):
-    """
-    Visualize a batch of images, masks, and predictions
-    """
-    # Create results directory
-    os.makedirs("results", exist_ok=True)
-    
-    # Get middle slice of first batch item
-    b = 0
-    depth = images.shape[2]
-    middle_idx = depth // 2
-    
-    # Get slice data
-    image_slice = images[b, :, middle_idx].cpu().detach().numpy()
-    mask_slice = masks[b, :, middle_idx].cpu().detach().numpy()
-    
-    # Apply softmax if outputs are logits
-    if torch.min(outputs) < 0 or torch.max(outputs) > 1:
-        output_slice = F.softmax(outputs[b, :, middle_idx], dim=0).cpu().detach().numpy()
-    else:
-        output_slice = outputs[b, :, middle_idx].cpu().detach().numpy()
-    
-    # Create figure
-    fig, axes = plt.subplots(1, 3, figsize=(12, 4))
-    
-    # Show FLAIR image
-    axes[0].imshow(image_slice[0], cmap='gray')
-    axes[0].set_title('FLAIR')
-    axes[0].axis('off')
-    
-    # Create RGB mask for ground truth
-    rgb_mask = np.zeros((mask_slice.shape[1], mask_slice.shape[2], 3))
-    rgb_mask[mask_slice[1] > 0.5, :] = [1, 1, 0]  # Edema: Yellow
-    rgb_mask[mask_slice[2] > 0.5, :] = [0, 1, 0]  # Non-enhancing: Green
-    rgb_mask[mask_slice[3] > 0.5, :] = [1, 0, 0]  # Enhancing: Red
-    
-    # Show ground truth
-    axes[1].imshow(image_slice[0], cmap='gray')
-    axes[1].imshow(rgb_mask, alpha=0.5)
-    axes[1].set_title('Ground Truth')
-    axes[1].axis('off')
-    
-    # Create RGB mask for prediction
-    rgb_pred = np.zeros((output_slice.shape[1], output_slice.shape[2], 3))
-    rgb_pred[output_slice[1] > 0.5, :] = [1, 1, 0]  # Edema: Yellow
-    rgb_pred[output_slice[2] > 0.5, :] = [0, 1, 0]  # Non-enhancing: Green
-    rgb_pred[output_slice[3] > 0.5, :] = [1, 0, 0]  # Enhancing: Red
-    
-    # Show prediction
-    axes[2].imshow(image_slice[0], cmap='gray')
-    axes[2].imshow(rgb_pred, alpha=0.5)
-    axes[2].set_title('Prediction')
-    axes[2].axis('off')
-    
-    plt.tight_layout()
-    plt.savefig(f"results/{prefix}_epoch{epoch}.png")
-    plt.close()
+   """
+   Visualize a batch of images, masks, and predictions with BraTS class conventions
+   """
+   # Create results directory
+   os.makedirs("results", exist_ok=True)
+   
+   # Get middle slice of first batch item
+   b = 0
+   depth = images.shape[2]
+   middle_idx = depth // 2
+   
+   # Get slice data
+   image_slice = images[b, :, middle_idx].cpu().detach().numpy()
+   mask_slice = masks[b, :, middle_idx].cpu().detach().numpy()
+   
+   # Apply sigmoid if outputs are logits
+   if torch.min(outputs) < 0 or torch.max(outputs) > 1:
+       output_slice = torch.sigmoid(outputs[b, :, middle_idx]).cpu().detach().numpy()
+   else:
+       output_slice = outputs[b, :, middle_idx].cpu().detach().numpy()
+   
+   # Create figure
+   fig, axes = plt.subplots(1, 3, figsize=(12, 4))
+   
+   # Show FLAIR image
+   axes[0].imshow(image_slice[0], cmap='gray')
+   axes[0].set_title('FLAIR')
+   axes[0].axis('off')
+   
+   # Create RGB mask for ground truth
+   # BraTS: 1=NCR (Blue), 2=ED (Green), 4=ET (Red)
+   rgb_mask = np.zeros((mask_slice.shape[1], mask_slice.shape[2], 3))
+   rgb_mask[mask_slice[1] > 0.5, :] = [0, 0, 1]  # NCR: Blue
+   rgb_mask[mask_slice[2] > 0.5, :] = [0, 1, 0]  # ED: Green
+   rgb_mask[mask_slice[3] > 0.5, :] = [1, 0, 0]  # ET: Red
+   
+   # Show ground truth
+   axes[1].imshow(image_slice[0], cmap='gray')
+   axes[1].imshow(rgb_mask, alpha=0.5)
+   axes[1].set_title('Ground Truth')
+   axes[1].axis('off')
+   
+   # Create RGB mask for prediction
+   rgb_pred = np.zeros((output_slice.shape[1], output_slice.shape[2], 3))
+   rgb_pred[output_slice[1] > 0.5, :] = [0, 0, 1]  # NCR: Blue
+   rgb_pred[output_slice[2] > 0.5, :] = [0, 1, 0]  # ED: Green
+   rgb_pred[output_slice[3] > 0.5, :] = [1, 0, 0]  # ET: Red
+   
+   # Show prediction
+   axes[2].imshow(image_slice[0], cmap='gray')
+   axes[2].imshow(rgb_pred, alpha=0.5)
+   axes[2].set_title('Prediction')
+   axes[2].axis('off')
+   
+   plt.tight_layout()
+   plt.savefig(f"results/{prefix}_epoch{epoch}.png")
+   plt.close()
 
 def save_training_history(history, filename):
-    """
-    Save training history plot
-    """
-    plt.figure(figsize=(12, 8))
-    
-    # Plot losses
-    plt.subplot(2, 2, 1)
-    plt.plot(history['train_loss'], label='Train Loss')
-    plt.plot(history['val_loss'], label='Val Loss')
-    plt.xlabel('Epoch')
-    plt.ylabel('Loss')
-    plt.legend()
-    plt.title('Training and Validation Loss')
-    
-    # Plot Dice scores
-    plt.subplot(2, 2, 2)
-    plt.plot(history['train_dice'], label='Train Dice')
-    plt.plot(history['val_dice'], label='Val Dice')
-    plt.xlabel('Epoch')
-    plt.ylabel('Dice Score')
-    plt.legend()
-    plt.title('Mean Dice Score')
-    
-    # If we have BraTS metrics, plot them
-    if 'train_dice_wt' in history:
-        # Plot WT Dice
-        plt.subplot(2, 2, 3)
-        plt.plot(history['train_dice_wt'], label='Train WT')
-        plt.plot(history['val_dice_wt'], label='Val WT')
-        plt.xlabel('Epoch')
-        plt.ylabel('Dice Score')
-        plt.legend()
-        plt.title('Whole Tumor (WT) Dice')
+   """
+   Save training history plot with enhanced BraTS metrics
+   """
+   plt.figure(figsize=(16, 12))
+   
+   # Plot losses
+   plt.subplot(3, 2, 1)
+   plt.plot(history['train_loss'], label='Train Loss')
+   plt.plot(history['val_loss'], label='Val Loss')
+   plt.xlabel('Epoch')
+   plt.ylabel('Loss')
+   plt.legend()
+   plt.title('Training and Validation Loss')
+   
+   # Plot mean Dice scores
+   plt.subplot(3, 2, 2)
+   plt.plot(history['train_dice'], label='Train Mean Dice')
+   plt.plot(history['val_dice'], label='Val Mean Dice')
+   plt.xlabel('Epoch')
+   plt.ylabel('Dice Score (%)')
+   plt.legend()
+   plt.title('Mean Dice Score')
+   
+   # Plot WT Dice scores
+   plt.subplot(3, 2, 3)
+   plt.plot(history['train_dice_wt'], label='Train WT')
+   plt.plot(history['val_dice_wt'], label='Val WT')
+   plt.xlabel('Epoch')
+   plt.ylabel('Dice Score (%)')
+   plt.legend()
+   plt.title('Whole Tumor (WT) Dice Score')
+   
+   # Plot TC Dice scores
+   plt.subplot(3, 2, 4)
+   plt.plot(history['train_dice_tc'], label='Train TC')
+   plt.plot(history['val_dice_tc'], label='Val TC')
+   plt.xlabel('Epoch')
+   plt.ylabel('Dice Score (%)')
+   plt.legend()
+   plt.title('Tumor Core (TC) Dice Score')
+   
+   # Plot ET Dice scores
+   plt.subplot(3, 2, 5)
+   plt.plot(history['train_dice_et'], label='Train ET')
+   plt.plot(history['val_dice_et'], label='Val ET')
+   plt.xlabel('Epoch')
+   plt.ylabel('Dice Score (%)')
+   plt.legend()
+   plt.title('Enhancing Tumor (ET) Dice Score')
+   
+   # Plot Learning Rate
+   plt.subplot(3, 2, 6)
+   plt.plot(history['lr'])
+   plt.xlabel('Epoch')
+   plt.ylabel('Learning Rate')
+   plt.yscale('log')
+   plt.title('Learning Rate Schedule')
+   
+   plt.tight_layout()
+   plt.savefig(f"results/{filename}")
+   plt.close()
+   
+   # Create a second figure for IoU metrics
+   plt.figure(figsize=(16, 12))
+   
+   # Plot mean IoU
+   plt.subplot(2, 2, 1)
+   plt.plot(history['train_iou'], label='Train Mean IoU')
+   plt.plot(history['val_iou'], label='Val Mean IoU')
+   plt.xlabel('Epoch')
+   plt.ylabel('IoU (%)')
+   plt.legend()
+   plt.title('Mean IoU')
+   
+   # Plot WT IoU
+   plt.subplot(2, 2, 2)
+   plt.plot(history['train_iou_wt'], label='Train WT')
+   plt.plot(history['val_iou_wt'], label='Val WT')
+   plt.xlabel('Epoch')
+   plt.ylabel('IoU (%)')
+   plt.legend()
+   plt.title('Whole Tumor (WT) IoU')
+   
+   # Plot TC IoU
+   plt.subplot(2, 2, 3)
+   plt.plot(history['train_iou_tc'], label='Train TC')
+   plt.plot(history['val_iou_tc'], label='Val TC')
+   plt.xlabel('Epoch')
+   plt.ylabel('IoU (%)')
+   plt.legend()
+   plt.title('Tumor Core (TC) IoU')
+   
+   # Plot ET IoU
+   plt.subplot(2, 2, 4)
+   plt.plot(history['train_iou_et'], label='Train ET')
+   plt.plot(history['val_iou_et'], label='Val ET')
+   plt.xlabel('Epoch')
+   plt.ylabel('IoU (%)')
+   plt.legend()
+   plt.title('Enhancing Tumor (ET) IoU')
+   
+   plt.tight_layout()
+   plt.savefig(f"results/{filename.replace('.png', '_iou.png')}")
+   plt.close()
+
+def preprocess_batch(batch, device=None):
+   """
+   Preprocess batch for BraTS segmentation with class labels 0, 1, 2, 4
+   """
+   images, masks = batch
+   
+   # Convert binary masks to multi-class format if needed
+   if masks.shape[1] == 1:
+       # For binary masks, create proper BraTS format with classes 0, 1, 2, 4
+       multi_class_masks = torch.zeros((masks.shape[0], 4, *masks.shape[2:]), dtype=torch.float32)
+       
+       # Class 0: Background (where mask is 0)
+       multi_class_masks[:, 0] = (masks[:, 0] == 0).float()
+       
+       # If we have a binary tumor mask, distribute it to the three tumor classes
+       # This is a simplified approach when we only have tumor/no-tumor labels
+       if torch.sum(masks[:, 0]) > 0:
+           # Use percentages of the tumor mask for each class
+           # Class 1: NCR (Necrotic tumor core)
+           multi_class_masks[:, 1] = (masks[:, 0] * (torch.rand_like(masks[:, 0]) < 0.3)).float()
+           
+           # Class 2: ED (Peritumoral edema)
+           multi_class_masks[:, 2] = (masks[:, 0] * (torch.rand_like(masks[:, 0]) < 0.5)).float()
+           
+           # Class 4 (at index 3): ET (Enhancing tumor)
+           multi_class_masks[:, 3] = (masks[:, 0] * (torch.rand_like(masks[:, 0]) < 0.2)).float()
+       
+       masks = multi_class_masks
+   
+   # Ensure mask values are within expected range
+   masks = torch.clamp(masks, 0, 1)
+   
+   # Move to device if specified
+   if device is not None:
+       images = images.to(device)
+       masks = masks.to(device)
+   
+   return images, masks
+
         
-        # Plot TC and ET Dice
-        plt.subplot(2, 2, 4)
-        plt.plot(history['train_dice_tc'], label='Train TC')
-        plt.plot(history['val_dice_tc'], label='Val TC')
-        plt.plot(history['train_dice_et'], label='Train ET')
-        plt.plot(history['val_dice_et'], label='Val ET')
-        plt.xlabel('Epoch')
-        plt.ylabel('Dice Score')
-        plt.legend()
-        plt.title('Tumor Core (TC) and Enhancing Tumor (ET) Dice')
-    elif 'lr' in history:
-        # Plot learning rate
-        plt.subplot(2, 2, 3)
-        plt.plot(history['lr'])
-        plt.yscale('log')
-        plt.xlabel('Epoch')
-        plt.ylabel('Learning Rate')
-        plt.title('Learning Rate Schedule')
-    
-    plt.tight_layout()
-    plt.savefig(f"results/{filename}")
-    plt.close()
+
 
 def train_model(data_path, batch_size=1, epochs=20, learning_rate=1e-3,
                use_mixed_precision=False, test_run=False, reset=True):
     """
-    Optimized train function with better learning rate schedule
-    Including IoU and BCE loss in history.
+    Optimized train function with BraTS-specific metrics
     """
     # Set device
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -1286,8 +1391,9 @@ def train_model(data_path, batch_size=1, epochs=20, learning_rate=1e-3,
     else:
         print("No existing checkpoint found. Starting from epoch 0.")
     
-    # Define loss criterion
-    criterion = CombinedLoss(dice_weight=0.7, bce_weight=0.3)
+    # Define loss criterion - use our new BraTS-specific loss
+    criterion = BraTSCombinedLoss(dice_weight=0.7, bce_weight=0.2, focal_weight=0.1,
+                                region_weights={'ET': 1.2, 'WT': 1.0, 'TC': 1.0})
     
     # Define optimizer
     optimizer = optim.AdamW(
@@ -1333,12 +1439,18 @@ def train_model(data_path, batch_size=1, epochs=20, learning_rate=1e-3,
         final_div_factor=1000
     )
     
-    # Initialize history with Dice, IoU, and BCE loss
+    # Initialize history with all BraTS-specific metrics
     history = {
         'train_loss': [], 'val_loss': [],
         'train_dice': [], 'val_dice': [],
         'train_iou': [], 'val_iou': [],
         'train_bce': [], 'val_bce': [],
+        'train_dice_et': [], 'val_dice_et': [],
+        'train_dice_wt': [], 'val_dice_wt': [],
+        'train_dice_tc': [], 'val_dice_tc': [],
+        'train_iou_et': [], 'val_iou_et': [],
+        'train_iou_wt': [], 'val_iou_wt': [],
+        'train_iou_tc': [], 'val_iou_tc': [],
         'lr': []
     }
     
@@ -1361,6 +1473,12 @@ def train_model(data_path, batch_size=1, epochs=20, learning_rate=1e-3,
         history['train_dice'].append(train_metrics.get('mean_dice', 0.0))
         history['train_iou'].append(train_metrics.get('mean_iou', 0.0))
         history['train_bce'].append(train_metrics.get('bce_loss', 0.0))
+        history['train_dice_et'].append(train_metrics.get('dice_et', 0.0))
+        history['train_dice_wt'].append(train_metrics.get('dice_wt', 0.0))
+        history['train_dice_tc'].append(train_metrics.get('dice_tc', 0.0))
+        history['train_iou_et'].append(train_metrics.get('iou_et', 0.0))
+        history['train_iou_wt'].append(train_metrics.get('iou_wt', 0.0))
+        history['train_iou_tc'].append(train_metrics.get('iou_tc', 0.0))
         
         # Validate
         try:
@@ -1371,6 +1489,12 @@ def train_model(data_path, batch_size=1, epochs=20, learning_rate=1e-3,
             history['val_dice'].append(val_metrics.get('mean_dice', 0.0))
             history['val_iou'].append(val_metrics.get('mean_iou', 0.0))
             history['val_bce'].append(val_metrics.get('bce_loss', 0.0))
+            history['val_dice_et'].append(val_metrics.get('dice_et', 0.0))
+            history['val_dice_wt'].append(val_metrics.get('dice_wt', 0.0))
+            history['val_dice_tc'].append(val_metrics.get('dice_tc', 0.0))
+            history['val_iou_et'].append(val_metrics.get('iou_et', 0.0))
+            history['val_iou_wt'].append(val_metrics.get('iou_wt', 0.0))
+            history['val_iou_tc'].append(val_metrics.get('iou_tc', 0.0))
 
         except Exception as e:
             print(f"Error during validation: {e}")
@@ -1378,6 +1502,12 @@ def train_model(data_path, batch_size=1, epochs=20, learning_rate=1e-3,
             history['val_dice'].append(0.0)
             history['val_iou'].append(0.0)
             history['val_bce'].append(0.0)
+            history['val_dice_et'].append(0.0)
+            history['val_dice_wt'].append(0.0)
+            history['val_dice_tc'].append(0.0)
+            history['val_iou_et'].append(0.0)
+            history['val_iou_wt'].append(0.0)
+            history['val_iou_tc'].append(0.0)
                 
         # Get current learning rate
         current_lr = optimizer.param_groups[0]['lr']
@@ -1393,6 +1523,12 @@ def train_model(data_path, batch_size=1, epochs=20, learning_rate=1e-3,
         print(f"Epoch {epoch+1}: Train Dice = {train_metrics.get('mean_dice', 0.0):.4f}, IoU = {train_metrics.get('mean_iou', 0.0):.4f}, BCE = {train_metrics.get('bce_loss', 0.0):.4f}")
         print(f"Epoch {epoch+1}: Val Dice = {val_metrics.get('mean_dice', 0.0):.4f}, IoU = {val_metrics.get('mean_iou', 0.0):.4f}, BCE = {val_metrics.get('bce_loss', 0.0):.4f}")
         print(f"Epoch Time: {timedelta(seconds=int(epoch_time))}, Remaining: {timedelta(seconds=int(remaining_time))}")
+        
+        # Print BraTS-specific metrics
+        print("\nRegional Dice Scores:")
+        print(f"  ET: Train={train_metrics.get('dice_et', 0.0):.2f}%, Val={val_metrics.get('dice_et', 0.0):.2f}%")
+        print(f"  WT: Train={train_metrics.get('dice_wt', 0.0):.2f}%, Val={val_metrics.get('dice_wt', 0.0):.2f}%")
+        print(f"  TC: Train={train_metrics.get('dice_tc', 0.0):.2f}%, Val={val_metrics.get('dice_tc', 0.0):.2f}%")
         
         # Save best model based on mean Dice score
         if val_metrics.get('mean_dice', 0.0) > best_dice:
@@ -1430,7 +1566,38 @@ def train_model(data_path, batch_size=1, epochs=20, learning_rate=1e-3,
     
     # Save final training history
     save_training_history(history, "final_training_history.png")
-    print(f"Training complete! Best Dice score: {best_dice:.4f}")
+    
+    # Display final metrics breakdown
+    print("\n" + "="*50)
+    print("Final metrics breakdown:")
+    print("="*50)
+    
+    # Load the best model metrics
+    if os.path.exists(model_path):
+        checkpoint = torch.load(model_path, map_location=device)
+        if 'val_metrics' in checkpoint:
+            val_metrics = checkpoint['val_metrics']
+            
+            # Display region-specific metrics
+            print("\nDice Scores:")
+            for region in ['ET', 'WT', 'TC']:
+                if f'{region}_mean' in val_metrics:
+                    mean_val = val_metrics.get(f'dice_{region.lower()}', 0.0)
+                    median_val = val_metrics.get(f'{region}_median', 0.0)
+                    std_val = val_metrics.get(f'{region}_std', 0.0)
+                    iqr_val = val_metrics.get(f'{region}_iqr', 0.0)
+                    print(f"{region}: Mean={mean_val:.2f}%, Median={median_val:.2f}%, Std={std_val:.2f}%, IQR={iqr_val:.2f}%")
+            
+            print("\nIoU Scores:")
+            for region in ['ET', 'WT', 'TC']:
+                if f'{region}_mean' in val_metrics:
+                    mean_val = val_metrics.get(f'iou_{region.lower()}', 0.0)
+                    median_val = val_metrics.get(f'{region}_median', 0.0)
+                    std_val = val_metrics.get(f'{region}_std', 0.0)
+                    iqr_val = val_metrics.get(f'{region}_iqr', 0.0)
+                    print(f"{region}: Mean={mean_val:.2f}%, Median={median_val:.2f}%, Std={std_val:.2f}%, IQR={iqr_val:.2f}%")
+    
+    print(f"Training complete! Best overall Dice score: {best_dice:.4f}")
 
     return model, history, val_metrics
 
