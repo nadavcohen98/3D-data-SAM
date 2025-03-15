@@ -1,4 +1,5 @@
 #model.py
+# model.py - COMPLETE FIXED VERSION
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -111,66 +112,6 @@ class DecoderBlock3D(nn.Module):
         # Apply residual convolution block
         return self.conv(x)
 
-class EnhancedPartialDecoder3D(nn.Module):
-    """
-    Enhanced mini-decoder for AutoSAM2 that generates rich embeddings for SAM2.
-    This version includes more skip connections and feature enhancement layers
-    to better capture 3D context in the embeddings.
-    """
-    def __init__(self, base_channels=16, trilinear=True):
-        super(EnhancedPartialDecoder3D, self).__init__()
-        
-        # First decoder block (from bottleneck)
-        self.dec1 = DecoderBlock3D(base_channels * 16, base_channels * 4, trilinear=trilinear)  # 8 + 8 = 16
-        
-        # Second decoder block (partial upsampling)
-        self.dec2 = DecoderBlock3D(base_channels * 8, base_channels * 2, trilinear=trilinear)   # 4 + 4 = 8
-        
-        # Feature enhancement layer before projection
-        self.feature_enhancement = nn.Sequential(
-            nn.Conv3d(base_channels * 2, base_channels * 2, kernel_size=3, padding=1),
-            nn.GroupNorm(num_groups=8, num_channels=base_channels * 2),
-            nn.ReLU(inplace=True),
-            nn.Conv3d(base_channels * 2, base_channels * 2, kernel_size=3, padding=1),
-            nn.GroupNorm(num_groups=8, num_channels=base_channels * 2),
-            nn.ReLU(inplace=True)
-        )
-        
-        # Attention mechanism to emphasize important features
-        self.channel_attention = ChannelAttention(base_channels * 2)
-        
-        # Projection to embedding format for SAM2 (256 channels)
-        self.embedding_projection = nn.Conv3d(base_channels * 2, 256, kernel_size=1)
-        
-    def forward(self, x5, x4, x3):
-        """
-        Forward pass for the enhanced partial decoder
-        
-        Args:
-            x5: Bottleneck features
-            x4: Skip connection from encoder level 4
-            x3: Skip connection from encoder level 3
-            
-        Returns:
-            Enhanced embeddings ready for SAM2
-        """
-        # First upsampling
-        x = self.dec1(x5, x4)
-        
-        # Second upsampling
-        x = self.dec2(x, x3)
-        
-        # Apply feature enhancement
-        x = self.feature_enhancement(x)
-        
-        # Apply channel attention
-        x = self.channel_attention(x)
-        
-        # Project to embedding space for SAM2
-        embeddings = self.embedding_projection(x)
-        
-        return embeddings
-
 class ChannelAttention(nn.Module):
     """
     Channel attention module to emphasize important feature channels
@@ -226,10 +167,66 @@ class SpatialAttention(nn.Module):
         # Apply attention weights to input
         return x * attention
 
+class PartialDecoder3D(nn.Module):
+    """
+    Mini-decoder for AutoSAM2 that partially upsamples the encoder features
+    to create rich embeddings for SAM2. Unlike the full UNet3D decoder,
+    this partial decoder only upsamples to an intermediate resolution.
+    """
+    def __init__(self, base_channels=16, trilinear=True):
+        super(PartialDecoder3D, self).__init__()
+        
+        # First decoder block (from bottleneck)
+        self.dec1 = DecoderBlock3D(base_channels * 16, base_channels * 4, trilinear=trilinear)  # 8 + 8 = 16
+        
+        # Second decoder block (partial upsampling)
+        self.dec2 = DecoderBlock3D(base_channels * 8, base_channels * 2, trilinear=trilinear)   # 4 + 4 = 8
+        
+        # Feature enhancement
+        self.feature_enhancement = nn.Sequential(
+            nn.Conv3d(base_channels * 2, base_channels * 2, kernel_size=3, padding=1),
+            nn.GroupNorm(num_groups=8, num_channels=base_channels * 2),
+            nn.ReLU(inplace=True)
+        )
+        
+        # Add channel attention
+        self.channel_attention = ChannelAttention(base_channels * 2)
+        
+        # Projection to embedding format for SAM2 (256 channels)
+        self.embedding_projection = nn.Conv3d(base_channels * 2, 256, kernel_size=1)
+        
+    def forward(self, x5, x4, x3):
+        """
+        Forward pass for the partial decoder
+        
+        Args:
+            x5: Bottleneck features
+            x4: Skip connection from encoder level 4
+            x3: Skip connection from encoder level 3
+            
+        Returns:
+            Partially upsampled features ready for SAM2 embedding
+        """
+        # First upsampling
+        x = self.dec1(x5, x4)
+        
+        # Second upsampling
+        x = self.dec2(x, x3)
+        
+        # Apply feature enhancement
+        x = self.feature_enhancement(x)
+        
+        # Apply channel attention
+        x = self.channel_attention(x)
+        
+        # Project to embedding space for SAM2
+        embeddings = self.embedding_projection(x)
+        
+        return embeddings
+
 class UNet3DEncoder(nn.Module):
     """
-    Enhanced UNet3D Encoder that creates features at different resolutions
-    with improved ability to capture 3D context
+    Enhanced UNet3D Encoder only - creates features at different resolutions
     """
     def __init__(self, in_channels=4, base_channels=16, slice_interval=1):
         super(UNet3DEncoder, self).__init__()
@@ -237,7 +234,7 @@ class UNet3DEncoder(nn.Module):
         # Configuration
         self.in_channels = in_channels
         self.base_channels = base_channels
-        self.slice_interval = slice_interval  # This should be 1 to process all slices
+        self.slice_interval = slice_interval
         
         # Initial convolution block
         self.initial_conv = ResidualBlock3D(in_channels, base_channels)
@@ -248,10 +245,8 @@ class UNet3DEncoder(nn.Module):
         self.enc3 = EncoderBlock3D(base_channels * 4, base_channels * 8)
         self.enc4 = EncoderBlock3D(base_channels * 8, base_channels * 8)  # Keep channel count at 128
         
-        # Add spatial attention at different levels
+        # Add spatial attention
         self.spatial_attention1 = SpatialAttention(kernel_size=7)
-        self.spatial_attention2 = SpatialAttention(kernel_size=5)
-        self.spatial_attention3 = SpatialAttention(kernel_size=3)
     
     def forward(self, x):
         # Get batch dimensions
@@ -262,23 +257,17 @@ class UNet3DEncoder(nn.Module):
         depth_idx = dims.index(min(dims))
         depth = dims[depth_idx]
         
-        # Process ALL slices - we use slice_interval=1
-        # Create a list of all indices along the depth dimension
+        # Process ALL slices instead of key slices
         key_indices = list(range(depth))
         
-        # Encoder pathway with attention
+        # Encoder pathway
         x1 = self.initial_conv(x)  # Full resolution
         x1 = self.spatial_attention1(x1)
         
         x2 = self.enc1(x1)         # 1/2 resolution
-        
         x3 = self.enc2(x2)         # 1/4 resolution
-        x3 = self.spatial_attention2(x3)
-        
         x4 = self.enc3(x3)         # 1/8 resolution
-        
         x5 = self.enc4(x4)         # 1/16 resolution
-        x5 = self.spatial_attention3(x5)
         
         # Calculate downsampled indices for bottleneck
         downsampled_depth = depth // 16  # After 4 encoder blocks
@@ -296,20 +285,15 @@ class UNet3DEncoder(nn.Module):
         # Return all encoder features and metadata
         return x1, x2, x3, x4, x5, metadata
 
-class EnhancedEmbeddingProcessor(nn.Module):
+class EmbeddingProcessor(nn.Module):
     """
-    Enhanced processor for converting 3D embeddings into 2D slices suitable for SAM2
-    with improved feature extraction and normalization
+    Processes 3D embeddings into 2D slices suitable for SAM2
     """
     def __init__(self, embedding_size=64):
-        super(EnhancedEmbeddingProcessor, self).__init__()
-        
-        # Multi-scale feature extraction
-        self.conv1 = nn.Conv2d(256, 128, kernel_size=3, padding=1)
-        self.conv2 = nn.Conv2d(128, 256, kernel_size=3, padding=1)
+        super(EmbeddingProcessor, self).__init__()
         
         # Projection to SAM2-compatible embedding format
-        self.projection = nn.Conv2d(256, 256, kernel_size=1)
+        self.projection = nn.Conv2d(256, 256, kernel_size=3, padding=1)
         
         # Adaptive pooling to ensure correct output size (64x64 for SAM2)
         self.adaptive_pool = nn.AdaptiveAvgPool2d((embedding_size, embedding_size))
@@ -317,18 +301,11 @@ class EnhancedEmbeddingProcessor(nn.Module):
         # Normalization for embeddings
         self.norm = nn.GroupNorm(32, 256)
         self.activation = nn.ReLU(inplace=True)
-        
-        # Channel attention
-        self.channel_attn = nn.Sequential(
-            nn.AdaptiveAvgPool2d(1),
-            nn.Conv2d(256, 64, kernel_size=1),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(64, 256, kernel_size=1),
-            nn.Sigmoid()
-        )
     
     def extract_slice(self, volume, idx, depth_dim=2):
-        """Extract a specific slice from a 3D volume"""
+        """
+        Extract a specific slice from a 3D volume
+        """
         if depth_dim == 0:
             return volume[:, :, idx]
         elif depth_dim == 1:
@@ -346,23 +323,13 @@ class EnhancedEmbeddingProcessor(nn.Module):
             depth_dim: Dimension representing depth
             
         Returns:
-            Enhanced 2D embedding for SAM2 [B, C, 64, 64]
+            2D embedding for SAM2 [B, C, 64, 64]
         """
         # Extract slice
         slice_embedding = self.extract_slice(embeddings_3d, slice_idx, depth_dim)
         
-        # Apply multi-scale feature extraction
-        feat = self.conv1(slice_embedding)
-        feat = self.activation(feat)
-        feat = self.conv2(feat)
-        feat = self.activation(feat)
-        
-        # Apply channel attention
-        channel_weights = self.channel_attn(feat)
-        feat = feat * channel_weights
-        
         # Apply projection
-        slice_embedding = self.projection(feat)
+        slice_embedding = self.projection(slice_embedding)
         
         # Normalize
         slice_embedding = self.norm(slice_embedding)
@@ -421,45 +388,48 @@ class FullUNet3D(nn.Module):
         # Final convolution
         x = self.output_conv(x)
         
-        return x
+        return torch.sigmoid(x)  # Apply sigmoid to get probabilities
 
 class AutoSAM2(nn.Module):
     """
-    Improved AutoSAM2: Adapting SAM2 for 3D Medical Image Segmentation
+    AutoSAM2: Adapting SAM2 for 3D Medical Image Segmentation
     
-    This implementation includes:
-    1. Enhanced embedding generation for better SAM2 integration
-    2. Improved slice processing with multi-point prompts
-    3. Better handling of SAM2 inputs with proper preprocessing
-    4. Slice-by-slice processing with SAM2 across the entire volume
-    5. Compatibility with the existing train.py
+    This implementation uses a 3D UNet encoder, partial decoder to generate
+    embeddings, and SAM2 to complete the segmentation at full resolution.
     """
     def __init__(self, num_classes=4, base_channels=16, slice_interval=1, 
-                 trilinear=True, sam2_model_path=None, enable_sam2=True):
-        super().__init__()
+                 trilinear=True, sam2_model_path=None, enable_sam2=True, debug_mode=False):
+        super(AutoSAM2, self).__init__()
         
         # Store configuration
         self.num_classes = num_classes
-        # Set slice interval to 1 by default to process all slices
-        self.slice_interval = 1  # Changed from slice_interval parameter to always use 1
+        self.slice_interval = 1  # Always process all slices
         self.sam2_model_path = sam2_model_path
         self.enable_sam2 = enable_sam2
+        self.debug_mode = debug_mode
         
-        # Create the UNet3D encoder with improved features
+        # Set debug mode for logging
+        if debug_mode:
+            logger.setLevel(logging.DEBUG)
+            
+        # Create directory for debug visualizations
+        os.makedirs("autosam2_debug", exist_ok=True)
+        
+        # Create the UNet3D encoder
         self.encoder = UNet3DEncoder(
             in_channels=4,
             base_channels=base_channels,
             slice_interval=1  # Always use 1 to process all slices
         )
         
-        # Create the enhanced partial decoder for better embeddings
-        self.partial_decoder = EnhancedPartialDecoder3D(
+        # Create the partial decoder - only goes part way up the resolution ladder
+        self.partial_decoder = PartialDecoder3D(
             base_channels=base_channels,
             trilinear=trilinear
         )
         
-        # Enhanced processor for converting 3D embeddings to 2D slices for SAM2
-        self.embedding_processor = EnhancedEmbeddingProcessor(embedding_size=64)
+        # Processor for converting 3D embeddings to 2D slices for SAM2
+        self.embedding_processor = EmbeddingProcessor(embedding_size=64)
         
         # Initialize SAM2
         self.initialize_sam2()
@@ -473,12 +443,8 @@ class AutoSAM2(nn.Module):
             trilinear=trilinear
         )
         
-        # Create compatibility with train.py
-        # The train.py expects encoder and decoder properties
-        self.decoder = lambda x_tuple: x_tuple[0] if isinstance(x_tuple, tuple) else x_tuple
-        
-        # For fallback compatibility - required by train.py
-        self.has_sam2_enabled = False  # Will be set to True during forward pass if SAM2 is used
+        # For compatibility with train.py
+        self.has_sam2_enabled = False
         
         # Performance tracking
         self.performance_metrics = {
@@ -489,8 +455,23 @@ class AutoSAM2(nn.Module):
             "total_time": []
         }
         
+    # Define decoder method for compatibility with train.py
+    def decoder(self, x_tuple):
+        """
+        Compatibility method for train.py
+        
+        Args:
+            x_tuple: Tuple from the encoder output - we only use the first element
+            
+        Returns:
+            The first element of the tuple (which is the segmentation output from encoder)
+        """
+        if isinstance(x_tuple, tuple):
+            return x_tuple[0]
+        return x_tuple
+        
         logger.info(f"Initialized AutoSAM2 with {base_channels} base channels, "
-                   f"processing ALL slices, SAM2 enabled: {self.has_sam2 if hasattr(self, 'has_sam2') else False}")
+                  f"processing ALL slices, SAM2 enabled: {self.has_sam2 if hasattr(self, 'has_sam2') else False}")
         
     def initialize_sam2(self):
         """Initialize SAM2 with improved approach"""
@@ -505,7 +486,7 @@ class AutoSAM2(nn.Module):
             return
             
         try:
-            # Try using build_sam2_hf directly
+            # Try using build_sam2_hf directly - the approach that worked in tests
             logger.info("Attempting to initialize SAM2 with build_sam2_hf")
             try:
                 model_id = "facebook/sam2-hiera-large"
@@ -528,42 +509,38 @@ class AutoSAM2(nn.Module):
             logger.info("SAM2 initialized successfully")
         else:
             logger.warning("SAM2 initialization failed, will use fallback UNet3D")
-    
+            
     def generate_multi_point_prompts(self, img_shape):
         """
-        Generate multiple point prompts for SAM2 based on the image shape
+        Generate multiple point prompts for better segmentation
         
         Args:
             img_shape: Shape of the image (H, W)
             
         Returns:
-            point_coords: Numpy array of point coordinates
-            point_labels: Numpy array of point labels (1=foreground)
+            point_coords: Point coordinates
+            point_labels: Point labels (1 for foreground)
         """
         h, w = img_shape
         
-        # Generate a grid of points (5x5 grid)
-        grid_size = 5
-        h_step = h // grid_size
-        w_step = w // grid_size
-        
+        # Generate central point and additional grid points
         points = []
+        
         # Center point
         points.append([w//2, h//2])
         
-        # Grid points
-        for i in range(1, grid_size):
-            for j in range(1, grid_size):
-                if (i == grid_size//2 and j == grid_size//2):
-                    # Skip center point (already added)
+        # Grid pattern of 3x3 points
+        step_h, step_w = h // 4, w // 4
+        for i in range(1, 4):
+            for j in range(1, 4):
+                # Skip the center point (already added)
+                if i == 2 and j == 2:
                     continue
-                # Add point only if it's not too close to the edge
-                if i * h_step > h//10 and i * h_step < h*9//10 and j * w_step > w//10 and j * w_step < w*9//10:
-                    points.append([j * w_step, i * h_step])
+                points.append([j * step_w, i * step_h])
         
         # Convert to numpy arrays
         point_coords = np.array(points)
-        point_labels = np.ones(len(points))  # All points are foreground
+        point_labels = np.ones(len(points))  # All are foreground
         
         return point_coords, point_labels
     
@@ -577,21 +554,40 @@ class AutoSAM2(nn.Module):
         Returns:
             Preprocessed numpy array [H, W, 3]
         """
-        # Convert tensor to numpy
-        img_np = img_slice[0, 0].detach().cpu().numpy()
+        # Convert tensor to numpy and handle potential NaNs
+        img_np = torch.nan_to_num(img_slice[0, 0], 0.0).detach().cpu().numpy()
         
-        # Apply contrast enhancement
-        p1, p99 = np.percentile(img_np, (1, 99))
-        img_np = np.clip((img_np - p1) / (p99 - p1 + 1e-8), 0, 1)
+        # Apply contrast enhancement - safely handle potential bad values
+        try:
+            p1, p99 = np.percentile(img_np, (1, 99))
+            if p99 > p1:  # Only normalize if there's a valid range
+                img_np = np.clip((img_np - p1) / (p99 - p1 + 1e-8), 0, 1)
+            else:
+                # If there's not enough contrast, just normalize to [0,1]
+                min_val = np.min(img_np)
+                max_val = np.max(img_np)
+                if max_val > min_val:
+                    img_np = (img_np - min_val) / (max_val - min_val)
+                else:
+                    img_np = np.zeros_like(img_np)
+        except Exception as e:
+            logger.warning(f"Error in contrast enhancement: {e}. Using simple normalization.")
+            # Fallback to simple min-max normalization
+            min_val = np.min(img_np)
+            max_val = np.max(img_np)
+            if max_val > min_val:
+                img_np = (img_np - min_val) / (max_val - min_val)
+            else:
+                img_np = np.zeros_like(img_np)
         
-        # Convert to 3-channel image
+        # Convert to 3-channel image (SAM2 expects 3 channels)
         img_np_3ch = np.stack([img_np, img_np, img_np], axis=2)
         
         return img_np_3ch
-    
+                
     def process_slice_with_sam2(self, img_slice, embedding, slice_idx, device):
         """
-        Process a single 2D slice with SAM2 using improved preprocessing and multi-point prompts
+        Process a single 2D slice with SAM2
         
         Args:
             img_slice: Input slice [B, C, H, W]
@@ -608,8 +604,10 @@ class AutoSAM2(nn.Module):
             height, width = img_slice.shape[2:]
             return torch.zeros((1, self.num_classes, height, width), device=device)
             
-        # Skip processing if the slice is empty (all zeros or nearly all zeros)
-        if img_slice.sum() < 1e-6:
+        # Skip processing if the slice is nearly empty
+        # First replace NaNs with 0s
+        img_check = torch.nan_to_num(img_slice, 0.0)
+        if img_check.sum() < 1e-6:
             logger.info(f"Skipping empty slice {slice_idx}")
             height, width = img_slice.shape[2:]
             return torch.zeros((1, self.num_classes, height, width), device=device)
@@ -637,7 +635,7 @@ class AutoSAM2(nn.Module):
                 )
                 
                 # 4. Select the best mask based on scores
-                best_mask_idx = scores.argmax(0)
+                best_mask_idx = scores.argmax()
                 best_mask = masks[best_mask_idx]
                 
                 # Convert results back to torch tensor
@@ -657,8 +655,6 @@ class AutoSAM2(nn.Module):
             multi_class_mask = torch.zeros((1, self.num_classes, height, width), device=device)
             
             # Use the binary mask for all tumor classes (class 1, 2, 3)
-            # This approach uses the same mask for all tumor classes
-            # For a more advanced approach, we could use different SAM2 prompts for each class
             for c in range(1, self.num_classes):
                 multi_class_mask[:, c] = mask[:, 0]
             
@@ -675,6 +671,74 @@ class AutoSAM2(nn.Module):
             logger.error(f"Error processing slice {slice_idx} with SAM2: {e}")
             height, width = img_slice.shape[2:]
             return torch.zeros((1, self.num_classes, height, width), device=device)
+    
+    def process_all_slices(self, x, embeddings_3d, metadata, device):
+        """
+        Process all slices in the volume with SAM2
+        
+        Args:
+            x: Input volume [B, C, D, H, W]
+            embeddings_3d: Embeddings from partial decoder
+            metadata: Metadata from encoder
+            device: Device for computation
+            
+        Returns:
+            Segmentation volume at full resolution
+        """
+        # Get relevant metadata
+        depth_dim_idx = metadata["depth_dim_idx"]
+        depth = x.shape[2 + depth_dim_idx]
+        
+        # Initialize dictionary to store SAM2 masks
+        sam2_masks = {}
+        
+        # Process each slice in the volume
+        for slice_idx in range(depth):
+            try:
+                # Extract original image slice (use FLAIR, index 0)
+                img_slice = self.embedding_processor.extract_slice(
+                    x, slice_idx, depth_dim_idx
+                )[0:1, 0:1]  # Get first batch item, first channel
+                
+                # Normalize the slice for better visualization
+                img_slice = (img_slice - img_slice.min()) / (img_slice.max() - img_slice.min() + 1e-8)
+                
+                # Find nearest downsampled index in bottleneck
+                ds_slice_idx = min(slice_idx // 16, embeddings_3d.shape[2 + depth_dim_idx] - 1)
+                
+                # Get embedding for this slice
+                embedding = self.embedding_processor(
+                    embeddings_3d, 
+                    ds_slice_idx,
+                    depth_dim_idx
+                )
+                
+                # Process slice with SAM2
+                mask = self.process_slice_with_sam2(img_slice, embedding, slice_idx, device)
+                
+                # Store the mask
+                sam2_masks[slice_idx] = mask
+                
+                # Log progress occasionally
+                if slice_idx % 10 == 0:
+                    logger.info(f"Processed slice {slice_idx}/{depth} with SAM2")
+                    
+            except Exception as e:
+                logger.error(f"Error processing slice {slice_idx}: {e}")
+                # Create an empty mask on error
+                height, width = x.shape[3], x.shape[4]
+                sam2_masks[slice_idx] = torch.zeros((1, self.num_classes, height, width), device=device)
+        
+        # Create full volume from processed slices
+        all_indices = list(range(depth))
+        output = self.improved_volume_from_slices(
+            sam2_masks,
+            (x.shape[0], self.num_classes, *x.shape[2:]),
+            all_indices,
+            depth_dim_idx
+        )
+        
+        return output
     
     def improved_volume_from_slices(self, sam2_masks, volume_shape, slice_indices, depth_dim_idx):
         """
@@ -705,9 +769,12 @@ class AutoSAM2(nn.Module):
             else:  # default to dim 2
                 volume[:, :, :, :, slice_idx] = mask
         
-        # Improved interpolation between processed slices
-        # Sort slice indices for proper interpolation
-        sorted_indices = sorted(slice_indices)
+        # If we processed all slices (no interpolation needed), return the volume
+        if len(slice_indices) == depth:
+            return volume
+            
+        # Otherwise, for any missing slices, perform interpolation
+        sorted_indices = sorted(list(sam2_masks.keys()))
         
         # For each pair of adjacent processed slices
         for i in range(len(sorted_indices) - 1):
@@ -729,23 +796,15 @@ class AutoSAM2(nn.Module):
                 start_mask = volume[:, :, :, :, start_idx]
                 end_mask = volume[:, :, :, :, end_idx]
             
-            # Compute distance weights for non-linear interpolation
-            # This creates a sigmoid-like weighting instead of linear
-            # to better preserve boundaries
-            delta = end_idx - start_idx
-            
             # Interpolate for each slice in between
             for j in range(start_idx + 1, end_idx):
-                # Calculate interpolation weight with sigmoid curve
-                # This gives smoother transitions at mask boundaries
-                t = (j - start_idx) / delta  # normalized position
-                alpha = 1 / (1 + np.exp(-10 * (t - 0.5)))  # sigmoid weighting
+                # Calculate linear interpolation weight
+                alpha = (j - start_idx) / (end_idx - start_idx)
                 
                 # Apply weighted combination
                 interp_mask = (1 - alpha) * start_mask + alpha * end_mask
                 
-                # Apply a threshold to prevent gradient artifacts
-                # This ensures clean binary masks after interpolation
+                # Threshold for clean binary masks
                 interp_mask = (interp_mask > 0.5).float()
                 
                 # Assign to volume
@@ -757,7 +816,6 @@ class AutoSAM2(nn.Module):
                     volume[:, :, :, :, j] = interp_mask
         
         return volume
-
 
 #dataset.py
 import os
