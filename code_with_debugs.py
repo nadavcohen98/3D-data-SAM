@@ -1,4 +1,4 @@
-# model.py
+# model.py - Integrated AutoSAM2 Implementation with Proper Modules
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -111,6 +111,113 @@ class DecoderBlock3D(nn.Module):
         # Apply residual convolution block
         return self.conv(x)
 
+class UNet3DEncoder(nn.Module):
+    """
+    UNet3D Encoder as a proper module that can be used with optimizer.parameters()
+    """
+    def __init__(self, in_channels=4, base_channels=16):
+        super(UNet3DEncoder, self).__init__()
+        
+        # Configuration
+        self.in_channels = in_channels
+        self.base_channels = base_channels
+        
+        # Initial convolution block
+        self.initial_conv = ResidualBlock3D(in_channels, base_channels)
+        
+        # Encoder pathway
+        self.enc1 = EncoderBlock3D(base_channels, base_channels * 2)
+        self.enc2 = EncoderBlock3D(base_channels * 2, base_channels * 4)
+        self.enc3 = EncoderBlock3D(base_channels * 4, base_channels * 8)
+        self.enc4 = EncoderBlock3D(base_channels * 8, base_channels * 8)  # Keep channel count at 128
+    
+    def forward(self, x):
+        """
+        Forward pass through the encoder - returns features for skip connections and metadata
+        """
+        # Get batch dimensions
+        batch_size, channels, dim1, dim2, dim3 = x.shape
+        
+        # Identify depth dimension (smallest one)
+        dims = [dim1, dim2, dim3]
+        depth_dim_idx = dims.index(min(dims))
+        depth = dims[depth_dim_idx]
+        
+        # Process ALL slices - create a list of all indices
+        key_indices = list(range(depth))
+        
+        # Encoder pathway
+        x1 = self.initial_conv(x)         # Full resolution
+        x2 = self.enc1(x1)                # 1/2 resolution
+        x3 = self.enc2(x2)                # 1/4 resolution
+        x4 = self.enc3(x3)                # 1/8 resolution
+        x5 = self.enc4(x4)                # 1/16 resolution
+        
+        # Calculate downsampled indices for bottleneck
+        downsampled_depth = depth // 16  # After 4 encoder blocks
+        ds_key_indices = [min(idx // 16, downsampled_depth-1) for idx in key_indices]
+        
+        # Store metadata for key slice processing
+        metadata = {
+            "key_indices": key_indices,
+            "ds_key_indices": ds_key_indices,
+            "depth_dim_idx": depth_dim_idx,
+            "original_shape": x.shape,
+            "bottleneck_shape": x5.shape
+        }
+        
+        # Return all encoder features and metadata
+        return x1, x2, x3, x4, x5, metadata
+
+class UNet3DDecoder(nn.Module):
+    """
+    UNet3D Decoder as a proper module that can be used with optimizer.parameters()
+    """
+    def __init__(self, base_channels=16, n_classes=4, trilinear=True):
+        super(UNet3DDecoder, self).__init__()
+        
+        # Configuration
+        self.base_channels = base_channels
+        self.n_classes = n_classes
+        
+        # Decoder pathway with skip connections
+        self.dec1 = DecoderBlock3D(base_channels * 16, base_channels * 4, trilinear=trilinear)  # 8 + 8 = 16
+        self.dec2 = DecoderBlock3D(base_channels * 8, base_channels * 2, trilinear=trilinear)   # 4 + 4 = 8
+        self.dec3 = DecoderBlock3D(base_channels * 4, base_channels, trilinear=trilinear)       # 2 + 2 = 4
+        self.dec4 = DecoderBlock3D(base_channels * 2, base_channels, trilinear=trilinear)       # 1 + 1 = 2
+        
+        # Final output layer
+        self.output_conv = nn.Conv3d(base_channels, n_classes, kernel_size=1)
+    
+    def forward(self, encoder_outputs):
+        """
+        Forward pass through the decoder.
+        
+        Args:
+            encoder_outputs: Tuple (x1, x2, x3, x4, x5, metadata) from encoder
+        
+        Returns:
+            Segmentation probability maps
+        """
+        # If not a tuple, return as is (for compatibility)
+        if not isinstance(encoder_outputs, tuple):
+            return encoder_outputs
+        
+        # Unpack encoder outputs
+        x1, x2, x3, x4, x5, metadata = encoder_outputs
+        
+        # Decoder pathway
+        x = self.dec1(x5, x4)
+        x = self.dec2(x, x3)
+        x = self.dec3(x, x2)
+        x = self.dec4(x, x1)
+        
+        # Final convolution
+        x = self.output_conv(x)
+        
+        # Apply sigmoid to get probabilities
+        return torch.sigmoid(x)
+
 class EmbeddingProcessor(nn.Module):
     """
     Processes 3D embeddings into 2D slices suitable for SAM2
@@ -163,14 +270,13 @@ class AutoSAM2(nn.Module):
     Integrated AutoSAM2 model that combines UNet3D with SAM2 integration points.
     Features a single integrated architecture with optional SAM2 branches.
     """
-
     def __init__(self, in_channels=4, num_classes=4, base_channels=16, 
                  trilinear=True, sam2_model_path=None, enable_sam2=True, debug_mode=False):
         super(AutoSAM2, self).__init__()
         
         # Store configuration
         self.in_channels = in_channels
-        self.n_classes = num_classes
+        self.num_classes = num_classes
         self.base_channels = base_channels
         self.sam2_model_path = sam2_model_path
         self.enable_sam2 = enable_sam2
@@ -183,12 +289,9 @@ class AutoSAM2(nn.Module):
         # Create directory for debug visualizations
         os.makedirs("autosam2_debug", exist_ok=True)
         
-        # Main Encoder Blocks
-        self.initial_conv = ResidualBlock3D(in_channels, base_channels)
-        self.enc1 = EncoderBlock3D(base_channels, base_channels * 2)
-        self.enc2 = EncoderBlock3D(base_channels * 2, base_channels * 4)
-        self.enc3 = EncoderBlock3D(base_channels * 4, base_channels * 8)
-        self.enc4 = EncoderBlock3D(base_channels * 8, base_channels * 8)
+        # Create proper encoder and decoder modules for optimizer compatibility
+        self.encoder = UNet3DEncoder(in_channels, base_channels)
+        self.decoder = UNet3DDecoder(base_channels, num_classes, trilinear)
         
         # SAM2 Integration Components
         # Projection to create embeddings for SAM2 at bottleneck level
@@ -199,33 +302,6 @@ class AutoSAM2(nn.Module):
         
         # Initialize SAM2
         self.initialize_sam2()
-        
-        # Main Decoder Blocks
-        self.dec1 = DecoderBlock3D(base_channels * 16, base_channels * 4, trilinear=trilinear)
-        self.dec2 = DecoderBlock3D(base_channels * 8, base_channels * 2, trilinear=trilinear)
-        self.dec3 = DecoderBlock3D(base_channels * 4, base_channels, trilinear=trilinear)
-        self.dec4 = DecoderBlock3D(base_channels * 2, base_channels, trilinear=trilinear)
-        
-        # Final output layer
-        self.output_conv = nn.Conv3d(base_channels, num_classes, kernel_size=1)
-        
-        # Create encoder and decoder modules for compatibility with train.py
-        # These are needed for accessing .parameters() in the optimizer
-        self.encoder = nn.ModuleList([
-            self.initial_conv,
-            self.enc1,
-            self.enc2,
-            self.enc3,
-            self.enc4
-        ])
-        
-        self.decoder = nn.ModuleList([
-            self.dec1,
-            self.dec2,
-            self.dec3,
-            self.dec4,
-            self.output_conv
-        ])
         
         # For compatibility with train.py
         self.has_sam2_enabled = False
@@ -240,9 +316,7 @@ class AutoSAM2(nn.Module):
         }
         
         logger.info(f"Initialized AutoSAM2 with {base_channels} base channels, SAM2 enabled: {self.has_sam2 if hasattr(self, 'has_sam2') else False}")
-
-
-                 
+        
     def initialize_sam2(self):
         """Initialize SAM2 with improved approach"""
         self.has_sam2 = False
@@ -345,14 +419,14 @@ class AutoSAM2(nn.Module):
             logger.warning(f"SAM2 not available for slice {slice_idx}. Using fallback.")
             # Return placeholder if SAM2 not available
             height, width = img_slice.shape[2:]
-            return torch.zeros((1, self.n_classes, height, width), device=device)
+            return torch.zeros((1, self.num_classes, height, width), device=device)
         
         # Skip processing if the slice is empty
         img_check = torch.nan_to_num(img_slice, 0.0)
         if img_check.sum() < 1e-6:
             logger.info(f"Skipping empty slice {slice_idx}")
             height, width = img_slice.shape[2:]
-            return torch.zeros((1, self.n_classes, height, width), device=device)
+            return torch.zeros((1, self.num_classes, height, width), device=device)
             
         try:
             logger.info(f"Processing slice {slice_idx} with SAM2")
@@ -390,14 +464,14 @@ class AutoSAM2(nn.Module):
                 logger.error(f"Error in SAM2 prediction: {e}")
                 # Return empty mask on error
                 height, width = img_slice.shape[2:]
-                return torch.zeros((1, self.n_classes, height, width), device=device)
+                return torch.zeros((1, self.num_classes, height, width), device=device)
             
             # Reshape mask to match expected output format [B, C, H, W]
             height, width = mask.shape[2:]
-            multi_class_mask = torch.zeros((1, self.n_classes, height, width), device=device)
+            multi_class_mask = torch.zeros((1, self.num_classes, height, width), device=device)
             
             # Use the binary mask for all tumor classes (class 1, 2, 3)
-            for c in range(1, self.n_classes):
+            for c in range(1, self.num_classes):
                 multi_class_mask[:, c] = mask[:, 0]
             
             # Track time
@@ -412,7 +486,7 @@ class AutoSAM2(nn.Module):
         except Exception as e:
             logger.error(f"Error processing slice {slice_idx} with SAM2: {e}")
             height, width = img_slice.shape[2:]
-            return torch.zeros((1, self.n_classes, height, width), device=device)
+            return torch.zeros((1, self.num_classes, height, width), device=device)
     
     def create_combined_volume(self, orig_volume, sam2_masks, selected_indices, depth_dim_idx):
         """
@@ -470,14 +544,8 @@ class AutoSAM2(nn.Module):
         # === ENCODER PATH (Same for both modes) ===
         # This is always executed
         encoder_start = time.time()
-        
-        # Encoder pathway
-        x1 = self.initial_conv(x)         # Full resolution
-        x2 = self.enc1(x1)                # 1/2 resolution
-        x3 = self.enc2(x2)                # 1/4 resolution
-        x4 = self.enc3(x3)                # 1/8 resolution
-        x5 = self.enc4(x4)                # 1/16 resolution
-        
+        encoder_outputs = self.encoder(x)
+        x1, x2, x3, x4, x5, metadata = encoder_outputs
         encoder_time = time.time() - encoder_start
         self.performance_metrics["encoder_time"].append(encoder_time)
         
@@ -527,19 +595,7 @@ class AutoSAM2(nn.Module):
         # === DECODER PATH (Same for both modes) ===
         # This is always executed
         decoder_start = time.time()
-        
-        # Decoder pathway
-        x = self.dec1(x5, x4)
-        x = self.dec2(x, x3)
-        x = self.dec3(x, x2)
-        x = self.dec4(x, x1)
-        
-        # Final convolution
-        x = self.output_conv(x)
-        
-        # Apply sigmoid to get probabilities
-        unet_output = torch.sigmoid(x)
-        
+        unet_output = self.decoder(encoder_outputs)
         decoder_time = time.time() - decoder_start
         self.performance_metrics["decoder_time"].append(decoder_time)
         
@@ -588,65 +644,6 @@ class AutoSAM2(nn.Module):
             stats["total_forward_passes"] = len(self.performance_metrics["total_time"])
         
         return stats
-        
-    # Compatibility method for train.py
-    def encoder(self, x):
-        """
-        For compatibility with train.py - mimics the encoder part
-        """
-        # Encoder pathway
-        x1 = self.initial_conv(x)
-        x2 = self.enc1(x1)
-        x3 = self.enc2(x2)
-        x4 = self.enc3(x3)
-        x5 = self.enc4(x4)
-        
-        # Get metadata
-        batch_size, channels, dim1, dim2, dim3 = x.shape
-        dims = [dim1, dim2, dim3]
-        depth_dim_idx = dims.index(min(dims))
-        depth = dims[depth_dim_idx]
-        
-        # Process ALL slices - create a list of all indices
-        key_indices = list(range(depth))
-        
-        # Calculate downsampled indices for bottleneck
-        downsampled_depth = depth // 16  # After 4 encoder blocks
-        ds_key_indices = [min(idx // 16, downsampled_depth-1) for idx in key_indices]
-        
-        # Store metadata for key slice processing
-        metadata = {
-            "key_indices": key_indices,
-            "ds_key_indices": ds_key_indices,
-            "depth_dim_idx": depth_dim_idx,
-            "original_shape": x.shape,
-            "bottleneck_shape": x5.shape
-        }
-        
-        return x1, x2, x3, x4, x5, metadata
-    
-    def decoder(self, encoder_outputs):
-        """
-        For compatibility with train.py - mimics the decoder part
-        """
-        # If not a tuple, just return as is
-        if not isinstance(encoder_outputs, tuple):
-            return encoder_outputs
-        
-        # Unpack encoder outputs
-        x1, x2, x3, x4, x5, metadata = encoder_outputs
-        
-        # Decoder pathway
-        x = self.dec1(x5, x4)
-        x = self.dec2(x, x3)
-        x = self.dec3(x, x2)
-        x = self.dec4(x, x1)
-        
-        # Final convolution
-        x = self.output_conv(x)
-        
-        # Apply sigmoid to get probabilities
-        return torch.sigmoid(x)
 
 print("=== MODEL.PY LOADED SUCCESSFULLY ===")
 
