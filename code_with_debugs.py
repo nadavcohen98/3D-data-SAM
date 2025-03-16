@@ -890,7 +890,7 @@ class AutoSAM2(nn.Module):
         self.has_sam2_enabled = False
         
         # Control flag for SAM2 path
-        use_sam2_path = True  # Set to True when ready to use full SAM2 integration
+        use_sam2_path = False  # Set to True when ready to use full SAM2 integration
         
         # Check if we should use SAM2 or fallback mode
         if not use_sam2_path or not hasattr(self, 'has_sam2') or not self.has_sam2:
