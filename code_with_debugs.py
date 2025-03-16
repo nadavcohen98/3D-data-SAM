@@ -605,7 +605,7 @@ class AutoSAM2(nn.Module):
         depth = x.shape[2 + depth_dim_idx]
         
         # Define specific slices to process with SAM2
-        selected_indices = [5, 15, 25, 35, 45, 55, 63, 70, 77, 84, 91, 98, 106, 114, 124, 134, 144, 154]
+        selected_indices = [5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60, 63, 66, 69, 72, 75, 76, 77, 78, 79, 80, 83, 86, 89, 92, 95, 98, 101, 104, 109, 114, 119, 124, 129, 134, 139, 144, 149, 154]
         # Filter indices that are within range for this volume
         selected_indices = [idx for idx in selected_indices if idx < depth]
         
