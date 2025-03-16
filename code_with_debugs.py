@@ -1,5 +1,5 @@
-#model.py
-def forward(self, x):
+print("=== MODEL.PY LOADED SUCCESSFULLY ===")
+    def forward(self, x):
         """
         Forward pass using UNet3D encoder + partial decoder -> SAM2
         or fallback UNet3D model
@@ -57,7 +57,7 @@ def forward(self, x):
         logger.info(f"Forward pass completed in {total_time:.4f}s")
         
         return output
-    
+        
     def get_performance_stats(self):
         """Get performance statistics for the model"""
         stats = {
@@ -158,7 +158,7 @@ def forward(self, x):
                 else:  # default to dim 2
                     volume[:, :, :, :, j] = interp_mask
         
-        return volume# model.py - Complete version with full SAM2 integration
+        return volume# model.py - Complete version with fixed indentation
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
