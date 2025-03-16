@@ -292,7 +292,6 @@ class AutoSAM2(nn.Module):
         self, 
         num_classes=4, 
         base_channels=16, 
-        slice_interval=10, 
         trilinear=True,
         enable_unet_decoder=True,
         enable_sam2=True,
@@ -312,7 +311,6 @@ class AutoSAM2(nn.Module):
             in_channels=4,
             n_classes=num_classes,
             base_channels=base_channels,
-            slice_interval=slice_interval,
             trilinear=trilinear
         )
         
