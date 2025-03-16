@@ -146,95 +146,88 @@ class FlexibleUNet3D(nn.Module):
         # Projection for SAM2 embeddings (from mid-decoder features)
         self.sam_projection = nn.Conv3d(base_channels * 2, 256, kernel_size=1)
     
-    def forward(self, x, use_full_decoder=True):
-        """
-        Forward pass with flexible options
-        
-        Args:
-            x: Input volume
-            use_full_decoder: If True, use the full UNet3D decoder. If False, stop at mid-decoder.
-        
-        Returns:
-            Tuple containing:
-            - Segmentation output (if use_full_decoder=True, otherwise None)
-            - Mid-decoder features (at 64x64 resolution)
-            - Metadata (depth info, indices, etc.)
-        """
-        # Get batch dimensions
-        batch_size, channels, dim1, dim2, dim3 = x.shape
-        
-        # Identify depth dimension (smallest one)
-        dims = [dim1, dim2, dim3]
-        depth_idx = dims.index(min(dims))
-        depth = dims[depth_idx]
-        
-        # Log volume dimensions and slice count
-        logger.info(f"Volume shape: {x.shape}, depth dimension: {depth_idx}")
-        logger.info(f"Number of slices in this volume: {depth}")
-        
-        # Hardcoded slices that work well for tumor detection
-        preset_key_indices = [5, 15, 25, 35, 45, 55, 63, 69, 72, 75, 76, 77, 78, 79, 82, 
-                              85, 89, 94, 98, 102, 107, 114, 124, 134, 144, 154]
-        
-        # Filter out indices that would be out of bounds for this volume
-        key_indices = [idx for idx in preset_key_indices if idx < depth]
-        
-        # Make sure we have at least some slices
-        if not key_indices:
-            # Fallback selection if none of our preferred slices fit
-            middle_idx = depth // 2
-            key_indices = [
-                0,  # First slice
-                max(0, middle_idx - 5),  # Before middle
-                middle_idx,  # Middle slice
-                min(depth - 1, middle_idx + 5),  # After middle
-                depth - 1  # Last slice
-            ]
-        
-        # Log selected slices
-        logger.info(f"Selected {len(key_indices)} slices: {key_indices}")
-        
-        # Encoder pathway
-        x1 = self.initial_conv(x)         # Full resolution features
-        x2 = self.enc1(x1)                # 1/2 resolution
-        x3 = self.enc2(x2)                # 1/4 resolution
-        x4 = self.enc3(x3)                # 1/8 resolution
-        x5 = self.enc4(x4)                # 1/16 resolution (bottleneck)
-        
-        # Early decoder stages (to reach mid-decoder features)
-        dec_out1 = self.dec1(x5, x4)      # 1/8 resolution
-        dec_out2 = self.dec2(dec_out1, x3)  # 1/4 resolution = ~64x64
-        
-        # Generate SAM2 embeddings from mid-decoder features
-        sam_embeddings = self.sam_projection(dec_out2)
-        
-        # Calculate downsampled indices for bottleneck reference
-        downsampled_depth = depth // 4  # At 1/4 resolution
-        ds_key_indices = [min(idx // 4, downsampled_depth-1) for idx in key_indices]
-        
-        # Store metadata
-        metadata = {
-            "key_indices": key_indices,
-            "ds_key_indices": ds_key_indices,
-            "depth_dim_idx": depth_idx,
-            "mid_decoder_shape": dec_out2.shape
-        }
-        
-        # If not using full decoder, return mid-decoder features
-        if not use_full_decoder:
-            return None, dec_out2, sam_embeddings, metadata
-        
-        # Late decoder stages (after 64x64 resolution)
-        dec_out3 = self.dec3(dec_out2, x2)
-        dec_out4 = self.dec4(dec_out3, x1)
-        
-        # Final convolution
-        output = self.output_conv(dec_out4)
-        
-        # Apply sigmoid for probability output
-        segmentation = torch.sigmoid(output)
-        
-        return segmentation, dec_out2, sam_embeddings, metadata
+def forward(self, x, use_full_decoder=True):
+    """
+    Forward pass with flexible options
+    """
+    # Get batch dimensions
+    batch_size, channels, dim1, dim2, dim3 = x.shape
+    
+    # Identify depth dimension (smallest one)
+    dims = [dim1, dim2, dim3]
+    depth_idx = dims.index(min(dims))
+    depth = dims[depth_idx]
+    
+    # Ultra-defensive slice selection
+    # Select only slices that are guaranteed to be within bounds
+    max_slice_idx = depth - 1  # Maximum valid index
+    
+    # Generate slices based on the actual depth
+    key_indices = []
+    
+    # Add slices at fixed percentages of the depth
+    percentages = [0.1, 0.2, 0.3, 0.35, 0.4, 0.44, 0.47, 0.485 0.5,0.515, 0.53, 0.56 , 0.6, 0.65, 0.7, 0.8, 0.9]
+    for p in percentages:
+        idx = min(int(depth * p), max_slice_idx)
+        if idx not in key_indices:
+            key_indices.append(idx)
+    
+    # Add extra slices around the middle if possible
+    middle = depth // 2
+    extra_indices = []
+    for offset in [-5, -3, -2, -1, 1, 2, 3, 5]:
+        idx = middle + offset
+        if 0 <= idx <= max_slice_idx and idx not in key_indices:
+            extra_indices.append(idx)
+    
+    # Sort all indices
+    key_indices.extend(extra_indices)
+    key_indices.sort()
+    
+    # Rest of the function remains the same...
+    # Encoder pathway
+    x1 = self.initial_conv(x)
+    x2 = self.enc1(x1)
+    x3 = self.enc2(x2)
+    x4 = self.enc3(x3)
+    x5 = self.enc4(x4)
+    
+    # Early decoder stages
+    dec_out1 = self.dec1(x5, x4)
+    dec_out2 = self.dec2(dec_out1, x3)
+    
+    # Generate SAM2 embeddings
+    sam_embeddings = self.sam_projection(dec_out2)
+    
+    # Calculate downsampled indices safely
+    downsampled_depth = max(1, depth // 4)  # Prevent divide by zero
+    ds_key_indices = [min(idx // 4, downsampled_depth-1) for idx in key_indices]
+    
+    # Store metadata
+    metadata = {
+        "key_indices": key_indices,
+        "ds_key_indices": ds_key_indices,
+        "depth_dim_idx": depth_idx,
+        "mid_decoder_shape": dec_out2.shape
+    }
+    
+    # If not using full decoder, return mid-decoder features
+    if not use_full_decoder:
+        return None, dec_out2, sam_embeddings, metadata
+    
+    # Late decoder stages
+    dec_out3 = self.dec3(dec_out2, x2)
+    dec_out4 = self.dec4(dec_out3, x1)
+    
+    # Final convolution
+    output = self.output_conv(dec_out4)
+    
+    # Apply sigmoid
+    segmentation = torch.sigmoid(output)
+    
+    return segmentation, dec_out2, sam_embeddings, metadata
+
+
 
 # ======= SAM2 integration components =======
 
