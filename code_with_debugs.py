@@ -1,4 +1,4 @@
-# model.py
+# model.py - Integrated AutoSAM2 Implementation
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -10,7 +10,7 @@ import os
 
 # Configure logging
 logging.basicConfig(
-    level=logging.WARNING,
+    level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
         logging.FileHandler("autosam2.log"),
@@ -111,97 +111,6 @@ class DecoderBlock3D(nn.Module):
         # Apply residual convolution block
         return self.conv(x)
 
-class UNet3DEncoder(nn.Module):
-    """
-    UNet3D Encoder that creates features at different resolutions
-    """
-    def __init__(self, in_channels=4,  n_classes=4, base_channels=16, slice_interval=10,  trilinear=True):
-        super(UNet3DEncoder, self).__init__()
-        
-        # Configuration
-        self.in_channels = in_channels
-        self.n_classes = n_classes
-        self.base_channels = base_channels
-        self.slice_interval = slice_interval
-        
-        # Initial convolution block
-        self.initial_conv = ResidualBlock3D(in_channels, base_channels)
-        
-        # Encoder pathway
-        self.enc1 = EncoderBlock3D(base_channels, base_channels * 2)
-        self.enc2 = EncoderBlock3D(base_channels * 2, base_channels * 4)
-        self.enc3 = EncoderBlock3D(base_channels * 4, base_channels * 8)
-        self.enc4 = EncoderBlock3D(base_channels * 8, base_channels * 8)  # Keep channel count at 128
-    
-    def forward(self, x):
-        """
-        Forward pass through the encoder - returns features for skip connections and metadata
-        """
-        # Get batch dimensions
-        batch_size, channels, dim1, dim2, dim3 = x.shape
-        
-        # Identify depth dimension (smallest one)
-        dims = [dim1, dim2, dim3]
-        depth_idx = dims.index(min(dims))
-        depth = dims[depth_idx]
-        
-        # Process ALL slices - create a list of all indices
-        key_indices = list(range(depth))
-        
-        # Encoder pathway
-        x1 = self.initial_conv(x)         # Full resolution
-        x2 = self.enc1(x1)                # 1/2 resolution
-        x3 = self.enc2(x2)                # 1/4 resolution
-        x4 = self.enc3(x3)                # 1/8 resolution
-        x5 = self.enc4(x4)                # 1/16 resolution
-        
-        # Calculate downsampled indices for bottleneck
-        downsampled_depth = depth // 16  # After 4 encoder blocks
-        ds_key_indices = [min(idx // 16, downsampled_depth-1) for idx in key_indices]
-        
-        # Store metadata for key slice processing
-        metadata = {
-            "key_indices": key_indices,
-            "ds_key_indices": ds_key_indices,
-            "depth_dim_idx": depth_idx,
-            "original_shape": x.shape,
-            "bottleneck_shape": x5.shape
-        }
-        
-        # Return all encoder features and metadata
-        return x1, x2, x3, x4, x5, metadata
-
-class PartialDecoder3D(nn.Module):
-    """
-    Mini-decoder for AutoSAM2 that partially upsamples the encoder features
-    """
-    def __init__(self, base_channels=16, trilinear=True):
-        super(PartialDecoder3D, self).__init__()
-        
-        # First decoder block (from bottleneck)
-        self.dec1 = DecoderBlock3D(base_channels * 16, base_channels * 4, trilinear=trilinear)  # 8 + 8 = 16
-        
-        # Second decoder block (partial upsampling)
-        self.dec2 = DecoderBlock3D(base_channels * 8, base_channels * 2, trilinear=trilinear)   # 4 + 4 = 8
-        
-        # Projection to embedding format for SAM2 (256 channels)
-        self.embedding_projection = nn.Conv3d(base_channels * 2, 256, kernel_size=1)
-        
-    def forward(self, x5, x4, x3):
-        """
-        Forward pass for the partial decoder
-        """
-        # First upsampling
-        x = self.dec1(x5, x4)
-        
-        # Second upsampling
-        x = self.dec2(x, x3)
-        
-        # Project to embedding space for SAM2
-        embeddings = self.embedding_projection(x)
-        
-        return embeddings
-
 class EmbeddingProcessor(nn.Module):
     """
     Processes 3D embeddings into 2D slices suitable for SAM2
@@ -249,68 +158,19 @@ class EmbeddingProcessor(nn.Module):
         
         return slice_embedding
 
-class FullUNet3D(nn.Module):
-    """
-    Complete UNet3D model with full encoder and decoder
-    Compatible with version 7
-    """
-    def __init__(self, in_channels=4, n_classes=4, base_channels=16 ,trilinear=True):
-        super(FullUNet3D, self).__init__()
-        
-        # Configuration
-        self.in_channels = in_channels
-        self.n_classes = n_classes
-        self.base_channels = base_channels
-        
-        # Initial convolution block
-        self.initial_conv = ResidualBlock3D(in_channels, base_channels)
-        
-        # Encoder pathway
-        self.enc1 = EncoderBlock3D(base_channels, base_channels * 2)
-        self.enc2 = EncoderBlock3D(base_channels * 2, base_channels * 4)
-        self.enc3 = EncoderBlock3D(base_channels * 4, base_channels * 8)
-        self.enc4 = EncoderBlock3D(base_channels * 8, base_channels * 8)  # Keep channel count at 128
-        
-        # Decoder pathway with skip connections
-        self.dec1 = DecoderBlock3D(base_channels * 16, base_channels * 4, trilinear=trilinear)  # 8 + 8 = 16
-        self.dec2 = DecoderBlock3D(base_channels * 8, base_channels * 2, trilinear=trilinear)   # 4 + 4 = 8
-        self.dec3 = DecoderBlock3D(base_channels * 4, base_channels, trilinear=trilinear)       # 2 + 2 = 4
-        self.dec4 = DecoderBlock3D(base_channels * 2, base_channels, trilinear=trilinear)       # 1 + 1 = 2
-        
-        # Final output layer
-        self.output_conv = nn.Conv3d(base_channels, n_classes, kernel_size=1)
-    
-    def forward(self, x):
-        # Encoder pathway
-        x1 = self.initial_conv(x)
-        x2 = self.enc1(x1)
-        x3 = self.enc2(x2)
-        x4 = self.enc3(x3)
-        x5 = self.enc4(x4)
-        
-        # Decoder pathway
-        x = self.dec1(x5, x4)
-        x = self.dec2(x, x3)
-        x = self.dec3(x, x2)
-        x = self.dec4(x, x1)
-        
-        # Final convolution
-        x = self.output_conv(x)
-        
-        return torch.sigmoid(x)  # Apply sigmoid to get probabilities
-
 class AutoSAM2(nn.Module):
     """
-    AutoSAM2: Adapting SAM2 for 3D Medical Image Segmentation
-    With version 7 compatible fallback
+    Integrated AutoSAM2 model that combines UNet3D with SAM2 integration points.
+    Features a single integrated architecture with optional SAM2 branches.
     """
-    def __init__(self, num_classes=4, base_channels=16, slice_interval=1, 
+    def __init__(self, in_channels=4, n_classes=4, base_channels=16, 
                  trilinear=True, sam2_model_path=None, enable_sam2=True, debug_mode=False):
         super(AutoSAM2, self).__init__()
         
         # Store configuration
-        self.num_classes = num_classes
-        self.slice_interval = slice_interval
+        self.in_channels = in_channels
+        self.n_classes = n_classes
+        self.base_channels = base_channels
         self.sam2_model_path = sam2_model_path
         self.enable_sam2 = enable_sam2
         self.debug_mode = debug_mode
@@ -322,18 +182,16 @@ class AutoSAM2(nn.Module):
         # Create directory for debug visualizations
         os.makedirs("autosam2_debug", exist_ok=True)
         
-        # Create the UNet3D encoder
-        self.encoder = UNet3DEncoder(
-            in_channels=4,
-            base_channels=base_channels,
-            slice_interval=slice_interval
-        )
+        # Main Encoder Blocks
+        self.initial_conv = ResidualBlock3D(in_channels, base_channels)
+        self.enc1 = EncoderBlock3D(base_channels, base_channels * 2)
+        self.enc2 = EncoderBlock3D(base_channels * 2, base_channels * 4)
+        self.enc3 = EncoderBlock3D(base_channels * 4, base_channels * 8)
+        self.enc4 = EncoderBlock3D(base_channels * 8, base_channels * 8)
         
-        # Create the partial decoder for SAM2 integration
-        self.partial_decoder = PartialDecoder3D(
-            base_channels=base_channels,
-            trilinear=trilinear
-        )
+        # SAM2 Integration Components
+        # Projection to create embeddings for SAM2 at bottleneck level
+        self.sam_projection = nn.Conv3d(base_channels * 8, 256, kernel_size=1)
         
         # Processor for converting 3D embeddings to 2D slices for SAM2
         self.embedding_processor = EmbeddingProcessor(embedding_size=64)
@@ -341,13 +199,14 @@ class AutoSAM2(nn.Module):
         # Initialize SAM2
         self.initialize_sam2()
         
-        # Create a fallback UNet3D model (version 7 compatible)
-        self.fallback_model = FullUNet3D(
-            in_channels=4, 
-            n_classes=num_classes,
-            base_channels=base_channels,
-            trilinear=trilinear
-        )
+        # Main Decoder Blocks
+        self.dec1 = DecoderBlock3D(base_channels * 16, base_channels * 4, trilinear=trilinear)
+        self.dec2 = DecoderBlock3D(base_channels * 8, base_channels * 2, trilinear=trilinear)
+        self.dec3 = DecoderBlock3D(base_channels * 4, base_channels, trilinear=trilinear)
+        self.dec4 = DecoderBlock3D(base_channels * 2, base_channels, trilinear=trilinear)
+        
+        # Final output layer
+        self.output_conv = nn.Conv3d(base_channels, n_classes, kernel_size=1)
         
         # For compatibility with train.py
         self.has_sam2_enabled = False
@@ -393,7 +252,7 @@ class AutoSAM2(nn.Module):
         if self.has_sam2:
             logger.info("SAM2 initialized successfully")
         else:
-            logger.warning("SAM2 initialization failed, will use fallback UNet3D")
+            logger.warning("SAM2 initialization failed, will use UNet3D only")
     
     def preprocess_slice_for_sam2(self, img_slice):
         """
@@ -465,14 +324,14 @@ class AutoSAM2(nn.Module):
             logger.warning(f"SAM2 not available for slice {slice_idx}. Using fallback.")
             # Return placeholder if SAM2 not available
             height, width = img_slice.shape[2:]
-            return torch.zeros((1, self.num_classes, height, width), device=device)
+            return torch.zeros((1, self.n_classes, height, width), device=device)
         
         # Skip processing if the slice is empty
         img_check = torch.nan_to_num(img_slice, 0.0)
         if img_check.sum() < 1e-6:
             logger.info(f"Skipping empty slice {slice_idx}")
             height, width = img_slice.shape[2:]
-            return torch.zeros((1, self.num_classes, height, width), device=device)
+            return torch.zeros((1, self.n_classes, height, width), device=device)
             
         try:
             logger.info(f"Processing slice {slice_idx} with SAM2")
@@ -510,14 +369,14 @@ class AutoSAM2(nn.Module):
                 logger.error(f"Error in SAM2 prediction: {e}")
                 # Return empty mask on error
                 height, width = img_slice.shape[2:]
-                return torch.zeros((1, self.num_classes, height, width), device=device)
+                return torch.zeros((1, self.n_classes, height, width), device=device)
             
             # Reshape mask to match expected output format [B, C, H, W]
             height, width = mask.shape[2:]
-            multi_class_mask = torch.zeros((1, self.num_classes, height, width), device=device)
+            multi_class_mask = torch.zeros((1, self.n_classes, height, width), device=device)
             
             # Use the binary mask for all tumor classes (class 1, 2, 3)
-            for c in range(1, self.num_classes):
+            for c in range(1, self.n_classes):
                 multi_class_mask[:, c] = mask[:, 0]
             
             # Track time
@@ -532,224 +391,163 @@ class AutoSAM2(nn.Module):
         except Exception as e:
             logger.error(f"Error processing slice {slice_idx} with SAM2: {e}")
             height, width = img_slice.shape[2:]
-            return torch.zeros((1, self.num_classes, height, width), device=device)
+            return torch.zeros((1, self.n_classes, height, width), device=device)
     
-    def process_selected_slices(self, x, embeddings_3d, metadata, device):
+    def create_combined_volume(self, orig_volume, sam2_masks, selected_indices, depth_dim_idx):
         """
-        Process only selected slices in the volume with SAM2
+        Create a combined volume where selected slices use SAM2 results and others use UNet3D results
         """
-        # Get relevant metadata
-        depth_dim_idx = metadata["depth_dim_idx"]
-        depth = x.shape[2 + depth_dim_idx]
+        device = orig_volume.device
+        batch_size, num_classes, depth, height, width = orig_volume.shape
         
-        # Use fixed specific slices that have been proven to work well
-        specific_slices = [5, 15, 25, 35, 45, 55, 63, 69, 72, 75, 76, 77, 78, 79, 82, 
-                          85, 89, 94, 98, 102, 107, 114, 124, 134, 144, 154]
+        # Create a copy of the original volume to modify
+        combined_volume = orig_volume.clone()
         
-        # Filter indices that are within range for this volume
-        selected_indices = [idx for idx in specific_slices if idx < depth]
-        
-        logger.info(f"Processing {len(selected_indices)} selected slices: {selected_indices[:5]}...")
-        
-        # Initialize dictionary to store SAM2 masks
-        sam2_masks = {}
-        
-        # Process selected slices
-        for slice_idx in selected_indices:
-            try:
-                # Extract original image slice (use FLAIR, index 0)
-                img_slice = self.embedding_processor.extract_slice(
-                    x, slice_idx, depth_dim_idx
-                )[0:1, 0:1]  # Get first batch item, first channel
-                
-                # Normalize the slice for better visualization
-                img_slice = (img_slice - img_slice.min()) / (img_slice.max() - img_slice.min() + 1e-8)
-                
-                # Find nearest downsampled index in bottleneck
-                ds_slice_idx = min(slice_idx // 16, embeddings_3d.shape[2 + depth_dim_idx] - 1)
-                
-                # Get embedding for this slice
-                embedding = self.embedding_processor(
-                    embeddings_3d, 
-                    ds_slice_idx,
-                    depth_dim_idx
-                )
-                
-                # Process slice with SAM2
-                mask = self.process_slice_with_sam2(img_slice, embedding, slice_idx, device)
-                
-                # Store the mask
-                sam2_masks[slice_idx] = mask
-                
-                logger.info(f"Processed slice {slice_idx} with SAM2")
-                    
-            except Exception as e:
-                logger.error(f"Error processing slice {slice_idx}: {e}")
-                # Create an empty mask on error
-                height, width = x.shape[3], x.shape[4]
-                sam2_masks[slice_idx] = torch.zeros((1, self.num_classes, height, width), device=device)
-        
-        # Create full volume from processed slices
-        all_indices = list(range(depth))
-        output = self.improved_volume_from_slices(
-            sam2_masks,
-            (x.shape[0], self.num_classes, *x.shape[2:]),
-            all_indices,
-            depth_dim_idx
-        )
-        
-        return output
-    
-    def improved_volume_from_slices(self, sam2_masks, volume_shape, slice_indices, depth_dim_idx):
-        """
-        Create a full 3D volume from processed 2D slices with improved interpolation
-        """
-        device = next(iter(sam2_masks.values())).device
-        batch_size, num_classes, _, height, width = volume_shape
-        depth = volume_shape[2 + depth_dim_idx]  # Get depth from the right dimension
-        
-        # Create empty volume
-        volume = torch.zeros(volume_shape, device=device)
-        
-        # Fill in the slices we have
+        # Replace slices with SAM2 results where available
         for slice_idx, mask in sam2_masks.items():
             if depth_dim_idx == 0:
-                volume[:, :, slice_idx, :, :] = mask
+                combined_volume[:, :, slice_idx, :, :] = mask
             elif depth_dim_idx == 1:
-                volume[:, :, :, slice_idx, :] = mask
+                combined_volume[:, :, :, slice_idx, :] = mask
             else:  # default to dim 2
-                volume[:, :, :, :, slice_idx] = mask
+                combined_volume[:, :, :, :, slice_idx] = mask
         
-        # If we processed all slices (no interpolation needed), return the volume
-        if len(slice_indices) == depth:
-            return volume
-            
-        # Otherwise, for any missing slices, perform interpolation
-        sorted_indices = sorted(list(sam2_masks.keys()))
-        
-        # For each pair of adjacent processed slices
-        for i in range(len(sorted_indices) - 1):
-            start_idx = sorted_indices[i]
-            end_idx = sorted_indices[i + 1]
-            
-            # Skip if they're adjacent
-            if end_idx - start_idx <= 1:
-                continue
-            
-            # Get masks for start and end slices
-            if depth_dim_idx == 0:
-                start_mask = volume[:, :, start_idx, :, :]
-                end_mask = volume[:, :, end_idx, :, :]
-            elif depth_dim_idx == 1:
-                start_mask = volume[:, :, :, start_idx, :]
-                end_mask = volume[:, :, :, end_idx, :]
-            else:  # default to dim 2
-                start_mask = volume[:, :, :, :, start_idx]
-                end_mask = volume[:, :, :, :, end_idx]
-            
-            # Interpolate for each slice in between
-            for j in range(start_idx + 1, end_idx):
-                # Calculate linear interpolation weight
-                alpha = (j - start_idx) / (end_idx - start_idx)
+        return combined_volume
                 
-                # Apply weighted combination
-                interp_mask = (1 - alpha) * start_mask + alpha * end_mask
-                
-                # Threshold for clean binary masks
-                interp_mask = (interp_mask > 0.5).float()
-                
-                # Assign to volume
-                if depth_dim_idx == 0:
-                    volume[:, :, j, :, :] = interp_mask
-                elif depth_dim_idx == 1:
-                    volume[:, :, :, j, :] = interp_mask
-                else:  # default to dim 2
-                    volume[:, :, :, :, j] = interp_mask
-        
-        return volume
-        
-    def decoder(self, encoder_outputs):
-        """
-        Critical method for compatibility with train.py.
-        Ensures that when SAM2 is disabled, the model behaves exactly like FullUNet3D.
-        """
-        if not isinstance(encoder_outputs, tuple):
-            return encoder_outputs
-    
-        # If SAM2 is disabled, run the entire model as FullUNet3D
-        if not self.has_sam2_enabled:
-            return self.fallback_model(encoder_outputs[0])
-    
-        # Unpack encoder outputs (if SAM2 is enabled)
-        x1, x2, x3, x4, x5, metadata = encoder_outputs
-    
-        # Use the fallback model's decoder path
-        x = self.fallback_model.dec1(x5, x4)
-        x = self.fallback_model.dec2(x, x3)
-        x = self.fallback_model.dec3(x, x2)
-        x = self.fallback_model.dec4(x, x1)
-    
-        # Final convolution
-        x = self.fallback_model.output_conv(x)
-    
-        return torch.sigmoid(x)
-
-
-    
     def forward(self, x):
-            """
-            Forward pass using either fallback UNet3D (version 7 compatible)
-            or UNet3D encoder + partial decoder -> SAM2
-            """
-            device = x.device
-            start_time = time.time()
-            
-            # Reset SAM2 enabled flag
-            self.has_sam2_enabled = False
-            
-            # Control flag for SAM2 path - set to False for version 7 fallback
-            use_sam2_path = False  # Toggle between fallback (False) and SAM2 (True)
-            
-            # Check if we should use SAM2 or fallback mode
-            if not use_sam2_path or not hasattr(self, 'has_sam2') or not self.has_sam2:
-                logger.info("Using fallback UNet3D model")
-                # Use the fallback model directly for version 7 performance
-                output = self.fallback_model(x)
-                return output
-            
-            # If we're using SAM2 path:
-            # 1. Run encoder
-            encoder_start = time.time()
-            x1, x2, x3, x4, x5, metadata = self.encoder(x)
-            encoder_time = time.time() - encoder_start
-            self.performance_metrics["encoder_time"].append(encoder_time)
-            
-            # 2. Run partial decoder to get embeddings
-            decoder_start = time.time()
-            embeddings_3d = self.partial_decoder(x5, x4, x3)
-            
-            # 3. Process specific slices with SAM2
-            self.has_sam2_enabled = True
-            output = self.process_selected_slices(x, embeddings_3d, metadata, device)
-            
-            # Track timing
-            decoder_time = time.time() - decoder_start
-            self.performance_metrics["decoder_time"].append(decoder_time)
-            
-            total_time = time.time() - start_time
-            self.performance_metrics["total_time"].append(total_time)
-            
-            logger.info(f"Forward pass completed in {total_time:.4f}s")
-            
-            return output
+        """
+        Integrated forward pass that uses either pure UNet3D mode
+        or hybrid UNet3D+SAM2 mode based on configuration
+        """
+        device = x.device
+        start_time = time.time()
         
+        # Reset SAM2 enabled flag
+        self.has_sam2_enabled = False
+        
+        # Control flag for SAM2 integration
+        use_sam2_path = False  # Toggle between UNet3D-only (False) and hybrid (True)
+        
+        # Get batch dimensions and depth info
+        batch_size, channels, dim1, dim2, dim3 = x.shape
+        dims = [dim1, dim2, dim3]
+        depth_dim_idx = dims.index(min(dims))
+        depth = dims[depth_dim_idx]
+        
+        # Process specific slices with SAM2 if enabled
+        sam2_slices = []
+        if use_sam2_path and self.has_sam2:
+            # These are the specific slices we'll process with SAM2
+            specific_slices = [5, 15, 25, 35, 45, 55, 63, 69, 72, 75, 76, 77, 78, 79, 82, 
+                              85, 89, 94, 98, 102, 107, 114, 124, 134, 144, 154]
+            
+            # Filter indices that are within range for this volume
+            sam2_slices = [idx for idx in specific_slices if idx < depth]
+            self.has_sam2_enabled = True
+            logger.info(f"Will process {len(sam2_slices)} selected slices with SAM2")
+        
+        # === ENCODER PATH (Same for both modes) ===
+        # This is always executed
+        encoder_start = time.time()
+        
+        # Encoder pathway
+        x1 = self.initial_conv(x)         # Full resolution
+        x2 = self.enc1(x1)                # 1/2 resolution
+        x3 = self.enc2(x2)                # 1/4 resolution
+        x4 = self.enc3(x3)                # 1/8 resolution
+        x5 = self.enc4(x4)                # 1/16 resolution
+        
+        encoder_time = time.time() - encoder_start
+        self.performance_metrics["encoder_time"].append(encoder_time)
+        
+        # === SAM2 INTEGRATION POINT ===
+        # If SAM2 is enabled, process selected slices
+        sam2_masks = {}
+        if use_sam2_path and self.has_sam2 and sam2_slices:
+            # Create SAM2 embeddings from bottleneck features
+            sam2_start = time.time()
+            sam2_embeddings = self.sam_projection(x5)
+            
+            # Process each selected slice with SAM2
+            for slice_idx in sam2_slices:
+                try:
+                    # Extract original image slice (use first channel)
+                    img_slice = self.embedding_processor.extract_slice(
+                        x, slice_idx, depth_dim_idx
+                    )[0:1, 0:1]  # Get first batch item, first channel
+                    
+                    # Normalize the slice for better visualization
+                    img_slice = (img_slice - img_slice.min()) / (img_slice.max() - img_slice.min() + 1e-8)
+                    
+                    # Find nearest downsampled index in bottleneck
+                    ds_slice_idx = min(slice_idx // 16, sam2_embeddings.shape[2 + depth_dim_idx] - 1)
+                    
+                    # Get embedding for this slice
+                    embedding = self.embedding_processor(
+                        sam2_embeddings, 
+                        ds_slice_idx,
+                        depth_dim_idx
+                    )
+                    
+                    # Process slice with SAM2
+                    mask = self.process_slice_with_sam2(img_slice, embedding, slice_idx, device)
+                    
+                    # Store the mask
+                    sam2_masks[slice_idx] = mask
+                    
+                    logger.info(f"Processed slice {slice_idx} with SAM2")
+                        
+                except Exception as e:
+                    logger.error(f"Error processing slice {slice_idx} with SAM2: {e}")
+            
+            sam2_time = time.time() - sam2_start
+            logger.info(f"SAM2 processing completed in {sam2_time:.4f}s")
+        
+        # === DECODER PATH (Same for both modes) ===
+        # This is always executed
+        decoder_start = time.time()
+        
+        # Decoder pathway
+        x = self.dec1(x5, x4)
+        x = self.dec2(x, x3)
+        x = self.dec3(x, x2)
+        x = self.dec4(x, x1)
+        
+        # Final convolution
+        x = self.output_conv(x)
+        
+        # Apply sigmoid to get probabilities
+        unet_output = torch.sigmoid(x)
+        
+        decoder_time = time.time() - decoder_start
+        self.performance_metrics["decoder_time"].append(decoder_time)
+        
+        # === COMBINE RESULTS ===
+        # If SAM2 was used, combine its results with UNet3D results
+        if use_sam2_path and self.has_sam2 and sam2_masks:
+            # Replace UNet3D results with SAM2 results for selected slices
+            final_output = self.create_combined_volume(
+                unet_output, sam2_masks, sam2_slices, depth_dim_idx
+            )
+            logger.info(f"Combined UNet3D and SAM2 results")
+        else:
+            # Use pure UNet3D results
+            final_output = unet_output
+        
+        total_time = time.time() - start_time
+        self.performance_metrics["total_time"].append(total_time)
+        
+        logger.info(f"Forward pass completed in {total_time:.4f}s")
+        
+        return final_output
+    
     def get_performance_stats(self):
         """Get performance statistics for the model"""
         stats = {
             "has_sam2": self.has_sam2 if hasattr(self, 'has_sam2') else False,
             "sam2_slices_processed": self.performance_metrics["sam2_slices_processed"],
             "sam2_used_in_forward": self.has_sam2_enabled,
-            "model_mode": "sam2" if self.has_sam2_enabled else "fallback_unet3d"
+            "model_mode": "hybrid" if self.has_sam2_enabled else "unet3d_only"
         }
         
         if self.performance_metrics["sam2_processing_time"]:
@@ -769,6 +567,65 @@ class AutoSAM2(nn.Module):
             stats["total_forward_passes"] = len(self.performance_metrics["total_time"])
         
         return stats
+        
+    # Compatibility method for train.py
+    def encoder(self, x):
+        """
+        For compatibility with train.py - mimics the encoder part
+        """
+        # Encoder pathway
+        x1 = self.initial_conv(x)
+        x2 = self.enc1(x1)
+        x3 = self.enc2(x2)
+        x4 = self.enc3(x3)
+        x5 = self.enc4(x4)
+        
+        # Get metadata
+        batch_size, channels, dim1, dim2, dim3 = x.shape
+        dims = [dim1, dim2, dim3]
+        depth_dim_idx = dims.index(min(dims))
+        depth = dims[depth_dim_idx]
+        
+        # Process ALL slices - create a list of all indices
+        key_indices = list(range(depth))
+        
+        # Calculate downsampled indices for bottleneck
+        downsampled_depth = depth // 16  # After 4 encoder blocks
+        ds_key_indices = [min(idx // 16, downsampled_depth-1) for idx in key_indices]
+        
+        # Store metadata for key slice processing
+        metadata = {
+            "key_indices": key_indices,
+            "ds_key_indices": ds_key_indices,
+            "depth_dim_idx": depth_dim_idx,
+            "original_shape": x.shape,
+            "bottleneck_shape": x5.shape
+        }
+        
+        return x1, x2, x3, x4, x5, metadata
+    
+    def decoder(self, encoder_outputs):
+        """
+        For compatibility with train.py - mimics the decoder part
+        """
+        # If not a tuple, just return as is
+        if not isinstance(encoder_outputs, tuple):
+            return encoder_outputs
+        
+        # Unpack encoder outputs
+        x1, x2, x3, x4, x5, metadata = encoder_outputs
+        
+        # Decoder pathway
+        x = self.dec1(x5, x4)
+        x = self.dec2(x, x3)
+        x = self.dec3(x, x2)
+        x = self.dec4(x, x1)
+        
+        # Final convolution
+        x = self.output_conv(x)
+        
+        # Apply sigmoid to get probabilities
+        return torch.sigmoid(x)
 
 print("=== MODEL.PY LOADED SUCCESSFULLY ===")
 
