@@ -166,7 +166,7 @@ def forward(self, x, use_full_decoder=True):
     key_indices = []
     
     # Add slices at fixed percentages of the depth
-    percentages = [0.1, 0.2, 0.3, 0.35, 0.4, 0.44, 0.47, 0.485 0.5,0.515, 0.53, 0.56 , 0.6, 0.65, 0.7, 0.8, 0.9]
+    percentages = [0.1, 0.2, 0.3, 0.35, 0.4, 0.44, 0.47, 0.485, 0.5, 0.515, 0.53, 0.56 , 0.6, 0.65, 0.7, 0.8, 0.9]
     for p in percentages:
         idx = min(int(depth * p), max_slice_idx)
         if idx not in key_indices:
