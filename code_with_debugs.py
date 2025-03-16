@@ -184,9 +184,6 @@ class FlexibleUNet3D(nn.Module):
         key_indices.extend(extra_indices)
         key_indices.sort()
         
-        # Print selected slices
-        print(f"Selected {len(key_indices)} slices for processing: {key_indices}")
-
     
         # Encoder pathway
         x1 = self.initial_conv(x)
