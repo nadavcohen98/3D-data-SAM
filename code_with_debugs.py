@@ -166,7 +166,11 @@ class FlexibleUNet3D(nn.Module):
         key_indices = []
         
         # Add slices at fixed percentages of the depth
-        percentages = [0.1, 0.2, 0.3, 0.35, 0.4, 0.44, 0.47, 0.485, 0.5, 0.515, 0.53, 0.56 , 0.6, 0.65, 0.7, 0.8, 0.9]
+        percentages = [
+        0.05, 0.1, 0.15, 0.2, 0.25, 0.3, 0.33, 0.35, 0.38, 0.4, 0.42, 0.44, 
+        0.46, 0.47, 0.48, 0.485, 0.49, 0.5, 0.51, 0.515, 0.52, 0.53, 0.54, 0.56, 
+        0.58, 0.6, 0.62, 0.65, 0.68, 0.7, 0.75, 0.8, 0.85, 0.9, 0.95
+        ]
         for p in percentages:
             idx = min(int(depth * p), max_slice_idx)
             if idx not in key_indices:
