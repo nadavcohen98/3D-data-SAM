@@ -1,5 +1,4 @@
-# model.py - COMPLETE SINGLE FILE
-# model.py - COMPLETE SINGLE FILE
+# model.py
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -854,6 +853,32 @@ class AutoSAM2(nn.Module):
             logger.info("Using fallback UNet3D model")
             output = self.fallback_model(x)
             return output
+            
+        # If we're using SAM2 path:
+        # 1. Run encoder
+        encoder_start = time.time()
+        x1, x2, x3, x4, x5, metadata = self.encoder(x)
+        encoder_time = time.time() - encoder_start
+        self.performance_metrics["encoder_time"].append(encoder_time)
+        
+        # 2. Run partial decoder to get embeddings
+        decoder_start = time.time()
+        embeddings_3d = self.partial_decoder(x5, x4, x3)
+        
+        # 3. Process all slices with SAM2
+        self.has_sam2_enabled = True
+        output = self.process_selected_slices(x, embeddings_3d, metadata, device)
+        
+        # Track timing
+        decoder_time = time.time() - decoder_start
+        self.performance_metrics["decoder_time"].append(decoder_time)
+        
+        total_time = time.time() - start_time
+        self.performance_metrics["total_time"].append(total_time)
+        
+        logger.info(f"Forward pass completed in {total_time:.4f}s")
+        
+        return output
         
     def get_performance_stats(self):
         """Get performance statistics for the model"""
