@@ -521,7 +521,7 @@ class AutoSAM2(nn.Module):
         self.has_sam2_enabled = False
         
         # Control flag for SAM2 integration
-        use_sam2_path = False  # Toggle between UNet3D-only (False) and hybrid (True)
+        use_sam2_path = True  # Toggle between UNet3D-only (False) and hybrid (True)
         
         # Get batch dimensions and depth info
         batch_size, channels, dim1, dim2, dim3 = x.shape
