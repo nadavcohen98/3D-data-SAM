@@ -294,6 +294,7 @@ class FullUNet3D(nn.Module):
     """
     Complete UNet3D model with full encoder and decoder
     Used as a fallback when SAM2 is not available
+    Designed to exactly match the version 7 architecture
     """
     def __init__(self, in_channels=4, n_classes=4, base_channels=16, trilinear=True):
         super(FullUNet3D, self).__init__()
@@ -303,22 +304,22 @@ class FullUNet3D(nn.Module):
         self.n_classes = n_classes
         self.base_channels = base_channels
         
-        # Initial convolution block
+        # Initial convolution block - matching v7 exactly
         self.initial_conv = ResidualBlock3D(in_channels, base_channels)
         
-        # Encoder pathway
+        # Encoder pathway - matching v7 exactly
         self.enc1 = EncoderBlock3D(base_channels, base_channels * 2)
         self.enc2 = EncoderBlock3D(base_channels * 2, base_channels * 4)
         self.enc3 = EncoderBlock3D(base_channels * 4, base_channels * 8)
         self.enc4 = EncoderBlock3D(base_channels * 8, base_channels * 8)  # Keep channel count at 128
         
-        # Decoder pathway with skip connections
+        # Decoder pathway with skip connections - matching v7 exactly
         self.dec1 = DecoderBlock3D(base_channels * 16, base_channels * 4, trilinear=trilinear)  # 8 + 8 = 16
         self.dec2 = DecoderBlock3D(base_channels * 8, base_channels * 2, trilinear=trilinear)   # 4 + 4 = 8
         self.dec3 = DecoderBlock3D(base_channels * 4, base_channels, trilinear=trilinear)       # 2 + 2 = 4
         self.dec4 = DecoderBlock3D(base_channels * 2, base_channels, trilinear=trilinear)       # 1 + 1 = 2
         
-        # Final output layer
+        # Final output layer - matching v7 exactly
         self.output_conv = nn.Conv3d(base_channels, n_classes, kernel_size=1)
     
     def forward(self, x):
@@ -336,9 +337,10 @@ class FullUNet3D(nn.Module):
         x = self.dec4(x, x1)
         
         # Final convolution
-        x = self.output_conv(x)
+        logits = self.output_conv(x)
         
-        return torch.sigmoid(x)  # Apply sigmoid to get probabilities
+        # Apply sigmoid to get probabilities - exactly as v7 did
+        return torch.sigmoid(logits)
 
 class AutoSAM2(nn.Module):
     """
@@ -658,6 +660,7 @@ class AutoSAM2(nn.Module):
     def process_selected_slices(self, x, embeddings_3d, metadata, device):
         """
         Process only selected slices in the volume with SAM2
+        using a fixed set of slice indices
         
         Args:
             x: Input volume [B, C, D, H, W]
@@ -672,45 +675,12 @@ class AutoSAM2(nn.Module):
         depth_dim_idx = metadata["depth_dim_idx"]
         depth = x.shape[2 + depth_dim_idx]
         
-        # Define specific slices to process with SAM2
-        # For now, use a fixed set of key slices at regular intervals
-        # but ensure coverage of important middle slices
-        selected_indices = []
+        # Use fixed specific slices that have been proven to work well
+        specific_slices = [5, 15, 25, 35, 45, 55, 63, 69, 72, 75, 76, 77, 78, 79, 82, 
+                          85, 89, 94, 98, 102, 107, 114, 124, 134, 144, 154]
         
-        # Ensure we process slices throughout the volume
-        base_interval = max(1, depth // 20)  # At least 20 slices
-        
-        # Add regular interval slices
-        for i in range(0, depth, base_interval):
-            selected_indices.append(i)
-            
-        # Add middle slices with higher density
-        middle_start = depth // 3
-        middle_end = 2 * depth // 3
-        middle_interval = max(1, base_interval // 2)
-        
-        for i in range(middle_start, middle_end, middle_interval):
-            if i not in selected_indices:
-                selected_indices.append(i)
-                
-        # Add specific key slices that often contain tumor
-        key_positions = [
-            depth // 2,              # Middle slice
-            depth // 2 - 5,          # Near middle
-            depth // 2 + 5,          # Near middle
-            depth // 4,              # Quarter
-            3 * depth // 4           # Three-quarter
-        ]
-        
-        for pos in key_positions:
-            if 0 <= pos < depth and pos not in selected_indices:
-                selected_indices.append(pos)
-                
-        # Sort indices for processing in order
-        selected_indices = sorted(list(set(selected_indices)))
-        
-        # Filter indices that are within range
-        selected_indices = [idx for idx in selected_indices if 0 <= idx < depth]
+        # Filter indices that are within range for this volume
+        selected_indices = [idx for idx in specific_slices if idx < depth]
         
         logger.info(f"Processing {len(selected_indices)} selected slices: {selected_indices[:5]}...")
         
@@ -752,7 +722,6 @@ class AutoSAM2(nn.Module):
                 height, width = x.shape[3], x.shape[4]
                 sam2_masks[slice_idx] = torch.zeros((1, self.num_classes, height, width), device=device)
         
-            
         # Create full volume from processed slices
         all_indices = list(range(depth))
         output = self.improved_volume_from_slices(
@@ -763,6 +732,7 @@ class AutoSAM2(nn.Module):
         )
         
         return output
+
     
     def improved_volume_from_slices(self, sam2_masks, volume_shape, slice_indices, depth_dim_idx):
         """
@@ -875,7 +845,7 @@ class AutoSAM2(nn.Module):
     def forward(self, x):
         """
         Forward pass using UNet3D encoder + partial decoder -> SAM2
-        or fallback UNet3D model
+        or fallback UNet3D model that performs similarly to version 7
         
         Args:
             x: Input volume [B, C, D, H, W]
@@ -890,11 +860,13 @@ class AutoSAM2(nn.Module):
         self.has_sam2_enabled = False
         
         # Control flag for SAM2 path
-        use_sam2_path = False  # Set to True when ready to use full SAM2 integration
+        use_sam2_path = False  # Set to False to use fallback, True for SAM2 integration
         
         # Check if we should use SAM2 or fallback mode
         if not use_sam2_path or not hasattr(self, 'has_sam2') or not self.has_sam2:
-            logger.info("Using fallback UNet3D model")
+            # Use the fallback model directly - this matches version 7's behavior
+            logger.info("Using fallback UNet3D model (v7 compatible)")
+            # Pass input directly to the fallback model without using encoder/decoder separation
             output = self.fallback_model(x)
             return output
         
@@ -909,7 +881,7 @@ class AutoSAM2(nn.Module):
         decoder_start = time.time()
         embeddings_3d = self.partial_decoder(x5, x4, x3)
         
-        # 3. Process all slices with SAM2
+        # 3. Process selected slices with SAM2
         self.has_sam2_enabled = True
         output = self.process_selected_slices(x, embeddings_3d, metadata, device)
         
