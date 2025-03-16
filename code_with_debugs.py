@@ -285,54 +285,178 @@ class SliceProcessor(nn.Module):
         return processed_slices
 
 class MRItoRGBMapper(nn.Module):
-    """Advanced mapping from 4 MRI channels to 3 RGB channels with attention"""
-    def __init__(self):
+    """
+    Advanced hybrid mapper that combines domain knowledge with learned features
+    for optimal MRI-to-RGB conversion for SAM2
+    """
+    def __init__(self, use_domain_knowledge=True, use_probability_maps=True):
         super().__init__()
         
-        # Combined processing - simpler and more robust
-        self.initial_features = nn.Sequential(
+        self.use_domain_knowledge = use_domain_knowledge
+        self.use_probability_maps = use_probability_maps
+        
+        # Domain knowledge weights (initial values based on medical knowledge but learnable)
+        self.domain_weights = nn.Parameter(torch.tensor([
+            [0.7, 0.2, 0.1],  # FLAIR contributions to R,G,B
+            [0.2, 0.2, 0.6],  # T1 contributions to R,G,B
+            [0.1, 0.8, 0.1],  # T1CE contributions to R,G,B
+            [0.1, 0.1, 0.8],  # T2 contributions to R,G,B
+        ]), requires_grad=True)
+        
+        # Channel-specific attention
+        self.channel_attention = nn.ModuleList([
+            nn.Sequential(
+                nn.Conv2d(1, 8, kernel_size=3, padding=1),
+                nn.ReLU(inplace=True),
+                nn.Conv2d(8, 1, kernel_size=1),
+                nn.Sigmoid()
+            ) for _ in range(4)  # One for each MRI modality
+        ])
+        
+        # Advanced feature extraction path
+        self.feature_extractor = nn.Sequential(
             nn.Conv2d(4, 16, kernel_size=3, padding=1),
             nn.GroupNorm(4, 16),
             nn.ReLU(inplace=True),
+            nn.Conv2d(16, 32, kernel_size=3, padding=1),
+            nn.GroupNorm(8, 32),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(32, 16, kernel_size=1),
+            nn.GroupNorm(4, 16),
+            nn.ReLU(inplace=True)
         )
         
-        # Feature extraction and integration
-        self.features = nn.Sequential(
+        # Multi-scale processing
+        self.down = nn.MaxPool2d(2)
+        self.process_down = nn.Sequential(
             nn.Conv2d(16, 16, kernel_size=3, padding=1),
             nn.GroupNorm(4, 16),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(16, 16, kernel_size=3, padding=1),
-            nn.GroupNorm(4, 16),
-            nn.ReLU(inplace=True),
+            nn.ReLU(inplace=True)
         )
+        self.up = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True)
         
-        # Simple self-attention mechanism
-        self.attention = nn.Sequential(
-            nn.Conv2d(16, 1, kernel_size=1),
-            nn.Sigmoid()
+        # Adaptive contrast enhancement module
+        self.contrast_enhancer = nn.Sequential(
+            nn.Conv2d(16, 3, kernel_size=3, padding=1),
+            nn.Sigmoid()  # Adaptive scaling factors for contrast
         )
         
         # Final RGB mapping
-        self.to_rgb = nn.Conv2d(16, 3, kernel_size=1)
+        self.rgb_mapper = nn.Conv2d(16, 3, kernel_size=1)
         
-    def forward(self, x):
-        # Process all modalities together
-        features = self.initial_features(x)
+        # Probability map integration
+        self.prob_integration = nn.Sequential(
+            nn.Conv2d(4, 16, kernel_size=1),  # 3 tumor classes + background
+            nn.GroupNorm(4, 16),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(16, 16, kernel_size=3, padding=1),
+            nn.GroupNorm(4, 16),
+            nn.ReLU(inplace=True)
+        )
         
-        # Extract integrated features
-        features = self.features(features)
+    def apply_domain_mapping(self, mri_channels):
+        """Apply domain knowledge-based mapping"""
+        batch_size, _, height, width = mri_channels.shape
         
-        # Apply attention
-        attention_map = self.attention(features)
-        attended_features = features * attention_map
+        # Initialize RGB output
+        rgb = torch.zeros((batch_size, 3, height, width), device=mri_channels.device)
         
-        # Generate RGB
-        rgb = self.to_rgb(attended_features)
+        # Apply channel-specific attention and domain weights
+        for i in range(4):  # For each MRI modality
+            # Get single modality and apply attention
+            modality = mri_channels[:, i:i+1]
+            attention = self.channel_attention[i](modality)
+            enhanced_modality = modality * attention
+            
+            # Add contribution to each RGB channel according to domain weights
+            for j in range(3):  # For each RGB channel
+                rgb[:, j:j+1] += enhanced_modality * self.domain_weights[i, j]
         
-        # Ensure proper range with sigmoid
-        enhanced_rgb = torch.sigmoid(rgb)
+        return rgb
+    
+    def enhance_contrast(self, rgb, scaling_factors):
+        """Apply learned contrast enhancement"""
+        # Apply scaling factors
+        enhanced = rgb * scaling_factors
         
-        return enhanced_rgb
+        # Normalize to [0,1] range
+        min_vals = enhanced.min(dim=2, keepdim=True)[0].min(dim=3, keepdim=True)[0]
+        max_vals = enhanced.max(dim=2, keepdim=True)[0].max(dim=3, keepdim=True)[0]
+        range_vals = max_vals - min_vals + 1e-8
+        
+        normalized = (enhanced - min_vals) / range_vals
+        
+        return normalized
+    
+    def forward(self, x, prob_maps=None):
+        """
+        Convert 4-channel MRI to 3-channel RGB optimized for SAM2
+        
+        Args:
+            x: 4-channel MRI data [B, 4, H, W]
+            prob_maps: Optional probability maps from segmentation model [B, 4, H, W]
+                       (3 tumor classes + background)
+        
+        Returns:
+            3-channel RGB image optimized for SAM2 [B, 3, H, W]
+        """
+        batch_size, channels, height, width = x.shape
+        
+        # Path 1: Domain knowledge-based mapping
+        if self.use_domain_knowledge:
+            domain_rgb = self.apply_domain_mapping(x)
+        else:
+            domain_rgb = torch.zeros((batch_size, 3, height, width), device=x.device)
+        
+        # Path 2: Feature-based mapping
+        features = self.feature_extractor(x)
+        
+        # Multi-scale processing - make sure downsampled features have correct dimensions
+        try:
+            down_features = self.down(features)
+            processed_down = self.process_down(down_features)
+            up_features = self.up(processed_down)
+            
+            # Skip connection - handle potential size mismatch
+            if up_features.shape[2:] != features.shape[2:]:
+                up_features = F.interpolate(up_features, size=features.shape[2:], 
+                                           mode='bilinear', align_corners=False)
+            
+            multi_features = features + up_features
+        except Exception as e:
+            # Fallback if multi-scale processing fails (e.g., input too small)
+            print(f"Warning: Multi-scale processing skipped: {e}")
+            multi_features = features
+        
+        # Integrate probability maps if available
+        if prob_maps is not None and self.use_probability_maps:
+            try:
+                # Ensure prob_maps has correct shape
+                if prob_maps.shape[2:] != multi_features.shape[2:]:
+                    prob_maps = F.interpolate(prob_maps, size=multi_features.shape[2:], 
+                                             mode='bilinear', align_corners=False)
+                
+                prob_features = self.prob_integration(prob_maps)
+                multi_features = multi_features + prob_features
+            except Exception as e:
+                # Fallback if probability map integration fails
+                print(f"Warning: Probability map integration skipped: {e}")
+        
+        # Get contrast enhancement factors
+        contrast_factors = self.contrast_enhancer(multi_features)
+        
+        # Generate feature-based RGB
+        feature_rgb = self.rgb_mapper(multi_features)
+        feature_rgb = torch.sigmoid(feature_rgb)  # Ensure [0,1] range
+        
+        # Apply contrast enhancement
+        enhanced_feature_rgb = self.enhance_contrast(feature_rgb, contrast_factors)
+        
+        # Combine domain-knowledge and feature-based RGB
+        alpha = 0.7  # Weight for feature-based RGB
+        final_rgb = alpha * enhanced_feature_rgb + (1 - alpha) * domain_rgb
+        
+        return final_rgb
 
 # ======= Main AutoSAM2 model =======
 
