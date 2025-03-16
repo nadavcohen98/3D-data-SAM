@@ -404,7 +404,7 @@ class AutoSAM2(nn.Module):
             # Try using build_sam2_hf directly - the approach that worked in tests
             logger.info("Attempting to initialize SAM2 with build_sam2_hf")
             try:
-                model_id = "facebook/sam2-hiera-base"
+                model_id = "facebook/sam2-hiera-small"
                 logger.info(f"Building SAM2 with model_id: {model_id}")
                 sam2_model = build_sam2_hf(model_id)
                 self.sam2 = SAM2ImagePredictor(sam2_model)
