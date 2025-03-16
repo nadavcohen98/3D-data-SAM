@@ -305,7 +305,7 @@ class AutoSAM2(nn.Module):
         trilinear=True,
         enable_unet_decoder=True,
         enable_sam2=True,
-        sam2_model_id="facebook/sam2-hiera-large"
+        sam2_model_id="facebook/sam2-hiera-small"
     ):
         super().__init__()
         
