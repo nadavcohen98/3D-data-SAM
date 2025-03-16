@@ -163,84 +163,83 @@ class AutoSAM2(nn.Module):
     Integrated AutoSAM2 model that combines UNet3D with SAM2 integration points.
     Features a single integrated architecture with optional SAM2 branches.
     """
+
     def __init__(self, in_channels=4, num_classes=4, base_channels=16, 
                  trilinear=True, sam2_model_path=None, enable_sam2=True, debug_mode=False):
-def __init__(self, in_channels=4, num_classes=4, base_channels=16, 
-             trilinear=True, sam2_model_path=None, enable_sam2=True, debug_mode=False):
-    super(AutoSAM2, self).__init__()
-    
-    # Store configuration
-    self.in_channels = in_channels
-    self.n_classes = num_classes
-    self.base_channels = base_channels
-    self.sam2_model_path = sam2_model_path
-    self.enable_sam2 = enable_sam2
-    self.debug_mode = debug_mode
-    
-    # Set debug mode for logging
-    if debug_mode:
-        logger.setLevel(logging.DEBUG)
+        super(AutoSAM2, self).__init__()
         
-    # Create directory for debug visualizations
-    os.makedirs("autosam2_debug", exist_ok=True)
-    
-    # Main Encoder Blocks
-    self.initial_conv = ResidualBlock3D(in_channels, base_channels)
-    self.enc1 = EncoderBlock3D(base_channels, base_channels * 2)
-    self.enc2 = EncoderBlock3D(base_channels * 2, base_channels * 4)
-    self.enc3 = EncoderBlock3D(base_channels * 4, base_channels * 8)
-    self.enc4 = EncoderBlock3D(base_channels * 8, base_channels * 8)
-    
-    # SAM2 Integration Components
-    # Projection to create embeddings for SAM2 at bottleneck level
-    self.sam_projection = nn.Conv3d(base_channels * 8, 256, kernel_size=1)
-    
-    # Processor for converting 3D embeddings to 2D slices for SAM2
-    self.embedding_processor = EmbeddingProcessor(embedding_size=64)
-    
-    # Initialize SAM2
-    self.initialize_sam2()
-    
-    # Main Decoder Blocks
-    self.dec1 = DecoderBlock3D(base_channels * 16, base_channels * 4, trilinear=trilinear)
-    self.dec2 = DecoderBlock3D(base_channels * 8, base_channels * 2, trilinear=trilinear)
-    self.dec3 = DecoderBlock3D(base_channels * 4, base_channels, trilinear=trilinear)
-    self.dec4 = DecoderBlock3D(base_channels * 2, base_channels, trilinear=trilinear)
-    
-    # Final output layer
-    self.output_conv = nn.Conv3d(base_channels, num_classes, kernel_size=1)
-    
-    # Create encoder and decoder modules for compatibility with train.py
-    # These are needed for accessing .parameters() in the optimizer
-    self.encoder = nn.ModuleList([
-        self.initial_conv,
-        self.enc1,
-        self.enc2,
-        self.enc3,
-        self.enc4
-    ])
-    
-    self.decoder = nn.ModuleList([
-        self.dec1,
-        self.dec2,
-        self.dec3,
-        self.dec4,
-        self.output_conv
-    ])
-    
-    # For compatibility with train.py
-    self.has_sam2_enabled = False
-    
-    # Performance tracking
-    self.performance_metrics = {
-        "sam2_processing_time": [],
-        "sam2_slices_processed": 0,
-        "encoder_time": [],
-        "decoder_time": [],
-        "total_time": []
-    }
-    
-    logger.info(f"Initialized AutoSAM2 with {base_channels} base channels, SAM2 enabled: {self.has_sam2 if hasattr(self, 'has_sam2') else False}")
+        # Store configuration
+        self.in_channels = in_channels
+        self.n_classes = num_classes
+        self.base_channels = base_channels
+        self.sam2_model_path = sam2_model_path
+        self.enable_sam2 = enable_sam2
+        self.debug_mode = debug_mode
+        
+        # Set debug mode for logging
+        if debug_mode:
+            logger.setLevel(logging.DEBUG)
+            
+        # Create directory for debug visualizations
+        os.makedirs("autosam2_debug", exist_ok=True)
+        
+        # Main Encoder Blocks
+        self.initial_conv = ResidualBlock3D(in_channels, base_channels)
+        self.enc1 = EncoderBlock3D(base_channels, base_channels * 2)
+        self.enc2 = EncoderBlock3D(base_channels * 2, base_channels * 4)
+        self.enc3 = EncoderBlock3D(base_channels * 4, base_channels * 8)
+        self.enc4 = EncoderBlock3D(base_channels * 8, base_channels * 8)
+        
+        # SAM2 Integration Components
+        # Projection to create embeddings for SAM2 at bottleneck level
+        self.sam_projection = nn.Conv3d(base_channels * 8, 256, kernel_size=1)
+        
+        # Processor for converting 3D embeddings to 2D slices for SAM2
+        self.embedding_processor = EmbeddingProcessor(embedding_size=64)
+        
+        # Initialize SAM2
+        self.initialize_sam2()
+        
+        # Main Decoder Blocks
+        self.dec1 = DecoderBlock3D(base_channels * 16, base_channels * 4, trilinear=trilinear)
+        self.dec2 = DecoderBlock3D(base_channels * 8, base_channels * 2, trilinear=trilinear)
+        self.dec3 = DecoderBlock3D(base_channels * 4, base_channels, trilinear=trilinear)
+        self.dec4 = DecoderBlock3D(base_channels * 2, base_channels, trilinear=trilinear)
+        
+        # Final output layer
+        self.output_conv = nn.Conv3d(base_channels, num_classes, kernel_size=1)
+        
+        # Create encoder and decoder modules for compatibility with train.py
+        # These are needed for accessing .parameters() in the optimizer
+        self.encoder = nn.ModuleList([
+            self.initial_conv,
+            self.enc1,
+            self.enc2,
+            self.enc3,
+            self.enc4
+        ])
+        
+        self.decoder = nn.ModuleList([
+            self.dec1,
+            self.dec2,
+            self.dec3,
+            self.dec4,
+            self.output_conv
+        ])
+        
+        # For compatibility with train.py
+        self.has_sam2_enabled = False
+        
+        # Performance tracking
+        self.performance_metrics = {
+            "sam2_processing_time": [],
+            "sam2_slices_processed": 0,
+            "encoder_time": [],
+            "decoder_time": [],
+            "total_time": []
+        }
+        
+        logger.info(f"Initialized AutoSAM2 with {base_channels} base channels, SAM2 enabled: {self.has_sam2 if hasattr(self, 'has_sam2') else False}")
 
 
                  
