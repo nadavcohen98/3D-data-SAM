@@ -207,7 +207,7 @@ class AutoSAM2(nn.Module):
         self.dec4 = DecoderBlock3D(base_channels * 2, base_channels, trilinear=trilinear)
         
         # Final output layer
-        self.output_conv = nn.Conv3d(base_channels, n_classes, kernel_size=1)
+        self.output_conv = nn.Conv3d(base_channels, num_classes, kernel_size=1)
         
         # For compatibility with train.py
         self.has_sam2_enabled = False
