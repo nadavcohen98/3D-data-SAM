@@ -114,14 +114,13 @@ class FlexibleUNet3D(nn.Module):
     UNet3D architecture with hooks for mid-decoder features at 64x64 resolution.
     Allows flexible configuration with enable/disable switches for different paths.
     """
-    def __init__(self, in_channels=4, n_classes=4, base_channels=16, slice_interval=10, trilinear=True):
+    def __init__(self, in_channels=4, n_classes=4, base_channels=16,trilinear=True):
         super(FlexibleUNet3D, self).__init__()
         
         # Configuration
         self.in_channels = in_channels
         self.n_classes = n_classes
         self.base_channels = base_channels
-        self.slice_interval = slice_interval
         
         # Initial convolution block
         self.initial_conv = ResidualBlock3D(in_channels, base_channels)
@@ -170,17 +169,9 @@ class FlexibleUNet3D(nn.Module):
         depth = dims[depth_idx]
         
         # Select key slices at regular intervals
-        key_indices = []
-        for i in range(0, depth, self.slice_interval):
-            if i < depth:
-                key_indices.append(i)
-        
-        # Add middle slice if not included
-        middle_idx = depth // 2
-        if middle_idx not in key_indices:
-            key_indices.append(middle_idx)
-            key_indices.sort()
-        
+        key_indices = [5, 15, 25, 35, 45, 55, 63, 69, 72, 75, 76, 77, 78, 79, 82, 
+                              85, 89, 94, 98, 102, 107, 114, 124, 134, 144, 154]
+
         # Encoder pathway
         x1 = self.initial_conv(x)         # Full resolution features
         x2 = self.enc1(x1)                # 1/2 resolution
