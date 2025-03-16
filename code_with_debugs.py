@@ -32,32 +32,6 @@ except ImportError:
     logger.error("ERROR: sam2 package not available.")
     HAS_SAM2 = False
 
-class ResidualBlock3D(nn.Module):
-    """
-    3D convolutional block with residual connections and group normalization.
-    """
-    def __init__(self, in_channels, out_channels, num_groups=8):
-        super(ResidualBlock3D, self).__init__()
-        
-        # Main convolutional path
-        self.conv_block = nn.Sequential(
-            nn.Conv3d(in_channels, out_channels, kernel_size=3, padding=1),
-            nn.GroupNorm(num_groups=min(num_groups, out_channels), num_channels=out_channels),
-            nn.ReLU(inplace=True),
-            nn.Conv3d(out_channels, out_channels, kernel_size=3, padding=1),
-            nn.GroupNorm(num_groups=min(num_groups, out_channels), num_channels=out_channels)
-        )
-        
-        # Residual connection with projection if needed
-        self.residual = nn.Conv3d(in_channels, out_channels, kernel_size=1) if in_channels != out_channels else nn.Identity()
-        
-        # Final activation after residual connection
-        self.activation = nn.ReLU(inplace=True)
-    
-    def forward(self, x):
-        residual = self.residual(x)
-        x = self.conv_block(x)
-        return self.activation(x + residual)
 
 class EncoderBlock3D(nn.Module):
     """
@@ -76,12 +50,12 @@ class EncoderBlock3D(nn.Module):
 
 class DecoderBlock3D(nn.Module):
     """
-    Decoder block with upsampling and residual convolutions.
+    Decoder block עם Skip connections זהים לגרסה 7
     """
     def __init__(self, in_channels, out_channels, num_groups=8, trilinear=True):
         super(DecoderBlock3D, self).__init__()
         
-        # Upsampling method
+        # Upsampling method - חלק קריטי! לוודא שזהה לגרסה 7
         if trilinear:
             self.up = nn.Upsample(scale_factor=2, mode='trilinear', align_corners=True)
         else:
@@ -91,10 +65,10 @@ class DecoderBlock3D(nn.Module):
         self.conv = ResidualBlock3D(in_channels, out_channels, num_groups)
     
     def forward(self, x1, x2):
-        # Upsample x1
+        # Upsample x1 - חלק קריטי בסקיפ קונקשן!
         x1 = self.up(x1)
         
-        # Pad x1 if needed to match x2 dimensions
+        # Pad x1 if needed to match x2 dimensions - קריטי! אופן הריפוד משפיע על התוצאות
         diffZ = x2.size()[2] - x1.size()[2]
         diffY = x2.size()[3] - x1.size()[3]
         diffX = x2.size()[4] - x1.size()[4]
@@ -105,11 +79,37 @@ class DecoderBlock3D(nn.Module):
             diffZ // 2, diffZ - diffZ // 2   # Front, Back
         ])
         
-        # Concatenate x2 (encoder features) with x1 (decoder features)
-        x = torch.cat([x2, x1], dim=1)
+        # Concatenate x2 (encoder features) with x1 (decoder features) - חשוב שהסדר יהיה זהה!
+        x = torch.cat([x2, x1], dim=1)  # קריטי! הסדר של x2 ו-x1 חייב להיות זהה!
         
         # Apply residual convolution block
         return self.conv(x)
+
+class ResidualBlock3D(nn.Module):
+    """
+    Block with residual connection - קריטי לביצועים!
+    """
+    def __init__(self, in_channels, out_channels, num_groups=8):
+        super(ResidualBlock3D, self).__init__()
+        
+        # Main convolutional path
+        self.conv_block = nn.Sequential(
+            nn.Conv3d(in_channels, out_channels, kernel_size=3, padding=1),
+            nn.GroupNorm(num_groups=min(num_groups, out_channels), num_channels=out_channels),
+            nn.ReLU(inplace=True),
+            nn.Conv3d(out_channels, out_channels, kernel_size=3, padding=1),
+            nn.GroupNorm(num_groups=min(num_groups, out_channels), num_channels=out_channels)
+        )
+        
+        self.residual = nn.Conv3d(in_channels, out_channels, kernel_size=1) if in_channels != out_channels else nn.Identity()
+        
+        # Final activation after residual connection
+        self.activation = nn.ReLU(inplace=True)
+    
+    def forward(self, x):
+        residual = self.residual(x)
+        x = self.conv_block(x)
+        return self.activation(x + residual)
 
 class UNet3DEncoder(nn.Module):
     """
@@ -521,7 +521,7 @@ class AutoSAM2(nn.Module):
         self.has_sam2_enabled = False
         
         # Control flag for SAM2 integration
-        use_sam2_path = True  # Toggle between UNet3D-only (False) and hybrid (True)
+        use_sam2_path = False  # Toggle between UNet3D-only (False) and hybrid (True)
         
         # Get batch dimensions and depth info
         batch_size, channels, dim1, dim2, dim3 = x.shape
