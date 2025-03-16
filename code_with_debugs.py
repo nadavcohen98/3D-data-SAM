@@ -157,9 +157,6 @@ class FlexibleUNet3D(nn.Module):
         dims = [dim1, dim2, dim3]
         depth_idx = dims.index(min(dims))
         depth = dims[depth_idx]
-
-        # Print explicit depth information
-        print(f"Volume has {depth} slices (dimension idx: {depth_idx})")
         
         # Ultra-defensive slice selection
         # Select only slices that are guaranteed to be within bounds
@@ -430,7 +427,6 @@ class AutoSAM2(nn.Module):
     
     def process_slice_with_sam2(self, input_vol, slice_idx, embedding, depth_dim_idx, device):
         """Process a single slice with SAM2 using smart MRI to RGB mapping."""
-        print(f"Processing slice {slice_idx} with SAM2")
         if not self.has_sam2:
             logger.warning(f"SAM2 not available for slice {slice_idx}")
             return None
@@ -609,8 +605,6 @@ class AutoSAM2(nn.Module):
             if sam2_mask is not None:
                 sam2_results[idx] = sam2_mask
 
-        print(f"SAM2 processed {len(sam2_results)} slices successfully: {list(sam2_results.keys())}")
-        print(f"UNet3D processed all {depth} slices")
         
         # Mode 2: SAM2 only (without UNet decoder)
         if not self.enable_unet_decoder:
