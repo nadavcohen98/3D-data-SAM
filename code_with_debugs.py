@@ -291,7 +291,7 @@ class AutoSAM2(nn.Module):
         slice_interval=10, 
         trilinear=True,
         enable_unet_decoder=True,
-        enable_sam2=True,
+        enable_sam2=False,
         sam2_model_id="facebook/sam2-hiera-large"
     ):
         super().__init__()
