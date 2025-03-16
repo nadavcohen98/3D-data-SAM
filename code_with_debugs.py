@@ -739,32 +739,32 @@ class AutoSAM2(nn.Module):
             
             return output
         
-        def get_performance_stats(self):
-            """Get performance statistics for the model"""
-            stats = {
-                "has_sam2": self.has_sam2 if hasattr(self, 'has_sam2') else False,
-                "sam2_slices_processed": self.performance_metrics["sam2_slices_processed"],
-                "sam2_used_in_forward": self.has_sam2_enabled,
-                "model_mode": "sam2" if self.has_sam2_enabled else "fallback_unet3d"
-            }
-            
-            if self.performance_metrics["sam2_processing_time"]:
-                stats["avg_sam2_time_per_slice"] = np.mean(self.performance_metrics["sam2_processing_time"])
-                stats["total_sam2_time"] = np.sum(self.performance_metrics["sam2_processing_time"])
-                stats["max_sam2_time_per_slice"] = np.max(self.performance_metrics["sam2_processing_time"])
-                stats["min_sam2_time_per_slice"] = np.min(self.performance_metrics["sam2_processing_time"])
-            
-            if self.performance_metrics["encoder_time"]:
-                stats["avg_encoder_time"] = np.mean(self.performance_metrics["encoder_time"])
-            
-            if self.performance_metrics["decoder_time"]:
-                stats["avg_decoder_time"] = np.mean(self.performance_metrics["decoder_time"])
-            
-            if self.performance_metrics["total_time"]:
-                stats["avg_total_time"] = np.mean(self.performance_metrics["total_time"])
-                stats["total_forward_passes"] = len(self.performance_metrics["total_time"])
-            
-            return stats
+    def get_performance_stats(self):
+        """Get performance statistics for the model"""
+        stats = {
+            "has_sam2": self.has_sam2 if hasattr(self, 'has_sam2') else False,
+            "sam2_slices_processed": self.performance_metrics["sam2_slices_processed"],
+            "sam2_used_in_forward": self.has_sam2_enabled,
+            "model_mode": "sam2" if self.has_sam2_enabled else "fallback_unet3d"
+        }
+        
+        if self.performance_metrics["sam2_processing_time"]:
+            stats["avg_sam2_time_per_slice"] = np.mean(self.performance_metrics["sam2_processing_time"])
+            stats["total_sam2_time"] = np.sum(self.performance_metrics["sam2_processing_time"])
+            stats["max_sam2_time_per_slice"] = np.max(self.performance_metrics["sam2_processing_time"])
+            stats["min_sam2_time_per_slice"] = np.min(self.performance_metrics["sam2_processing_time"])
+        
+        if self.performance_metrics["encoder_time"]:
+            stats["avg_encoder_time"] = np.mean(self.performance_metrics["encoder_time"])
+        
+        if self.performance_metrics["decoder_time"]:
+            stats["avg_decoder_time"] = np.mean(self.performance_metrics["decoder_time"])
+        
+        if self.performance_metrics["total_time"]:
+            stats["avg_total_time"] = np.mean(self.performance_metrics["total_time"])
+            stats["total_forward_passes"] = len(self.performance_metrics["total_time"])
+        
+        return stats
 
 print("=== MODEL.PY LOADED SUCCESSFULLY ===")
 
