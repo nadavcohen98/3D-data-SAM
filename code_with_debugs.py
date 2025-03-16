@@ -796,6 +796,50 @@ class AutoSAM2(nn.Module):
         # If we processed all slices (no interpolation needed), return the volume
         if len(slice_indices) == depth:
             return volume
+            
+        # Otherwise, for any missing slices, perform interpolation
+        sorted_indices = sorted(list(sam2_masks.keys()))
+        
+        # For each pair of adjacent processed slices
+        for i in range(len(sorted_indices) - 1):
+            start_idx = sorted_indices[i]
+            end_idx = sorted_indices[i + 1]
+            
+            # Skip if they're adjacent
+            if end_idx - start_idx <= 1:
+                continue
+            
+            # Get masks for start and end slices
+            if depth_dim_idx == 0:
+                start_mask = volume[:, :, start_idx, :, :]
+                end_mask = volume[:, :, end_idx, :, :]
+            elif depth_dim_idx == 1:
+                start_mask = volume[:, :, :, start_idx, :]
+                end_mask = volume[:, :, :, end_idx, :]
+            else:  # default to dim 2
+                start_mask = volume[:, :, :, :, start_idx]
+                end_mask = volume[:, :, :, :, end_idx]
+            
+            # Interpolate for each slice in between
+            for j in range(start_idx + 1, end_idx):
+                # Calculate linear interpolation weight
+                alpha = (j - start_idx) / (end_idx - start_idx)
+                
+                # Apply weighted combination
+                interp_mask = (1 - alpha) * start_mask + alpha * end_mask
+                
+                # Threshold for clean binary masks
+                interp_mask = (interp_mask > 0.5).float()
+                
+                # Assign to volume
+                if depth_dim_idx == 0:
+                    volume[:, :, j, :, :] = interp_mask
+                elif depth_dim_idx == 1:
+                    volume[:, :, :, j, :] = interp_mask
+                else:  # default to dim 2
+                    volume[:, :, :, :, j] = interp_mask
+        
+        return volume
         
     # Compatibility method for train.py
     def decoder(self, encoder_outputs):
@@ -829,85 +873,83 @@ class AutoSAM2(nn.Module):
         return torch.sigmoid(x)
     
     def forward(self, x):
-            """
-            Forward pass using UNet3D encoder + partial decoder -> SAM2
-            or fallback UNet3D model
+        """
+        Forward pass using UNet3D encoder + partial decoder -> SAM2
+        or fallback UNet3D model
+        
+        Args:
+            x: Input volume [B, C, D, H, W]
             
-            Args:
-                x: Input volume [B, C, D, H, W]
-                
-            Returns:
-                Segmentation mask at full resolution [B, C, D, H, W]
-            """
-            device = x.device
-            start_time = time.time()
-            
-            # Reset SAM2 enabled flag
-            self.has_sam2_enabled = False
-            
-            # Control flag for SAM2 path
-            use_sam2_path = True  # Set to True when ready to use full SAM2 integration
-            
-            # Check if we should use SAM2 or fallback mode
-            if not use_sam2_path or not hasattr(self, 'has_sam2') or not self.has_sam2:
-                logger.info("Using fallback UNet3D model")
-                output = self.fallback_model(x)
-                return output
-            
-            # If we're using SAM2 path:
-            # 1. Run encoder
-            encoder_start = time.time()
-            x1, x2, x3, x4, x5, metadata = self.encoder(x)
-            encoder_time = time.time() - encoder_start
-            self.performance_metrics["encoder_time"].append(encoder_time)
-            
-            # 2. Run partial decoder to get embeddings
-            decoder_start = time.time()
-            embeddings_3d = self.partial_decoder(x5, x4, x3)
-            
-            # 3. Process all slices with SAM2
-            self.has_sam2_enabled = True
-            output = self.process_selected_slices(x, embeddings_3d, metadata, device)
-            
-            # Track timing
-            decoder_time = time.time() - decoder_start
-            self.performance_metrics["decoder_time"].append(decoder_time)
-            
-            total_time = time.time() - start_time
-            self.performance_metrics["total_time"].append(total_time)
-            
-            logger.info(f"Forward pass completed in {total_time:.4f}s")
-            
+        Returns:
+            Segmentation mask at full resolution [B, C, D, H, W]
+        """
+        device = x.device
+        start_time = time.time()
+        
+        # Reset SAM2 enabled flag
+        self.has_sam2_enabled = False
+        
+        # Control flag for SAM2 path
+        use_sam2_path = True  # Set to True when ready to use full SAM2 integration
+        
+        # Check if we should use SAM2 or fallback mode
+        if not use_sam2_path or not hasattr(self, 'has_sam2') or not self.has_sam2:
+            logger.info("Using fallback UNet3D model")
+            output = self.fallback_model(x)
             return output
-            
-        def get_performance_stats(self):
-            """Get performance statistics for the model"""
-            stats = {
-                "has_sam2": self.has_sam2 if hasattr(self, 'has_sam2') else False,
-                "sam2_slices_processed": self.performance_metrics["sam2_slices_processed"],
-                "sam2_used_in_forward": self.has_sam2_enabled,
-                "model_mode": "sam2" if self.has_sam2_enabled else "fallback_unet3d"
-            }
-            
-            if self.performance_metrics["sam2_processing_time"]:
-                stats["avg_sam2_time_per_slice"] = np.mean(self.performance_metrics["sam2_processing_time"])
-                stats["total_sam2_time"] = np.sum(self.performance_metrics["sam2_processing_time"])
-                stats["max_sam2_time_per_slice"] = np.max(self.performance_metrics["sam2_processing_time"])
-                stats["min_sam2_time_per_slice"] = np.min(self.performance_metrics["sam2_processing_time"])
-            
-            if self.performance_metrics["encoder_time"]:
-                stats["avg_encoder_time"] = np.mean(self.performance_metrics["encoder_time"])
-            
-            if self.performance_metrics["decoder_time"]:
-                stats["avg_decoder_time"] = np.mean(self.performance_metrics["decoder_time"])
-            
-            if self.performance_metrics["total_time"]:
-                stats["avg_total_time"] = np.mean(self.performance_metrics["total_time"])
-                stats["total_forward_passes"] = len(self.performance_metrics["total_time"])
-            
-            return stats
+        
+        # If we're using SAM2 path:
+        # 1. Run encoder
+        encoder_start = time.time()
+        x1, x2, x3, x4, x5, metadata = self.encoder(x)
+        encoder_time = time.time() - encoder_start
+        self.performance_metrics["encoder_time"].append(encoder_time)
+        
+        # 2. Run partial decoder to get embeddings
+        decoder_start = time.time()
+        embeddings_3d = self.partial_decoder(x5, x4, x3)
+        
+        # 3. Process all slices with SAM2
+        self.has_sam2_enabled = True
+        output = self.process_selected_slices(x, embeddings_3d, metadata, device)
+        
+        # Track timing
+        decoder_time = time.time() - decoder_start
+        self.performance_metrics["decoder_time"].append(decoder_time)
+        
+        total_time = time.time() - start_time
+        self.performance_metrics["total_time"].append(total_time)
+        
+        logger.info(f"Forward pass completed in {total_time:.4f}s")
+        
+        return output
     
-    print("=== MODEL.PY LOADED SUCCESSFULLY ===")
+    def get_performance_stats(self):
+        """Get performance statistics for the model"""
+        stats = {
+            "has_sam2": self.has_sam2 if hasattr(self, 'has_sam2') else False,
+            "sam2_slices_processed": self.performance_metrics["sam2_slices_processed"],
+            "sam2_used_in_forward": self.has_sam2_enabled,
+            "model_mode": "sam2" if self.has_sam2_enabled else "fallback_unet3d"
+        }
+        
+        if self.performance_metrics["sam2_processing_time"]:
+            stats["avg_sam2_time_per_slice"] = np.mean(self.performance_metrics["sam2_processing_time"])
+            stats["total_sam2_time"] = np.sum(self.performance_metrics["sam2_processing_time"])
+            stats["max_sam2_time_per_slice"] = np.max(self.performance_metrics["sam2_processing_time"])
+            stats["min_sam2_time_per_slice"] = np.min(self.performance_metrics["sam2_processing_time"])
+        
+        if self.performance_metrics["encoder_time"]:
+            stats["avg_encoder_time"] = np.mean(self.performance_metrics["encoder_time"])
+        
+        if self.performance_metrics["decoder_time"]:
+            stats["avg_decoder_time"] = np.mean(self.performance_metrics["decoder_time"])
+        
+        if self.performance_metrics["total_time"]:
+            stats["avg_total_time"] = np.mean(self.performance_metrics["total_time"])
+            stats["total_forward_passes"] = len(self.performance_metrics["total_time"])
+        
+        return stats
 
 
 #dataset.py
