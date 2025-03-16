@@ -320,6 +320,79 @@ class FullUNet3D(nn.Module):
         
         return torch.sigmoid(x)  # Apply sigmoid to get probabilities
 
+def process_selected_slices(self, x, embeddings_3d, metadata, device):
+    """
+    Process only selected slices in the volume with SAM2
+    
+    Args:
+        x: Input volume [B, C, D, H, W]
+        embeddings_3d: Embeddings from partial decoder
+        metadata: Metadata from encoder
+        device: Device for computation
+        
+    Returns:
+        Segmentation volume at full resolution
+    """
+    # Get relevant metadata
+    depth_dim_idx = metadata["depth_dim_idx"]
+    depth = x.shape[2 + depth_dim_idx]
+    
+    # Define specific slices to process with SAM2
+    selected_indices = [5, 15, 25, 35, 45, 55, 63, 70, 77, 84, 91, 98, 106, 114, 124, 134, 144, 154]
+    # Filter indices that are within range for this volume
+    selected_indices = [idx for idx in selected_indices if idx < depth]
+    
+    logger.info(f"Processing selected slices: {selected_indices}")
+    
+    # Initialize dictionary to store SAM2 masks
+    sam2_masks = {}
+    
+    # Process selected slices
+    for slice_idx in selected_indices:
+        try:
+            # Extract original image slice (use FLAIR, index 0)
+            img_slice = self.embedding_processor.extract_slice(
+                x, slice_idx, depth_dim_idx
+            )[0:1, 0:1]  # Get first batch item, first channel
+            
+            # Normalize the slice for better visualization
+            img_slice = (img_slice - img_slice.min()) / (img_slice.max() - img_slice.min() + 1e-8)
+            
+            # Find nearest downsampled index in bottleneck
+            ds_slice_idx = min(slice_idx // 16, embeddings_3d.shape[2 + depth_dim_idx] - 1)
+            
+            # Get embedding for this slice
+            embedding = self.embedding_processor(
+                embeddings_3d, 
+                ds_slice_idx,
+                depth_dim_idx
+            )
+            
+            # Process slice with SAM2
+            mask = self.process_slice_with_sam2(img_slice, embedding, slice_idx, device)
+            
+            # Store the mask
+            sam2_masks[slice_idx] = mask
+            
+            logger.info(f"Processed slice {slice_idx} with SAM2")
+                
+        except Exception as e:
+            logger.error(f"Error processing slice {slice_idx}: {e}")
+            # Create an empty mask on error
+            height, width = x.shape[3], x.shape[4]
+            sam2_masks[slice_idx] = torch.zeros((1, self.num_classes, height, width), device=device)
+    
+    # Create full volume from processed slices
+    all_indices = list(range(depth))
+    output = self.improved_volume_from_slices(
+        sam2_masks,
+        (x.shape[0], self.num_classes, *x.shape[2:]),
+        all_indices,
+        depth_dim_idx
+    )
+    
+    return output
+
 class AutoSAM2(nn.Module):
     """
     AutoSAM2: Adapting SAM2 for 3D Medical Image Segmentation
@@ -587,73 +660,6 @@ class AutoSAM2(nn.Module):
             height, width = img_slice.shape[2:]
             return torch.zeros((1, self.num_classes, height, width), device=device)
     
-    def process_all_slices(self, x, embeddings_3d, metadata, device):
-        """
-        Process all slices in the volume with SAM2
-        
-        Args:
-            x: Input volume [B, C, D, H, W]
-            embeddings_3d: Embeddings from partial decoder
-            metadata: Metadata from encoder
-            device: Device for computation
-            
-        Returns:
-            Segmentation volume at full resolution
-        """
-        # Get relevant metadata
-        depth_dim_idx = metadata["depth_dim_idx"]
-        depth = x.shape[2 + depth_dim_idx]
-        
-        # Initialize dictionary to store SAM2 masks
-        sam2_masks = {}
-        
-        # Process each slice in the volume
-        for slice_idx in range(depth):
-            try:
-                # Extract original image slice (use FLAIR, index 0)
-                img_slice = self.embedding_processor.extract_slice(
-                    x, slice_idx, depth_dim_idx
-                )[0:1, 0:1]  # Get first batch item, first channel
-                
-                # Normalize the slice for better visualization
-                img_slice = (img_slice - img_slice.min()) / (img_slice.max() - img_slice.min() + 1e-8)
-                
-                # Find nearest downsampled index in bottleneck
-                ds_slice_idx = min(slice_idx // 16, embeddings_3d.shape[2 + depth_dim_idx] - 1)
-                
-                # Get embedding for this slice
-                embedding = self.embedding_processor(
-                    embeddings_3d, 
-                    ds_slice_idx,
-                    depth_dim_idx
-                )
-                
-                # Process slice with SAM2
-                mask = self.process_slice_with_sam2(img_slice, embedding, slice_idx, device)
-                
-                # Store the mask
-                sam2_masks[slice_idx] = mask
-                
-                # Log progress occasionally
-                if slice_idx % 10 == 0:
-                    logger.info(f"Processed slice {slice_idx}/{depth} with SAM2")
-                    
-            except Exception as e:
-                logger.error(f"Error processing slice {slice_idx}: {e}")
-                # Create an empty mask on error
-                height, width = x.shape[3], x.shape[4]
-                sam2_masks[slice_idx] = torch.zeros((1, self.num_classes, height, width), device=device)
-        
-        # Create full volume from processed slices
-        all_indices = list(range(depth))
-        output = self.improved_volume_from_slices(
-            sam2_masks,
-            (x.shape[0], self.num_classes, *x.shape[2:]),
-            all_indices,
-            depth_dim_idx
-        )
-        
-        return output
     
     def improved_volume_from_slices(self, sam2_masks, volume_shape, slice_indices, depth_dim_idx):
         """
@@ -801,7 +807,7 @@ class AutoSAM2(nn.Module):
         
         # 3. Process all slices with SAM2
         self.has_sam2_enabled = True
-        output = self.process_all_slices(x, embeddings_3d, metadata, device)
+        output = self.process_selected_slices (x, embeddings_3d, metadata, device)
         
         # Track timing
         decoder_time = time.time() - decoder_start
