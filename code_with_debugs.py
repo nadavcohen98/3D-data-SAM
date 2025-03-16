@@ -115,11 +115,12 @@ class UNet3DEncoder(nn.Module):
     """
     UNet3D Encoder that creates features at different resolutions
     """
-    def __init__(self, in_channels=4, base_channels=16, slice_interval=1):
+    def __init__(self, in_channels=4,  n_classes=4, base_channels=16, slice_interval=10,  trilinear=True):
         super(UNet3DEncoder, self).__init__()
         
         # Configuration
         self.in_channels = in_channels
+        self.n_classes = n_classes
         self.base_channels = base_channels
         self.slice_interval = slice_interval
         
@@ -253,7 +254,7 @@ class FullUNet3D(nn.Module):
     Complete UNet3D model with full encoder and decoder
     Compatible with version 7
     """
-    def __init__(self, in_channels=4, n_classes=4, base_channels=16, trilinear=True):
+    def __init__(self, in_channels=4, n_classes=4, base_channels=16 trilinear=True):
         super(FullUNet3D, self).__init__()
         
         # Configuration
