@@ -254,7 +254,7 @@ class FullUNet3D(nn.Module):
     Complete UNet3D model with full encoder and decoder
     Compatible with version 7
     """
-    def __init__(self, in_channels=4, n_classes=4, base_channels=16 trilinear=True):
+    def __init__(self, in_channels=4, n_classes=4, base_channels=16 ,trilinear=True):
         super(FullUNet3D, self).__init__()
         
         # Configuration
