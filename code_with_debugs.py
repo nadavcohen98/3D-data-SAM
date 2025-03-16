@@ -668,29 +668,32 @@ class AutoSAM2(nn.Module):
         
         return volume
         
-    # Compatibility method for train.py
     def decoder(self, encoder_outputs):
         """
-        Critical method for compatibility with train.py
+        Critical method for compatibility with train.py.
+        Ensures that when SAM2 is disabled, the model behaves exactly like FullUNet3D.
         """
-        # If not a tuple, just return as is (fallback)
         if not isinstance(encoder_outputs, tuple):
             return encoder_outputs
-        
-        # Unpack encoder outputs
+    
+        # If SAM2 is disabled, run the entire model as FullUNet3D
+        if not self.has_sam2_enabled:
+            return self.fallback_model(encoder_outputs[0])
+    
+        # Unpack encoder outputs (if SAM2 is enabled)
         x1, x2, x3, x4, x5, metadata = encoder_outputs
-        
+    
         # Use the fallback model's decoder path
         x = self.fallback_model.dec1(x5, x4)
         x = self.fallback_model.dec2(x, x3)
         x = self.fallback_model.dec3(x, x2)
         x = self.fallback_model.dec4(x, x1)
-        
+    
         # Final convolution
         x = self.fallback_model.output_conv(x)
-        
-        # Apply sigmoid to get probabilities
+    
         return torch.sigmoid(x)
+
 
     
     def forward(self, x):
