@@ -289,11 +289,12 @@ class MRItoRGBMapper(nn.Module):
     def __init__(self):
         super().__init__()
         
-        # Initial channel-specific processing
-        self.t1_process = nn.Conv2d(1, 4, kernel_size=3, padding=1)
-        self.t1ce_process = nn.Conv2d(1, 4, kernel_size=3, padding=1) 
-        self.t2_process = nn.Conv2d(1, 4, kernel_size=3, padding=1)
-        self.flair_process = nn.Conv2d(1, 4, kernel_size=3, padding=1)
+        # Combined processing - simpler and more robust
+        self.initial_features = nn.Sequential(
+            nn.Conv2d(4, 16, kernel_size=3, padding=1),
+            nn.GroupNorm(4, 16),
+            nn.ReLU(inplace=True),
+        )
         
         # Feature extraction and integration
         self.features = nn.Sequential(
@@ -314,38 +315,22 @@ class MRItoRGBMapper(nn.Module):
         # Final RGB mapping
         self.to_rgb = nn.Conv2d(16, 3, kernel_size=1)
         
-        # Contrast enhancement parameters (learnable)
-        self.contrast_scale = nn.Parameter(torch.ones(3))
-        self.contrast_center = nn.Parameter(torch.zeros(3))
-        
     def forward(self, x):
-        # Split channels (assuming order: T1, T1ce, T2, FLAIR)
-        t1 = x[:, 0:1]
-        t1ce = x[:, 1:2]
-        t2 = x[:, 2:3]
-        flair = x[:, 3:4]
-        
-        # Process each modality separately
-        t1_feat = self.t1_process(t1)
-        t1ce_feat = self.t1ce_process(t1ce)
-        t2_feat = self.t2_process(t2)
-        flair_feat = self.flair_process(flair)
-        
-        # Concatenate processed features
-        combined = torch.cat([t1_feat, t1ce_feat, t2_feat, flair_feat], dim=1)
+        # Process all modalities together
+        features = self.initial_features(x)
         
         # Extract integrated features
-        features = self.features(combined)
+        features = self.features(features)
         
         # Apply attention
         attention_map = self.attention(features)
         attended_features = features * attention_map
         
-        # Generate initial RGB
+        # Generate RGB
         rgb = self.to_rgb(attended_features)
         
-        # Apply learnable contrast enhancement
-        enhanced_rgb = torch.sigmoid((rgb - self.contrast_center) * self.contrast_scale)
+        # Ensure proper range with sigmoid
+        enhanced_rgb = torch.sigmoid(rgb)
         
         return enhanced_rgb
 
