@@ -163,13 +163,14 @@ class AutoSAM2(nn.Module):
     Integrated AutoSAM2 model that combines UNet3D with SAM2 integration points.
     Features a single integrated architecture with optional SAM2 branches.
     """
-    def __init__(self, in_channels=4, n_classes=4, base_channels=16, 
+    def __init__(self, in_channels=4, num_classes=4, base_channels=16, 
                  trilinear=True, sam2_model_path=None, enable_sam2=True, debug_mode=False):
         super(AutoSAM2, self).__init__()
         
+       
         # Store configuration
         self.in_channels = in_channels
-        self.n_classes = n_classes
+        self.n_classes = num_classes
         self.base_channels = base_channels
         self.sam2_model_path = sam2_model_path
         self.enable_sam2 = enable_sam2
