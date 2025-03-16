@@ -157,6 +157,9 @@ class FlexibleUNet3D(nn.Module):
         dims = [dim1, dim2, dim3]
         depth_idx = dims.index(min(dims))
         depth = dims[depth_idx]
+
+        # Print explicit depth information
+        print(f"Volume has {depth} slices (dimension idx: {depth_idx})")
         
         # Ultra-defensive slice selection
         # Select only slices that are guaranteed to be within bounds
@@ -184,7 +187,10 @@ class FlexibleUNet3D(nn.Module):
         key_indices.extend(extra_indices)
         key_indices.sort()
         
-        # Rest of the function remains the same...
+        # Print selected slices
+        print(f"Selected {len(key_indices)} slices for processing: {key_indices}")
+
+    
         # Encoder pathway
         x1 = self.initial_conv(x)
         x2 = self.enc1(x1)
