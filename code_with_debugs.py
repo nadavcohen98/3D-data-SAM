@@ -168,10 +168,32 @@ class FlexibleUNet3D(nn.Module):
         depth_idx = dims.index(min(dims))
         depth = dims[depth_idx]
         
-        # Select key slices at regular intervals
-        key_indices = [5, 15, 25, 35, 45, 55, 63, 69, 72, 75, 76, 77, 78, 79, 82, 
+        # Log volume dimensions and slice count
+        logger.info(f"Volume shape: {x.shape}, depth dimension: {depth_idx}")
+        logger.info(f"Number of slices in this volume: {depth}")
+        
+        # Hardcoded slices that work well for tumor detection
+        preset_key_indices = [5, 15, 25, 35, 45, 55, 63, 69, 72, 75, 76, 77, 78, 79, 82, 
                               85, 89, 94, 98, 102, 107, 114, 124, 134, 144, 154]
-
+        
+        # Filter out indices that would be out of bounds for this volume
+        key_indices = [idx for idx in preset_key_indices if idx < depth]
+        
+        # Make sure we have at least some slices
+        if not key_indices:
+            # Fallback selection if none of our preferred slices fit
+            middle_idx = depth // 2
+            key_indices = [
+                0,  # First slice
+                max(0, middle_idx - 5),  # Before middle
+                middle_idx,  # Middle slice
+                min(depth - 1, middle_idx + 5),  # After middle
+                depth - 1  # Last slice
+            ]
+        
+        # Log selected slices
+        logger.info(f"Selected {len(key_indices)} slices: {key_indices}")
+        
         # Encoder pathway
         x1 = self.initial_conv(x)         # Full resolution features
         x2 = self.enc1(x1)                # 1/2 resolution
