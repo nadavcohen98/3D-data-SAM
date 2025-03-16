@@ -274,6 +274,19 @@ class SliceProcessor(nn.Module):
         
         return processed_slices
 
+class MRItoRGBMapper(nn.Module):
+    """Smart mapping from 4 MRI channels to 3 RGB channels"""
+    def __init__(self):
+        super().__init__()
+        self.mapper = nn.Sequential(
+            nn.Conv2d(4, 16, kernel_size=3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(16, 3, kernel_size=1)
+        )
+        
+    def forward(self, x):
+        return torch.sigmoid(self.mapper(x))
+
 # ======= Main AutoSAM2 model =======
 
 class AutoSAM2(nn.Module):
@@ -291,7 +304,7 @@ class AutoSAM2(nn.Module):
         slice_interval=10, 
         trilinear=True,
         enable_unet_decoder=True,
-        enable_sam2=False,
+        enable_sam2=True,
         sam2_model_id="facebook/sam2-hiera-large"
     ):
         super().__init__()
@@ -301,6 +314,7 @@ class AutoSAM2(nn.Module):
         self.enable_unet_decoder = enable_unet_decoder
         self.enable_sam2 = enable_sam2
         self.sam2_model_id = sam2_model_id
+        
         
         # Create flexible UNet3D
         self.unet3d = FlexibleUNet3D(
@@ -316,6 +330,8 @@ class AutoSAM2(nn.Module):
             input_channels=256,
             output_size=(64, 64)
         )
+
+        self.mri_to_rgb = MRItoRGBMapper()
         
         # For compatibility with train.py
         self.encoder = self.unet3d  # Point to the UNet3D model
@@ -403,31 +419,40 @@ class AutoSAM2(nn.Module):
         return img_rgb
     
     def process_slice_with_sam2(self, input_vol, slice_idx, embedding, depth_dim_idx, device):
-        """Process a single slice with SAM2."""
+        """Process a single slice with SAM2 using smart MRI to RGB mapping."""
         if not self.has_sam2:
             logger.warning(f"SAM2 not available for slice {slice_idx}")
             return None
             
         try:
-            # Extract original slice
+            # Extract original slice with all MRI channels
             if depth_dim_idx == 0:
-                orig_slice = input_vol[:, :, slice_idx:slice_idx+1]
+                orig_slice = input_vol[:, :, slice_idx]  # [B, C, H, W]
             elif depth_dim_idx == 1:
-                orig_slice = input_vol[:, :, :, slice_idx:slice_idx+1]
+                orig_slice = input_vol[:, :, :, slice_idx]  # [B, C, H, W]
             else:  # depth_dim_idx == 2
-                orig_slice = input_vol[:, :, :, :, slice_idx:slice_idx+1]
+                orig_slice = input_vol[:, :, :, :, slice_idx]  # [B, C, H, W]
             
-            # Select first channel for visualization (e.g., FLAIR in BraTS)
-            img_slice = orig_slice[:, 0:1]
+            # If we have a batch, just take the first item
+            if orig_slice.shape[0] > 1:
+                orig_slice = orig_slice[0:1]  # [1, C, H, W]
             
-            # Preprocess for SAM2
-            img_rgb = self.preprocess_slice_for_sam2(img_slice)
+            # Convert MRI to RGB using our learnable mapper
+            rgb_tensor = self.mri_to_rgb(orig_slice)  # [1, 3, H, W]
+            
+            # Convert to numpy array in the format SAM2 expects: [H, W, 3]
+            rgb_image = rgb_tensor[0].permute(1, 2, 0).detach().cpu().numpy()
+            
+            # Optional: Enhance contrast
+            p1, p99 = np.percentile(rgb_image, (1, 99))
+            if p99 > p1:
+                rgb_image = np.clip((rgb_image - p1) / (p99 - p1), 0, 1)
             
             # Set image in SAM2
-            self.sam2.set_image(img_rgb)
+            self.sam2.set_image(rgb_image)
             
             # Generate point prompts
-            h, w = img_rgb.shape[:2]
+            h, w = rgb_image.shape[:2]
             points = np.array([[w//2, h//2]])  # Center point
             labels = np.array([1])  # Foreground
             
