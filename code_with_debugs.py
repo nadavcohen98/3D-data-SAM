@@ -791,7 +791,7 @@ class AutoSAM2(nn.Module):
         # IMPORTANT: During early development, use the fallback UNet3D model
         # for stability while training. The SAM2 integration can be fully 
         # enabled once the training pipeline is working properly.
-        use_sam2_path = False  # Set to True when ready to use full SAM2 integration
+        use_sam2_path = True  # Set to True when ready to use full SAM2 integration
         
         # Check if we should use SAM2 or fallback mode
         if not use_sam2_path or not hasattr(self, 'has_sam2') or not self.has_sam2:
