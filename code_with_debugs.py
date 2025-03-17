@@ -419,7 +419,7 @@ class UNet3DtoSAM2Bridge(nn.Module):
         )
         
         # Importance weighting parameter (learns how much to scale the output)
-        self.importance = nn.Parameter(torch.tensor(1.0))
+        self.importance = nn.Parameter(torch.tensor(0.5))
         
         # For tracking feature statistics
         self.feature_stats = {
@@ -449,7 +449,7 @@ class UNet3DtoSAM2Bridge(nn.Module):
         transformed = self.transformer(x)
         
         # Apply learnable importance weighting
-        output = transformed * torch.sigmoid(self.importance)
+        output = transformed * (torch.sigmoid(self.importance) * 2)
         
         return output
         
@@ -739,9 +739,16 @@ class AutoSAM2(nn.Module):
         
         return volume
     
-    def combine_results(self, unet_output, sam2_slices, depth_dim_idx, blend_weight=0.7):
+    def combine_results(self, unet_output, sam2_slices, ground_truth, depth_dim_idx, blend_weight=0.7):
         """
-        Combine UNet output with SAM2 results with detailed slice-specific comparisons.
+        Combine UNet output with SAM2 results with detailed comparisons to ground truth.
+        
+        Args:
+            unet_output: Full volume output from UNet3D
+            sam2_slices: Dictionary of slice results from SAM2
+            ground_truth: The ground truth segmentation masks
+            depth_dim_idx: Which dimension is the depth dimension
+            blend_weight: Weight for UNet result when blending (0-1)
         """
         # Start with UNet output
         combined = unet_output.clone()
@@ -750,7 +757,7 @@ class AutoSAM2(nn.Module):
         if not hasattr(self, 'slice_comparison'):
             self.slice_comparison = {
                 'batch_count': 0,
-                'detailed_slices': []  # Will store a few specific slices for detailed comparison
+                'detailed_slices': []
             }
         
         self.slice_comparison['batch_count'] += 1
@@ -758,7 +765,7 @@ class AutoSAM2(nn.Module):
         # For detailed comparison every 20 batches
         save_detailed = (self.slice_comparison['batch_count'] % 20 == 0)
         if save_detailed:
-            print("\n===== Detailed SAM2 vs UNet3D Comparison =====")
+            print("\n===== Detailed SAM2 vs UNet3D vs Ground Truth Comparison =====")
         
         # Replace or blend slices with SAM2 results
         for slice_idx, mask in sam2_slices.items():
@@ -766,22 +773,33 @@ class AutoSAM2(nn.Module):
                 # Get UNet slice
                 if depth_dim_idx == 0:
                     unet_slice = combined[:, :, slice_idx]
+                    gt_slice = ground_truth[:, :, slice_idx]
                 elif depth_dim_idx == 1:
                     unet_slice = combined[:, :, :, slice_idx]
+                    gt_slice = ground_truth[:, :, :, slice_idx]
                 else:  # depth_dim_idx == 2
                     unet_slice = combined[:, :, :, :, slice_idx]
+                    gt_slice = ground_truth[:, :, :, :, slice_idx]
                 
-                # Get binary tumor segmentations for comparison
+                # Get binary tumor segmentations 
                 sam2_tumor = (mask[:, 1:].sum(dim=1) > 0).float()
                 unet_tumor = (unet_slice[:, 1:].sum(dim=1) > 0).float()
+                gt_tumor = (gt_slice[:, 1:].sum(dim=1) > 0).float()
                 
-                # Calculate metrics
+                # Calculate metrics between models
                 sam2_pixels = torch.sum(sam2_tumor).item()
                 unet_pixels = torch.sum(unet_tumor).item()
-                intersection = torch.sum(sam2_tumor * unet_tumor).item()
+                gt_pixels = torch.sum(gt_tumor).item()
                 
-                # Compute Dice score
-                dice = 2 * intersection / (sam2_pixels + unet_pixels) if (sam2_pixels + unet_pixels) > 0 else 0
+                # Calculate overlap with ground truth
+                sam2_gt_overlap = torch.sum(sam2_tumor * gt_tumor).item()
+                unet_gt_overlap = torch.sum(unet_tumor * gt_tumor).item()
+                models_overlap = torch.sum(sam2_tumor * unet_tumor).item()
+                
+                # Compute Dice scores
+                sam2_gt_dice = 2 * sam2_gt_overlap / (sam2_pixels + gt_pixels) if (sam2_pixels + gt_pixels) > 0 else 0
+                unet_gt_dice = 2 * unet_gt_overlap / (unet_pixels + gt_pixels) if (unet_pixels + gt_pixels) > 0 else 0
+                models_dice = 2 * models_overlap / (sam2_pixels + unet_pixels) if (sam2_pixels + unet_pixels) > 0 else 0
                 
                 # Save detailed comparison for a few slices when triggered
                 if save_detailed and len(self.slice_comparison['detailed_slices']) < 3:
@@ -789,30 +807,28 @@ class AutoSAM2(nn.Module):
                         'slice_idx': slice_idx,
                         'sam2_tumor_pixels': sam2_pixels,
                         'unet_tumor_pixels': unet_pixels,
-                        'intersection': intersection,
-                        'dice': dice
+                        'gt_tumor_pixels': gt_pixels,
+                        'sam2_gt_dice': sam2_gt_dice,
+                        'unet_gt_dice': unet_gt_dice,
+                        'models_dice': models_dice
                     })
                     
                     # Print this slice's comparison
                     print(f"Slice {slice_idx}:")
+                    print(f"  Ground truth tumor size: {gt_pixels} pixels")
                     print(f"  SAM2 tumor size: {sam2_pixels} pixels")
                     print(f"  UNet tumor size: {unet_pixels} pixels")
-                    print(f"  Overlap: {intersection} pixels")
-                    print(f"  Dice score: {dice:.4f}")
+                    print(f"  SAM2-GT Dice: {sam2_gt_dice:.4f}")
+                    print(f"  UNet-GT Dice: {unet_gt_dice:.4f}")
+                    print(f"  SAM2-UNet Dice: {models_dice:.4f}")
                     
-                    # Add interpretation
-                    if dice > 0.7:
-                        print("  Interpretation: High agreement between SAM2 and UNet3D")
-                    elif dice > 0.4:
-                        print("  Interpretation: Moderate agreement")
-                    else:
-                        print("  Interpretation: Low agreement - the models see different things")
-                    
-                    # Print which is larger
-                    if sam2_pixels > unet_pixels:
-                        print(f"  SAM2 finds {(sam2_pixels/unet_pixels - 1)*100:.1f}% more tumor than UNet3D")
-                    elif unet_pixels > sam2_pixels:
-                        print(f"  UNet3D finds {(unet_pixels/sam2_pixels - 1)*100:.1f}% more tumor than SAM2")
+                    # Compare performance
+                    if sam2_gt_dice > unet_gt_dice:
+                        dice_diff = ((sam2_gt_dice/unet_gt_dice) - 1) * 100
+                        print(f"  SAM2 outperforms UNet by {dice_diff:.1f}% on this slice")
+                    elif unet_gt_dice > sam2_gt_dice:
+                        dice_diff = ((unet_gt_dice/sam2_gt_dice) - 1) * 100
+                        print(f"  UNet outperforms SAM2 by {dice_diff:.1f}% on this slice")
                     print()
                 
                 # Apply blending
