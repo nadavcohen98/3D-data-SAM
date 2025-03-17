@@ -263,7 +263,13 @@ class MultiPointPromptGenerator:
         
         # Find high probability regions
         high_prob = tumor_prob > 0.5
+
+        # Extract box
+        box = extract_tumor_box(tumor_prob)
         
+        # Create mask prompt
+        mask_prompt = create_mask_prompt(tumor_prob)
+                
         # Get coordinates of regions above threshold
         y_coords, x_coords = np.where(high_prob)
         
@@ -497,6 +503,33 @@ class AutoSAM2(nn.Module):
             self.enable_sam2 = enable_sam2
             
         logger.info(f"Mode set to: UNet Decoder={self.enable_unet_decoder}, SAM2={self.enable_sam2}")
+
+    
+    def extract_tumor_box(prob_map, threshold=0.5):
+        # Threshold the probability map
+        binary_mask = prob_map > threshold
+        
+        # Find coordinates of non-zero elements
+        y_indices, x_indices = np.where(binary_mask)
+        
+        # If no tumor found, return None
+        if len(y_indices) == 0:
+            return None
+        
+        # Find bbox coordinates
+        x1, x2 = np.min(x_indices), np.max(x_indices)
+        y1, y2 = np.min(y_indices), np.max(y_indices)
+        
+        # Return as [x1, y1, x2, y2] format
+        return np.array([x1, y1, x2, y2])
+
+    def create_mask_prompt(prob_map, threshold=0.5):
+        # Create binary mask
+        mask = (prob_map > threshold).astype(np.float32)
+        
+        # Ensure correct shape for SAM2
+        return mask
+        
     
     def preprocess_slice_for_sam2(self, img_slice):
         """Preprocess a slice for SAM2."""
@@ -564,10 +597,7 @@ class AutoSAM2(nn.Module):
             # Generate intelligent point prompts using probability maps
             h, w = rgb_image.shape[:2]
             points, labels = self.point_generator.generate_prompts(probability_maps, slice_idx, h, w)
-            
-            # Get the points for the first batch item
-            batch_points = points[0]
-            batch_labels = labels[0]
+
             
             # Only proceed if we have points
             if len(batch_points) > 0:
@@ -575,6 +605,8 @@ class AutoSAM2(nn.Module):
                 masks, scores, _ = self.sam2.predict(
                     point_coords=points,
                     point_labels=labels,
+                    box=box,
+                    mask_input=mask_prompt,
                     multimask_output=True
                 )
                 
