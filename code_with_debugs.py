@@ -556,7 +556,7 @@ class AutoSAM2(nn.Module):
         return img_rgb
     
     def process_slice_with_sam2(self, input_vol, slice_idx, probability_maps, depth_dim_idx, device):
-        """Process a single slice with SAM2 using intelligent point prompts"""
+        """Process a single slice with SAM2 using intelligent point prompts and box/mask guidance"""
         if not self.has_sam2:
             logger.warning(f"SAM2 not available for slice {slice_idx}")
             return None
@@ -564,59 +564,46 @@ class AutoSAM2(nn.Module):
         try:
             # Extract original slice
             if depth_dim_idx == 0:
-                orig_slice = input_vol[:, :, slice_idx]  # [B, C, H, W]
+                orig_slice = input_vol[:, :, slice_idx]
             elif depth_dim_idx == 1:
-                orig_slice = input_vol[:, :, :, slice_idx]  # [B, C, H, W]
+                orig_slice = input_vol[:, :, :, slice_idx]
             else:  # depth_dim_idx == 2
-                orig_slice = input_vol[:, :, :, :, slice_idx]  # [B, C, H, W]
+                orig_slice = input_vol[:, :, :, :, slice_idx]
             
             # If we have a batch, just take the first item
             if orig_slice.shape[0] > 1:
-                orig_slice = orig_slice[0:1]  # [1, C, H, W]
+                orig_slice = orig_slice[0:1]
             
             # Convert MRI to RGB using our hybrid mapper
-            rgb_tensor = self.mri_to_rgb(orig_slice)  # [1, 3, H, W]
-
-    
+            rgb_tensor = self.mri_to_rgb(orig_slice)
+            
             # Convert to numpy array in the format SAM2 expects: [H, W, 3]
             rgb_image = rgb_tensor[0].permute(1, 2, 0).detach().cpu().numpy()
-
-            # Get tumor probability map
-            tumor_prob = probability_maps[0, 1:].sum(dim=0).cpu().detach().numpy()
-            print(f"DEBUG: tumor_prob shape: {tumor_prob.shape}")
-
+            
             # Get image dimensions
             h, w = rgb_image.shape[:2]
-            print(f"DEBUG: rgb_image shape: {rgb_image.shape}")
-
+            
+            # Get tumor probability map
+            tumor_prob = probability_maps[0, 1:].sum(dim=0).cpu().detach().numpy()
+            
             # Extract box
             box = self.extract_tumor_box(tumor_prob)
-            print(f"DEBUG: box: {box}")
             
             # Create mask prompt
             mask_prompt = self.create_mask_prompt(tumor_prob)
-            print(f"DEBUG: mask_prompt shape before: {mask_prompt.shape}")
             
             # Convert to tensor with proper dimensions
             mask_tensor = torch.from_numpy(mask_prompt).float().unsqueeze(0).unsqueeze(0).to(device)
-            print(f"DEBUG: mask_tensor shape: {mask_tensor.shape}")
-            
-            # Get RGB image dimensions
-            h, w = rgb_image.shape[:2]
-            print(f"DEBUG: rgb_image shape: {rgb_image.shape}")
             
             # Ensure mask matches RGB image dimensions
             if mask_tensor.shape[2:] != (h, w):
-                print(f"DEBUG: Resizing mask from {mask_tensor.shape[2:]} to {(h, w)}")
                 mask_tensor = F.interpolate(mask_tensor, size=(h, w), mode='nearest')
-                print(f"DEBUG: Resized mask shape: {mask_tensor.shape}")
-                        
             
             # Optional: Enhance contrast
             p1, p99 = np.percentile(rgb_image, (1, 99))
             if p99 > p1:
                 rgb_image = np.clip((rgb_image - p1) / (p99 - p1), 0, 1)
-
+                
             # Resize box to match image dimensions
             if box is not None and tumor_prob.shape != (h, w):
                 # Scale box coordinates to match image size
@@ -626,24 +613,22 @@ class AutoSAM2(nn.Module):
                 box[1] = int(box[1] * scale_h)
                 box[2] = int(box[2] * scale_w)
                 box[3] = int(box[3] * scale_h)
-                print(f"DEBUG: Scaled box: {box}")
             
             # Set image in SAM2
             self.sam2.set_image(rgb_image)
             
             # Generate intelligent point prompts using probability maps
-            h, w = rgb_image.shape[:2]
             points, labels = self.point_generator.generate_prompts(probability_maps, slice_idx, h, w)
-
             
+            # Call SAM2 with all prompt types
             masks, scores, _ = self.sam2.predict(
                 point_coords=points,
                 point_labels=labels,
                 box=box,
-                mask_input=mask_prompt,
+                mask_input=mask_tensor,  # Use the resized tensor here, not mask_prompt
                 multimask_output=True
             )
-
+            
             # Select best mask based on score
             best_idx = scores.argmax()
             best_mask = masks[best_idx]
