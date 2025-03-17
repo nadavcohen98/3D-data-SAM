@@ -396,6 +396,36 @@ class MRItoRGBMapper(nn.Module):
         
         return enhanced_rgb
 
+class UNet3DtoSAM2Bridge(nn.Module):
+    """
+    A basic bridge module to connect UNet3D features to SAM2.
+    This simpler version focuses on channel adaptation and spatial consistency
+    without complex attention mechanisms.
+    """
+    def __init__(self, input_channels=256, output_channels=256, intermediate_channels=128):
+        super().__init__()
+        
+        # Basic feature refinement
+        self.bridge = nn.Sequential(
+            # Down-projection
+            nn.Conv2d(input_channels, intermediate_channels, kernel_size=3, padding=1),
+            nn.GroupNorm(32, intermediate_channels),
+            nn.ReLU(inplace=True),
+            
+            # Feature refinement
+            nn.Conv2d(intermediate_channels, intermediate_channels, kernel_size=3, padding=1),
+            nn.GroupNorm(32, intermediate_channels),
+            nn.ReLU(inplace=True),
+            
+            # Up-projection to match SAM2 expected format
+            nn.Conv2d(intermediate_channels, output_channels, kernel_size=1),
+            nn.GroupNorm(32, output_channels),
+            nn.ReLU(inplace=True)
+        )
+    
+    def forward(self, x):
+        return self.bridge(x)
+
 
 # ======= Main AutoSAM2 model =======
 
@@ -419,6 +449,11 @@ class AutoSAM2(nn.Module):
         super().__init__()
 
         self.point_generator = MultiPointPromptGenerator(num_points=3)
+
+        self.unet_sam_bridge = UNet3DtoSAM2Bridge(
+            input_channels=256, 
+            output_channels=256 
+        )
         
         # Configuration
         self.num_classes = num_classes
@@ -560,7 +595,7 @@ class AutoSAM2(nn.Module):
         if not self.has_sam2:
             logger.warning(f"SAM2 not available for slice {slice_idx}")
             return None
-            
+                
         try:
             # Extract original slice
             if depth_dim_idx == 0:
@@ -583,8 +618,13 @@ class AutoSAM2(nn.Module):
             # Get image dimensions
             h, w = rgb_image.shape[:2]
             
-            # Get tumor probability map
-            tumor_prob = probability_maps[0, 1:].sum(dim=0).cpu().detach().numpy()
+            # Process mid-decoder features through bridge network
+            # First, extract the correct slice from probability_maps
+            enhanced_features = self.unet_sam_bridge(probability_maps)
+            
+            # Generate improved tumor probability map from enhanced features
+            tumor_prob = torch.sigmoid(enhanced_features.mean(dim=1, keepdim=True))
+            tumor_prob = tumor_prob[0, 0].cpu().detach().numpy()
             
             # First resize the tumor probability map to match the image dimensions
             if tumor_prob.shape != (h, w):
@@ -599,9 +639,6 @@ class AutoSAM2(nn.Module):
             # Create mask prompt from the resized probability map
             mask_prompt = self.create_mask_prompt(tumor_prob)
             
-            # Convert to tensor with proper dimensions
-            mask_tensor = torch.from_numpy(mask_prompt).float().unsqueeze(0).unsqueeze(0).to(device)
-            
             # Optional: Enhance contrast
             p1, p99 = np.percentile(rgb_image, (1, 99))
             if p99 > p1:
@@ -610,10 +647,9 @@ class AutoSAM2(nn.Module):
             # Set image in SAM2
             self.sam2.set_image(rgb_image)
             
-            # Generate intelligent point prompts using probability maps
-            # Make sure we use the original probability_maps here to avoid double resizing
+            # Generate intelligent point prompts using the enhanced features
             points, labels = self.point_generator.generate_prompts(
-                probability_maps, slice_idx, h, w
+                enhanced_features, slice_idx, h, w
             )
             
             # Call SAM2 with all prompt types
@@ -644,11 +680,10 @@ class AutoSAM2(nn.Module):
             self.performance_metrics["sam2_slices_processed"] += 1
             
             return multi_class_mask
-                
+                    
         except Exception as e:
             logger.error(f"Error processing slice {slice_idx} with SAM2: {e}")
             return None
-
 
     
     def create_3d_from_slices(self, input_shape, sam2_slices, depth_dim_idx, device):
@@ -748,14 +783,14 @@ class AutoSAM2(nn.Module):
         # Process selected slices with SAM2
         sam2_results = {}
         for idx in key_indices:
-            # Get embedding for this slice
-            slice_embedding = self.slice_processor.extract_slice(
-                sam_embeddings, idx // 4, depth_dim_idx
+            # Extract the specific slice from mid_features
+            slice_features = self.slice_processor.extract_slice(
+                mid_features, idx // 4, depth_dim_idx
             )
             
-            # Process with SAM2
+            # Process with SAM2 using the bridge
             sam2_mask = self.process_slice_with_sam2(
-                x, idx, slice_embedding, depth_dim_idx, device
+                x, idx, slice_features, depth_dim_idx, device
             )
             
             # Store valid results
