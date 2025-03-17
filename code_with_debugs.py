@@ -438,7 +438,7 @@ class UNet3DtoSAM2Bridge(nn.Module):
                 self.feature_stats['iter'] += 1
                 self.feature_stats['input_means'].append(x.mean().item())
                 
-                if self.feature_stats['iter'] % 20 == 0:
+                if self.feature_stats['iter'] % 2000 == 0:
                     importance_change = torch.abs(self.importance - self.last_importance).item()
                     print(f"Bridge Stats - Input mean: {x.mean().item():.4f}, "
                           f"Importance: {torch.sigmoid(self.importance).item():.4f}, "
