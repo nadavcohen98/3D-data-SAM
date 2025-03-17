@@ -432,13 +432,18 @@ class UNet3DtoSAM2Bridge(nn.Module):
         self.last_importance = self.importance.clone().detach()
     
     def forward(self, x):
-        # Track input features
-        if self.training and self.feature_stats['iter'] % 20 == 0:
+        # Track input features and parameter changes
+        if self.training:
             with torch.no_grad():
-                importance_change = torch.abs(self.importance - self.last_importance).item()
-                print(f"Importance change since last check: {importance_change:.8f}")
-                self.last_importance = self.importance.clone().detach()
-        
+                self.feature_stats['iter'] += 1
+                self.feature_stats['input_means'].append(x.mean().item())
+                
+                if self.feature_stats['iter'] % 20 == 0:
+                    importance_change = torch.abs(self.importance - self.last_importance).item()
+                    print(f"Bridge Stats - Input mean: {x.mean().item():.4f}, "
+                          f"Importance: {torch.sigmoid(self.importance).item():.4f}, "
+                          f"Change: {importance_change:.8f}")
+                    self.last_importance = self.importance.clone().detach()
         
         # Transform features
         transformed = self.transformer(x)
@@ -446,13 +451,8 @@ class UNet3DtoSAM2Bridge(nn.Module):
         # Apply learnable importance weighting
         output = transformed * torch.sigmoid(self.importance)
         
-        # Track output features
-        if self.training:
-            with torch.no_grad():
-                self.feature_stats['output_means'].append(output.mean().item())
-                self.feature_stats['importance_values'].append(torch.sigmoid(self.importance).item())
-        
         return output
+        
 
 # ======= Main AutoSAM2 model =======
 
@@ -741,32 +741,29 @@ class AutoSAM2(nn.Module):
     
     def combine_results(self, unet_output, sam2_slices, depth_dim_idx, blend_weight=0.7):
         """
-        Combine UNet output with SAM2 results with comprehensive comparison diagnostics.
+        Combine UNet output with SAM2 results with detailed slice-specific comparisons.
         """
         # Start with UNet output
         combined = unet_output.clone()
         
-        # For tracking comparative performance
+        # Initialize tracking if needed
         if not hasattr(self, 'slice_comparison'):
             self.slice_comparison = {
-                'iter': 0,
-                'sam2_vs_unet_dice': [],
-                'sam2_sizes': [],
-                'unet_sizes': [],
-                'processed_slices': 0
+                'batch_count': 0,
+                'detailed_slices': []  # Will store a few specific slices for detailed comparison
             }
         
-        self.slice_comparison['iter'] += 1
-        this_batch_comparisons = []
+        self.slice_comparison['batch_count'] += 1
+        
+        # For detailed comparison every 20 batches
+        save_detailed = (self.slice_comparison['batch_count'] % 20 == 0)
+        if save_detailed:
+            print("\n===== Detailed SAM2 vs UNet3D Comparison =====")
         
         # Replace or blend slices with SAM2 results
-        total_slices = 0
         for slice_idx, mask in sam2_slices.items():
             if mask is not None:
-                total_slices += 1
-                self.slice_comparison['processed_slices'] += 1
-                
-                # Get UNet slice for comparison
+                # Get UNet slice
                 if depth_dim_idx == 0:
                     unet_slice = combined[:, :, slice_idx]
                 elif depth_dim_idx == 1:
@@ -774,64 +771,69 @@ class AutoSAM2(nn.Module):
                 else:  # depth_dim_idx == 2
                     unet_slice = combined[:, :, :, :, slice_idx]
                 
-                # Track tumor sizes for comparison
-                sam2_tumor = (mask[:, 1:] > 0.5).float()
-                unet_tumor = (unet_slice[:, 1:] > 0.5).float()
+                # Get binary tumor segmentations for comparison
+                sam2_tumor = (mask[:, 1:].sum(dim=1) > 0).float()
+                unet_tumor = (unet_slice[:, 1:].sum(dim=1) > 0).float()
                 
-                sam2_size = torch.sum(sam2_tumor).item()
-                unet_size = torch.sum(unet_tumor).item()
-                
-                self.slice_comparison['sam2_sizes'].append(sam2_size)
-                self.slice_comparison['unet_sizes'].append(unet_size)
-                
-                # Calculate Dice score between SAM2 and UNet as a measure of agreement
+                # Calculate metrics
+                sam2_pixels = torch.sum(sam2_tumor).item()
+                unet_pixels = torch.sum(unet_tumor).item()
                 intersection = torch.sum(sam2_tumor * unet_tumor).item()
-                union = sam2_size + unet_size
                 
-                if union > 0:
-                    dice = (2.0 * intersection) / union
-                    self.slice_comparison['sam2_vs_unet_dice'].append(dice)
-                    this_batch_comparisons.append(dice)
+                # Compute Dice score
+                dice = 2 * intersection / (sam2_pixels + unet_pixels) if (sam2_pixels + unet_pixels) > 0 else 0
                 
-                # Apply the blending
+                # Save detailed comparison for a few slices when triggered
+                if save_detailed and len(self.slice_comparison['detailed_slices']) < 3:
+                    self.slice_comparison['detailed_slices'].append({
+                        'slice_idx': slice_idx,
+                        'sam2_tumor_pixels': sam2_pixels,
+                        'unet_tumor_pixels': unet_pixels,
+                        'intersection': intersection,
+                        'dice': dice
+                    })
+                    
+                    # Print this slice's comparison
+                    print(f"Slice {slice_idx}:")
+                    print(f"  SAM2 tumor size: {sam2_pixels} pixels")
+                    print(f"  UNet tumor size: {unet_pixels} pixels")
+                    print(f"  Overlap: {intersection} pixels")
+                    print(f"  Dice score: {dice:.4f}")
+                    
+                    # Add interpretation
+                    if dice > 0.7:
+                        print("  Interpretation: High agreement between SAM2 and UNet3D")
+                    elif dice > 0.4:
+                        print("  Interpretation: Moderate agreement")
+                    else:
+                        print("  Interpretation: Low agreement - the models see different things")
+                    
+                    # Print which is larger
+                    if sam2_pixels > unet_pixels:
+                        print(f"  SAM2 finds {(sam2_pixels/unet_pixels - 1)*100:.1f}% more tumor than UNet3D")
+                    elif unet_pixels > sam2_pixels:
+                        print(f"  UNet3D finds {(unet_pixels/sam2_pixels - 1)*100:.1f}% more tumor than SAM2")
+                    print()
+                
+                # Apply blending
                 if depth_dim_idx == 0:
                     combined[:, :, slice_idx] = (
-                        blend_weight * unet_slice + 
-                        (1 - blend_weight) * mask
+                        blend_weight * unet_slice + (1 - blend_weight) * mask
                     )
                 elif depth_dim_idx == 1:
                     combined[:, :, :, slice_idx] = (
-                        blend_weight * unet_slice + 
-                        (1 - blend_weight) * mask
+                        blend_weight * unet_slice + (1 - blend_weight) * mask
                     )
-                else:  # depth_dim_idx == 2
+                else:  # depth_dim_idx == 2:
                     combined[:, :, :, :, slice_idx] = (
-                        blend_weight * unet_slice + 
-                        (1 - blend_weight) * mask
+                        blend_weight * unet_slice + (1 - blend_weight) * mask
                     )
         
-        # Print detailed slice-specific comparisons every 20 iterations
-        if self.slice_comparison['iter'] % 20 == 0 and len(this_batch_comparisons) > 0:
-            avg_dice = sum(this_batch_comparisons) / len(this_batch_comparisons)
-            max_dice = max(this_batch_comparisons)
-            min_dice = min(this_batch_comparisons)
-            
-            # Calculate average size differences
-            last_n = min(50, len(self.slice_comparison['sam2_sizes']))
-            recent_sam2_sizes = self.slice_comparison['sam2_sizes'][-last_n:]
-            recent_unet_sizes = self.slice_comparison['unet_sizes'][-last_n:]
-            
-            avg_sam2_size = sum(recent_sam2_sizes) / len(recent_sam2_sizes)
-            avg_unet_size = sum(recent_unet_sizes) / len(recent_unet_sizes)
-            
-            # Size difference as percentage
-            size_diff_pct = ((avg_sam2_size / avg_unet_size) - 1.0) * 100 if avg_unet_size > 0 else 0
-            
-            print(f"\n[Batch {self.slice_comparison['iter']}] SAM2 vs UNet comparison:")
-            print(f"  * Agreement (Dice): Avg={avg_dice:.4f}, Min={min_dice:.4f}, Max={max_dice:.4f}")
-            print(f"  * SAM2 finds {size_diff_pct:.1f}% {'larger' if size_diff_pct > 0 else 'smaller'} tumors than UNet")
-            print(f"  * Total slices processed: {self.slice_comparison['processed_slices']}\n")
-            
+        # Reset detailed slices list if we've printed them
+        if save_detailed:
+            self.slice_comparison['detailed_slices'] = []
+            print("==========================================\n")
+        
         return combined
     
     def get_boundary_pixels(self, mask, threshold=0.5):
