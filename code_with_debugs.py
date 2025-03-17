@@ -233,54 +233,54 @@ class FlexibleUNet3D(nn.Module):
 
 
 class SimplePointPromptGenerator:
-    """Simple point prompt generator that uses UNet3D's probability maps"""
     def __init__(self, num_points=3):
         self.num_points = num_points
     
     def generate_prompts(self, probability_maps, slice_idx, height, width):
-        """
-        Generate point prompts based on probability maps
-        
-        Returns: points, labels for the first batch item only
-        """
         try:
-            # Validate input dimensions
-            if probability_maps is None:
-                print("Warning: probability_maps is None, using center point only")
-                return np.array([[width//2, height//2]]), np.array([1])
-                
-            # Check shape
-            shape_str = str(probability_maps.shape)
-            print(f"Probability maps shape: {shape_str}")
+            # Process 4D tensor (B, C, H, W)
+            # Sum across all tumor classes (channels 1+)
+            tumor_prob = probability_maps[0, 1:].sum(dim=0).cpu().detach().numpy()
             
-            # Ensure tensor has enough dimensions
-            if len(probability_maps.shape) < 3:
-                print(f"Warning: probability_maps has wrong dimensions: {shape_str}")
-                return np.array([[width//2, height//2]]), np.array([1])
+            # Resize to match target dimensions if needed
+            if tumor_prob.shape[0] != height or tumor_prob.shape[1] != width:
+                from scipy.ndimage import zoom
+                h_factor = height / tumor_prob.shape[0]
+                w_factor = width / tumor_prob.shape[1]
+                tumor_prob = zoom(tumor_prob, (h_factor, w_factor), order=1)
             
-            # Extract batch size, classes, depth
-            if len(probability_maps.shape) >= 3:
-                depth = probability_maps.shape[2] if len(probability_maps.shape) >= 3 else 1
-            else:
-                depth = 1
-                
-            # Ensure slice_idx is within bounds
-            slice_idx_safe = min(max(slice_idx, 0), depth-1)
-            print(f"Using slice_idx_safe: {slice_idx_safe}, depth: {depth}")
+            # Find foreground points in high probability regions
+            points = []
+            labels = []
             
-            # Fallback to simple center point if anything fails
-            points = [[width//2, height//2]]
-            labels = [1]  # Foreground
+            # Find high probability regions
+            high_prob = tumor_prob > 0.5
+            if np.any(high_prob):
+                y_coords, x_coords = np.where(high_prob)
+                if len(y_coords) > 0:
+                    # Sample points from high probability regions
+                    indices = np.random.choice(
+                        len(y_coords),
+                        min(self.num_points, len(y_coords)),
+                        replace=False
+                    )
+                    for idx in indices:
+                        points.append([int(x_coords[idx]), int(y_coords[idx])])
+                        labels.append(1)  # Foreground
+            
+            # If no points found, use center
+            if not points:
+                points.append([width//2, height//2])
+                labels.append(1)
             
             # Add background point
             points.append([width//4, height//4])
-            labels.append(0)  # Background
+            labels.append(0)
             
             return np.array(points), np.array(labels)
             
         except Exception as e:
             print(f"Error in generate_prompts: {e}")
-            # Fallback to center point
             return np.array([[width//2, height//2]]), np.array([1])
 
 
