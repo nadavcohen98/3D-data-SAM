@@ -232,118 +232,68 @@ class FlexibleUNet3D(nn.Module):
         return segmentation, dec_out2, sam_embeddings, metadata
 
 
-class MulticlassPointPromptGenerator:
-    """
-    Generates intelligent point prompts for SAM2 based on UNet3D probability maps
-    Provides multiple strategic points for each tumor class
-    """
-    def __init__(self, num_points_per_class=3, num_background_points=4):
-        self.num_points_per_class = num_points_per_class
-        self.num_background_points = num_background_points
+class SimplePointPromptGenerator:
+    """Simple point prompt generator that uses UNet3D's probability maps"""
+    def __init__(self, num_points=3):
+        self.num_points = num_points
     
-    def generate_prompts(self, prob_maps, slice_idx, height, width, threshold=0.5):
+    def generate_prompts(self, probability_maps, slice_idx, height, width):
         """
-        Generate point prompts for each tumor class based on probability maps
+        Generate point prompts based on probability maps
         
-        Args:
-            prob_maps: Probability maps [B, C, D, H, W] from UNet3D
-            slice_idx: Current slice index
-            height, width: Dimensions of the slice
-            threshold: Probability threshold for tumor regions
-            
-        Returns:
-            Point coordinates and labels for each batch item
+        Returns: points, labels for the first batch item only
         """
-        batch_size, num_classes, depth, _, _ = prob_maps.shape
-        all_points = []
-        all_labels = []
-        
-        # Ensure slice_idx is within bounds of prob_maps depth
+        # Ensure slice_idx is within bounds
+        depth = probability_maps.shape[2]
         slice_idx_safe = min(max(slice_idx, 0), depth-1)
         
-        for b in range(batch_size):
-            # Initialize lists for points and labels
-            batch_points = []
-            batch_labels = []
-            
-            # Process each tumor class (skip background class 0)
-            for c in range(1, num_classes):
-                # Get probability map for this class in the current slice
-                class_prob = prob_maps[b, c, slice_idx_safe].cpu().detach().numpy()
-                
-                # Resize probability map to match height and width if needed
-                if class_prob.shape[0] != height or class_prob.shape[1] != width:
-                    from scipy.ndimage import zoom
-                    h_factor = height / class_prob.shape[0]
-                    w_factor = width / class_prob.shape[1]
-                    class_prob = zoom(class_prob, (h_factor, w_factor), order=1)
-                
-                # Find regions above threshold
-                high_prob_mask = class_prob > threshold
-                
-                # If we found high probability regions
-                if np.any(high_prob_mask):
-                    # Label connected components
-                    from scipy import ndimage
-                    labeled_mask, num_features = ndimage.label(high_prob_mask)
-                    
-                    # Sort components by size
-                    sizes = ndimage.sum(high_prob_mask, labeled_mask, range(1, num_features+1))
-                    sorted_indices = np.argsort(-sizes)  # Descending order
-                    
-                    # Take up to the specified number of largest components
-                    num_components = min(self.num_points_per_class, num_features)
-                    points_added = 0
-                    
-                    for i in range(num_components):
-                        component_idx = sorted_indices[i] + 1
-                        component_mask = labeled_mask == component_idx
-                        
-                        # Find center of mass of the component
-                        cy, cx = ndimage.center_of_mass(component_mask)
-                        
-                        # Add point to the list
-                        batch_points.append([int(cx), int(cy)])
-                        batch_labels.append(1)  # Foreground (1) for all tumor points
-                        points_added += 1
-                    
-                    # If we didn't add enough points, add additional points from the same component
-                    if points_added < self.num_points_per_class and num_features > 0:
-                        largest_component = labeled_mask == (sorted_indices[0] + 1)
-                        
-                        # Find additional points within the largest component
-                        y_indices, x_indices = np.where(largest_component)
-                        
-                        # If we have enough points
-                        if len(y_indices) > 0:
-                            # Randomly select additional points
-                            remaining = self.num_points_per_class - points_added
-                            indices = np.random.choice(len(y_indices), 
-                                                     min(remaining, len(y_indices)), 
-                                                     replace=False)
-                            
-                            for idx in indices:
-                                batch_points.append([int(x_indices[idx]), int(y_indices[idx])])
-                                batch_labels.append(1)  # Foreground
-            
-            # Add background points (class 0) strategically
-            # Around the edges of the image and regions with low tumor probability
-            edge_points = [
-                [width//4, height//4],              # Top-left quadrant
-                [3*width//4, height//4],            # Top-right quadrant
-                [width//4, 3*height//4],            # Bottom-left quadrant
-                [3*width//4, 3*height//4]           # Bottom-right quadrant
-            ]
-            
-            for point in edge_points[:self.num_background_points]:
-                batch_points.append(point)
-                batch_labels.append(0)  # Background class
-            
-            # Convert to numpy arrays
-            all_points.append(np.array(batch_points) if batch_points else np.zeros((0, 2)))
-            all_labels.append(np.array(batch_labels) if batch_labels else np.zeros(0))
+        # Get probability map for current slice (first batch item)
+        # Sum across all tumor classes (indices 1,2,3)
+        tumor_prob = probability_maps[0, 1:, slice_idx_safe].sum(dim=0).cpu().detach().numpy()
         
-        return all_points, all_labels
+        # Resize to match target dimensions if needed
+        if tumor_prob.shape[0] != height or tumor_prob.shape[1] != width:
+            from scipy.ndimage import zoom
+            h_factor = height / tumor_prob.shape[0]
+            w_factor = width / tumor_prob.shape[1]
+            tumor_prob = zoom(tumor_prob, (h_factor, w_factor), order=1)
+        
+        # Find foreground points
+        points = []
+        labels = []
+        
+        # If we have tumor regions
+        if np.max(tumor_prob) > 0.5:
+            # Find highest probability regions
+            high_prob = tumor_prob > 0.5
+            if np.any(high_prob):
+                # Get coordinates of high probability regions
+                y_coords, x_coords = np.where(high_prob)
+                
+                # If we have points, sample from them
+                if len(y_coords) > 0:
+                    # Sample up to num_points points
+                    indices = np.random.choice(
+                        len(y_coords), 
+                        min(self.num_points, len(y_coords)), 
+                        replace=False
+                    )
+                    
+                    # Add foreground points
+                    for idx in indices:
+                        points.append([int(x_coords[idx]), int(y_coords[idx])])
+                        labels.append(1)  # Foreground
+        
+        # If we don't have enough foreground points, add center point
+        if len(points) == 0:
+            points.append([width // 2, height // 2])
+            labels.append(1)  # Foreground
+        
+        # Add one background point
+        points.append([width // 4, height // 4])
+        labels.append(0)  # Background
+        
+        return np.array(points), np.array(labels)
 
 
 # ======= SAM2 integration components =======
@@ -469,10 +419,7 @@ class AutoSAM2(nn.Module):
     ):
         super().__init__()
 
-        self.point_generator = MulticlassPointPromptGenerator(
-            num_points_per_class=3,
-            num_background_points=4
-        )
+        self.point_generator = SimplePointPromptGenerator(num_points=3)
         
         # Configuration
         self.num_classes = num_classes
@@ -618,7 +565,7 @@ class AutoSAM2(nn.Module):
             # Generate intelligent point prompts using probability maps
             h, w = rgb_image.shape[:2]
             points, labels = self.point_generator.generate_prompts(
-                probability_maps, slice_idx, h, w, threshold=0.5
+                probability_maps, slice_idx, h, w
             )
             
             # Get the points for the first batch item
