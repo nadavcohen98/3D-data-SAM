@@ -787,7 +787,7 @@ class AutoSAM2(nn.Module):
                 if save_detailed and (
                 len(self.slice_comparison['detailed_slices']) < 10 and  # Allow more slices
                 (slice_idx % 15 == 0 or  # Sample every 15th slice
-                 slice_idx == middle_slice)  # Include the middle slice
+                 slice_idx == middle_slice)):  # Include the middle slice
                     self.slice_comparison['detailed_slices'].append({
                         'slice_idx': slice_idx,
                         'sam2_tumor_pixels': sam2_pixels,
