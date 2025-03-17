@@ -398,28 +398,40 @@ class MRItoRGBMapper(nn.Module):
 
 class UNet3DtoSAM2Bridge(nn.Module):
     """
-    A signal-preserving bridge that properly expands channels without diminishing values.
+    A signal-preserving bridge with learnable scaling factor.
     """
     def __init__(self, input_channels=32, output_channels=256):
         super().__init__()
         
-        # 1x1 convolution for channel expansion
+        # Channel expander with identity-like initialization
         self.channel_expander = nn.Conv2d(input_channels, output_channels, kernel_size=1)
         
-        # Proper initialization to preserve signal strength
-        # Initialize the first input_channels weights to 1.0 and the rest to 0
+        # Initialize to preserve signal
         with torch.no_grad():
-            # Zero out all weights first
             nn.init.zeros_(self.channel_expander.weight)
             nn.init.zeros_(self.channel_expander.bias)
-            
-            # Set the diagonal elements for the first input_channels to 1
             for i in range(min(input_channels, output_channels)):
                 self.channel_expander.weight[i, i, 0, 0] = 1.0
+        
+        # Learnable scale parameter
+        self.scale = nn.Parameter(torch.ones(1))
+        
+        self.call_count = 0
     
     def forward(self, x):
+        self.call_count += 1
+        
+        # Apply channel expansion
         expanded = self.channel_expander(x)
-        return expanded
+        
+        # Apply learnable scaling
+        output = expanded * self.scale
+        
+        # Print diagnostics (every 50 calls to avoid flooding)
+        if self.call_count % 50 == 1:
+            print(f"Bridge-1: in_mean={x.mean().item():.4f}, out_mean={output.mean().item():.4f}, scale={self.scale.item():.4f}")
+        
+        return output
 
 
 # ======= Main AutoSAM2 model =======
