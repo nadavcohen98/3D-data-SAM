@@ -398,54 +398,28 @@ class MRItoRGBMapper(nn.Module):
 
 class UNet3DtoSAM2Bridge(nn.Module):
     """
-    A diagnostic pass-through bridge that analyzes but doesn't modify the data.
+    A signal-preserving bridge that properly expands channels without diminishing values.
     """
     def __init__(self, input_channels=32, output_channels=256):
         super().__init__()
-        self.input_channels = input_channels
-        self.output_channels = output_channels
         
-        # Simple identity mapper with diagnostics
-        self.mapper = nn.Conv2d(input_channels, output_channels, kernel_size=1)
+        # 1x1 convolution for channel expansion
+        self.channel_expander = nn.Conv2d(input_channels, output_channels, kernel_size=1)
         
-        # Initialize weights to be very small (near zero)
-        nn.init.zeros_(self.mapper.weight)
-        nn.init.zeros_(self.mapper.bias)
-        
-        # Add small random noise to weights (to avoid all zeros)
+        # Proper initialization to preserve signal strength
+        # Initialize the first input_channels weights to 1.0 and the rest to 0
         with torch.no_grad():
-            self.mapper.weight.data += torch.randn_like(self.mapper.weight.data) * 0.001
-        
-        # Track gradients
-        self.register_gradient_tracking()
-        
-    def register_gradient_tracking(self):
-        self.gradient_stats = {"count": 0, "magnitudes": []}
-        
-        # Set up gradient hooks
-        for name, param in self.named_parameters():
-            param.register_hook(lambda grad, name=name: self.log_gradient(name, grad))
-    
-    def log_gradient(self, param_name, grad):
-        if self.gradient_stats["count"] < 10:  # Limit logging to first 10 batches
-            magnitude = grad.abs().mean().item()
-            self.gradient_stats["magnitudes"].append(magnitude)
-            if self.gradient_stats["count"] % 5 == 0:  # Print every 5 batches
-                avg_magnitude = sum(self.gradient_stats["magnitudes"]) / len(self.gradient_stats["magnitudes"])
-                print(f"Bridge gradient magnitude (batch {self.gradient_stats['count']}): {avg_magnitude:.8f}")
-            self.gradient_stats["count"] += 1
-        return grad
+            # Zero out all weights first
+            nn.init.zeros_(self.channel_expander.weight)
+            nn.init.zeros_(self.channel_expander.bias)
+            
+            # Set the diagonal elements for the first input_channels to 1
+            for i in range(min(input_channels, output_channels)):
+                self.channel_expander.weight[i, i, 0, 0] = 1.0
     
     def forward(self, x):
-        # Use mapper with minimal effect
-        result = self.mapper(x)
-        
-        # Print diagnostic info for first few batches
-        if self.training and (self.gradient_stats["count"] < 3):
-            print(f"Bridge: input shape={x.shape}, output shape={result.shape}")
-            print(f"Bridge stats: input_mean={x.mean().item():.4f}, output_mean={result.mean().item():.4f}")
-        
-        return result
+        expanded = self.channel_expander(x)
+        return expanded
 
 
 # ======= Main AutoSAM2 model =======
