@@ -745,11 +745,14 @@ class AutoSAM2(nn.Module):
             return unet_output
         
         # Process selected slices with SAM2
+        # Process ALL slices with SAM2
         sam2_results = {}
-        for idx in key_indices:
+        depth = x.shape[depth_dim_idx+2]  # Get the depth dimension (+2 because of batch and channel dims)
+        
+        for idx in range(depth):
             # Get embedding for this slice
             slice_embedding = self.slice_processor.extract_slice(
-                sam_embeddings, idx // 4, depth_dim_idx
+                sam_embeddings, min(idx // 4, sam_embeddings.shape[depth_dim_idx+2]-1), depth_dim_idx
             )
             
             # Process with SAM2
@@ -760,7 +763,6 @@ class AutoSAM2(nn.Module):
             # Store valid results
             if sam2_mask is not None:
                 sam2_results[idx] = sam2_mask
-
         
         # Mode 2: SAM2 only (without UNet decoder)
         if not self.enable_unet_decoder:
