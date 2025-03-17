@@ -398,33 +398,66 @@ class MRItoRGBMapper(nn.Module):
 
 class UNet3DtoSAM2Bridge(nn.Module):
     """
-    A basic bridge module to connect UNet3D features to SAM2.
-    This simpler version focuses on channel adaptation and spatial consistency
-    without complex attention mechanisms.
+    An improved bridge module that mimics UNet's skip connection approach
+    but tailored for connecting UNet3D features to SAM2.
     """
-    def __init__(self, input_channels=256, output_channels=256, intermediate_channels=128):
+    def __init__(self, input_channels=32, output_channels=256, 
+                 intermediate_channels=64, use_attention=False):
         super().__init__()
         
-        # Basic feature refinement
-        self.bridge = nn.Sequential(
-            # Down-projection
+        # Initial projection
+        self.initial_proj = nn.Sequential(
             nn.Conv2d(input_channels, intermediate_channels, kernel_size=3, padding=1),
-            nn.GroupNorm(32, intermediate_channels),
+            nn.GroupNorm(16, intermediate_channels),
+            nn.ReLU(inplace=True)
+        )
+        
+        # Middle processing (similar to UNet bottleneck)
+        self.middle_block = nn.Sequential(
+            nn.Conv2d(intermediate_channels, intermediate_channels, 
+                      kernel_size=3, padding=1),
+            nn.GroupNorm(16, intermediate_channels),
             nn.ReLU(inplace=True),
-            
-            # Feature refinement
-            nn.Conv2d(intermediate_channels, intermediate_channels, kernel_size=3, padding=1),
-            nn.GroupNorm(32, intermediate_channels),
-            nn.ReLU(inplace=True),
-            
-            # Up-projection to match SAM2 expected format
-            nn.Conv2d(intermediate_channels, output_channels, kernel_size=1),
+            nn.Conv2d(intermediate_channels, intermediate_channels, 
+                      kernel_size=3, padding=1),
+            nn.GroupNorm(16, intermediate_channels),
+            nn.ReLU(inplace=True)
+        )
+        
+        # Output projection with residual connection
+        self.output_proj = nn.Sequential(
+            nn.Conv2d(intermediate_channels * 2, output_channels, kernel_size=1),
             nn.GroupNorm(32, output_channels),
             nn.ReLU(inplace=True)
         )
+        
+        # Optional simple self-attention for later use
+        self.use_attention = use_attention
+        if use_attention:
+            self.attention = nn.Sequential(
+                nn.Conv2d(intermediate_channels, 1, kernel_size=1),
+                nn.Sigmoid()
+            )
     
     def forward(self, x):
-        return self.bridge(x)
+        # Initial projection
+        initial_features = self.initial_proj(x)
+        
+        # Process through middle block
+        processed = self.middle_block(initial_features)
+        
+        # Apply attention if enabled
+        if self.use_attention:
+            attention_map = self.attention(processed)
+            processed = processed * attention_map
+        
+        # Concatenate initial features with processed ones (like UNet skip connections)
+        combined = torch.cat([initial_features, processed], dim=1)
+        
+        # Final projection
+        output = self.output_proj(combined)
+        
+        return output
 
 
 # ======= Main AutoSAM2 model =======
@@ -590,8 +623,8 @@ class AutoSAM2(nn.Module):
         
         return img_rgb
     
-    def process_slice_with_sam2(self, input_vol, slice_idx, probability_maps, depth_dim_idx, device):
-        """Process a single slice with SAM2 using intelligent point prompts and box/mask guidance"""
+    def process_slice_with_sam2(self, input_vol, slice_idx, slice_features, depth_dim_idx, device):
+        """Process a single slice with SAM2 using the bridge network"""
         if not self.has_sam2:
             logger.warning(f"SAM2 not available for slice {slice_idx}")
             return None
@@ -618,26 +651,26 @@ class AutoSAM2(nn.Module):
             # Get image dimensions
             h, w = rgb_image.shape[:2]
             
-            # Process mid-decoder features through bridge network
-            # First, extract the correct slice from probability_maps
-            enhanced_features = self.unet_sam_bridge(probability_maps)
+            # Process through bridge network
+            enhanced_features = self.unet_sam_bridge(slice_features)
             
-            # Generate improved tumor probability map from enhanced features
-            tumor_prob = torch.sigmoid(enhanced_features.mean(dim=1, keepdim=True))
-            tumor_prob = tumor_prob[0, 0].cpu().detach().numpy()
+            # Get a simple probability map from the enhanced features
+            # We'll use a reduction over feature channels with a sigmoid activation
+            prob_map = torch.sigmoid(enhanced_features.mean(dim=1, keepdim=True))
+            prob_map = prob_map[0, 0].cpu().detach().numpy()
             
-            # First resize the tumor probability map to match the image dimensions
-            if tumor_prob.shape != (h, w):
+            # Resize probability map to match image dimensions if needed
+            if prob_map.shape != (h, w):
                 from scipy.ndimage import zoom
-                zoom_h = h / tumor_prob.shape[0]
-                zoom_w = w / tumor_prob.shape[1]
-                tumor_prob = zoom(tumor_prob, (zoom_h, zoom_w), order=1)
+                zoom_h = h / prob_map.shape[0]
+                zoom_w = w / prob_map.shape[1]
+                prob_map = zoom(prob_map, (zoom_h, zoom_w), order=1)
             
-            # Now extract box from the resized probability map
-            box = self.extract_tumor_box(tumor_prob)
+            # Extract box from probability map
+            box = self.extract_tumor_box(prob_map)
             
-            # Create mask prompt from the resized probability map
-            mask_prompt = self.create_mask_prompt(tumor_prob)
+            # Create mask prompt
+            mask_prompt = self.create_mask_prompt(prob_map)
             
             # Optional: Enhance contrast
             p1, p99 = np.percentile(rgb_image, (1, 99))
@@ -647,9 +680,11 @@ class AutoSAM2(nn.Module):
             # Set image in SAM2
             self.sam2.set_image(rgb_image)
             
-            # Generate intelligent point prompts using the enhanced features
+            # Generate intelligent point prompts using probability map
+            # We'll use the original point generator but with our enhanced features
+            enhanced_prob = torch.sigmoid(enhanced_features)  # Convert to probabilities
             points, labels = self.point_generator.generate_prompts(
-                enhanced_features, slice_idx, h, w
+                enhanced_prob, slice_idx, h, w
             )
             
             # Call SAM2 with all prompt types
