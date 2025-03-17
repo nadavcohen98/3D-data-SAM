@@ -114,8 +114,9 @@ class FlexibleUNet3D(nn.Module):
     """
     Enhanced UNet3D architecture with:
     1. A main decoder path for segmentation (unchanged from original)
-    2. SAM2-specific feature enhancement from the main decoder path
-    3. Improved feature selection for SAM2 compatibility
+    2. SAM2-specific feature enhancement with identity initialization
+    3. Channel attention for improved feature selection
+    4. SAM2-specific feature normalization
     """
     def __init__(self, in_channels=4, n_classes=4, base_channels=16, trilinear=True):
         super(FlexibleUNet3D, self).__init__()
@@ -143,59 +144,28 @@ class FlexibleUNet3D(nn.Module):
         # Final output layer for main decoder
         self.output_conv = nn.Conv3d(base_channels, n_classes, kernel_size=1)
         
-        # SAM2 Feature Enhancement (Option 2 & 4)
-        # Channel attention to select the most informative features
+        # Channel attention for feature selection (Option 2)
         self.channel_attention = nn.Sequential(
-            nn.AdaptiveAvgPool3d(1),  # Global average pooling
-            nn.Conv3d(base_channels * 2, base_channels * 2 // 4, kernel_size=1),
+            nn.AdaptiveAvgPool3d(1),
+            nn.Conv3d(base_channels * 2, base_channels // 2, kernel_size=1),
             nn.ReLU(inplace=True),
-            nn.Conv3d(base_channels * 2 // 4, base_channels * 2, kernel_size=1),
+            nn.Conv3d(base_channels // 2, base_channels * 2, kernel_size=1),
             nn.Sigmoid()
         )
         
-        # SAM2 projection with proper initialization
+        # SAM2 projection with identity-like initialization (Option 1)
         self.sam_projection = nn.Conv3d(base_channels * 2, 256, kernel_size=1)
-        self.sam_norm = nn.GroupNorm(32, 256)
-        
-        # Initialize weights to start close to identity mapping (Option 1)
         nn.init.normal_(self.sam_projection.weight, std=0.01)
         nn.init.zeros_(self.sam_projection.bias)
         
-        # Learnable scale parameter for SAM2 features (Option 1)
-        self.sam_scale = nn.Parameter(torch.tensor(0.5))
+        # Normalization for SAM2 features (Option 4)
+        self.sam_norm = nn.GroupNorm(32, 256)
         
-        # Register forward hooks for diagnostics
-        self.register_diagnostic_hooks()
+        # Learnable scale parameter (Option 1)
+        self.sam_scale = nn.Parameter(torch.tensor(1.0))
         
-    def register_diagnostic_hooks(self):
-        """Register hooks to track feature statistics during training"""
-        self.feature_stats = {}
-        
-        def hook_fn(name):
-            def fn(module, input, output):
-                # Only log stats occasionally to avoid slowing training
-                if not hasattr(self, 'hook_counter'):
-                    self.hook_counter = 0
-                self.hook_counter += 1
-                
-                if self.hook_counter % 100 == 1 and self.training:
-                    if isinstance(output, tuple):
-                        output = output[0]
-                    
-                    # Compute basic statistics
-                    with torch.no_grad():
-                        stats = {
-                            'mean': output.mean().item(),
-                            'std': output.std().item(),
-                            'min': output.min().item(),
-                            'max': output.max().item()
-                        }
-                        self.feature_stats[name] = stats
-            return fn
-        
-        # Register hooks at key points
-        self.sam_projection.register_forward_hook(hook_fn('sam_projection'))
-        self.sam_norm.register_forward_hook(hook_fn('sam_norm'))
+        # Counter for diagnostics
+        self.forward_count = 0
     
     def forward(self, x, use_full_decoder=True):
         """
@@ -250,26 +220,22 @@ class FlexibleUNet3D(nn.Module):
         dec_out1 = self.dec1(x5, x4)
         dec_out2 = self.dec2(dec_out1, x3)
         
-        # Generate SAM2 embeddings with enhanced feature selection (Option 2)
-        # Apply channel attention to select informative features
+        # Apply channel attention for feature selection (Option 2)
         attention_weights = self.channel_attention(dec_out2)
-        sam_features = dec_out2 * attention_weights
+        enhanced_features = dec_out2 * attention_weights
         
-        # Project to SAM2-compatible format
-        sam_embeddings_raw = self.sam_projection(sam_features)
+        # Generate SAM2 embeddings (Options 1 & 4)
+        sam_embeddings_raw = self.sam_projection(enhanced_features)
         sam_embeddings_norm = self.sam_norm(sam_embeddings_raw)
         
-        # Apply tanh activation for SAM2 format (Option 4)
-        # Using the learnable scale parameter (Option 1)
-        scale = torch.sigmoid(self.sam_scale)  # Keep scale in [0,1] range
+        # Apply tanh and learnable scale (Option 1 & 4)
+        scale = torch.sigmoid(self.sam_scale)  # Scale between 0 and 1
         sam_embeddings = torch.tanh(sam_embeddings_norm) * scale
         
-        # Occasionally print diagnostics
-        if self.training and hasattr(self, 'hook_counter') and self.hook_counter % 100 == 1:
-            print(f"SAM scale: {scale.item():.4f}")
-            if 'sam_norm' in self.feature_stats:
-                stats = self.feature_stats['sam_norm']
-                print(f"SAM features: mean={stats['mean']:.4f}, std={stats['std']:.4f}")
+        # Print diagnostics occasionally
+        self.forward_count += 1
+        if self.forward_count % 50 == 1:
+            print(f"SAM scale: {scale.item():.4f}, Features mean: {sam_embeddings.mean().item():.4f}")
         
         # Calculate downsampled indices safely
         downsampled_depth = max(1, depth // 4)  # Prevent divide by zero
@@ -298,6 +264,8 @@ class FlexibleUNet3D(nn.Module):
         segmentation = torch.sigmoid(output)
         
         return segmentation, dec_out2, sam_embeddings, metadata
+
+
 
 class MultiPointPromptGenerator:
     """Generates strategic point prompts for SAM2 based on probability maps"""
