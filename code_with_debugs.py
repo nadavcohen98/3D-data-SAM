@@ -398,38 +398,57 @@ class MRItoRGBMapper(nn.Module):
 
 class UNet3DtoSAM2Bridge(nn.Module):
     """
-    A signal-preserving bridge with learnable scaling factor.
+    A residual bridge that preserves original features while adding learnable components.
     """
     def __init__(self, input_channels=32, output_channels=256):
         super().__init__()
         
-        # Channel expander with identity-like initialization
-        self.channel_expander = nn.Conv2d(input_channels, output_channels, kernel_size=1)
-        
-        # Initialize to preserve signal
+        # Base channel expander (non-learnable, just for proper shaping)
+        self.base_expander = nn.Conv2d(input_channels, output_channels, kernel_size=1, bias=False)
         with torch.no_grad():
-            nn.init.zeros_(self.channel_expander.weight)
-            nn.init.zeros_(self.channel_expander.bias)
+            nn.init.zeros_(self.base_expander.weight)
             for i in range(min(input_channels, output_channels)):
-                self.channel_expander.weight[i, i, 0, 0] = 1.0
+                self.base_expander.weight[i, i, 0, 0] = 1.0
         
-        # Learnable scale parameter
-        self.scale = nn.Parameter(torch.ones(1))
+        # Freeze the base expander
+        for param in self.base_expander.parameters():
+            param.requires_grad = False
+        
+        # Additional learnable residual path
+        self.residual = nn.Sequential(
+            nn.Conv2d(input_channels, 64, kernel_size=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(64, output_channels, kernel_size=1),
+        )
+        
+        # Initialize residual path to be very small initially
+        for layer in self.residual:
+            if isinstance(layer, nn.Conv2d):
+                nn.init.normal_(layer.weight, std=0.01)
+                if layer.bias is not None:
+                    nn.init.zeros_(layer.bias)
+        
+        # Learnable weight for residual contribution
+        self.residual_weight = nn.Parameter(torch.tensor(0.1))
         
         self.call_count = 0
     
     def forward(self, x):
         self.call_count += 1
         
-        # Apply channel expansion
-        expanded = self.channel_expander(x)
+        # Get base expanded features (identity-like mapping)
+        base_features = self.base_expander(x)
         
-        # Apply learnable scaling
-        output = expanded * self.scale
+        # Get residual features
+        res_features = self.residual(x)
         
-        # Print diagnostics (every 50 calls to avoid flooding)
+        # Combine with learnable weight
+        alpha = torch.sigmoid(self.residual_weight) * 0.5  # Limit to 0-0.5 range initially
+        output = base_features + alpha * res_features
+        
+        # Print diagnostics
         if self.call_count % 50 == 1:
-            print(f"Bridge-1: in_mean={x.mean().item():.4f}, out_mean={output.mean().item():.4f}, scale={self.scale.item():.4f}")
+            print(f"Bridge-2: in_mean={x.mean().item():.4f}, out_mean={output.mean().item():.4f}, alpha={alpha.item():.4f}")
         
         return output
 
