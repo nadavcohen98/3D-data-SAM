@@ -398,64 +398,54 @@ class MRItoRGBMapper(nn.Module):
 
 class UNet3DtoSAM2Bridge(nn.Module):
     """
-    An improved bridge module that mimics UNet's skip connection approach
-    but tailored for connecting UNet3D features to SAM2.
+    A bridge module to connect UNet3D features to SAM2 with diagnostic prints
+    for understanding data flow.
     """
-    def __init__(self, input_channels=32, output_channels=256, 
-                 intermediate_channels=64, use_attention=False):
+    def __init__(self, input_channels=32, output_channels=256, intermediate_channels=128):
         super().__init__()
         
-        # Initial projection
-        self.initial_proj = nn.Sequential(
+        # Basic feature refinement
+        self.bridge = nn.Sequential(
+            # Down-projection
             nn.Conv2d(input_channels, intermediate_channels, kernel_size=3, padding=1),
-            nn.GroupNorm(16, intermediate_channels),
-            nn.ReLU(inplace=True)
-        )
-        
-        # Middle processing (similar to UNet bottleneck)
-        self.middle_block = nn.Sequential(
-            nn.Conv2d(intermediate_channels, intermediate_channels, 
-                      kernel_size=3, padding=1),
-            nn.GroupNorm(16, intermediate_channels),
+            nn.GroupNorm(32, intermediate_channels),
             nn.ReLU(inplace=True),
-            nn.Conv2d(intermediate_channels, intermediate_channels, 
-                      kernel_size=3, padding=1),
-            nn.GroupNorm(16, intermediate_channels),
-            nn.ReLU(inplace=True)
-        )
-        
-        # Output projection with residual connection
-        self.output_proj = nn.Sequential(
-            nn.Conv2d(intermediate_channels * 2, output_channels, kernel_size=1),
+            
+            # Feature refinement
+            nn.Conv2d(intermediate_channels, intermediate_channels, kernel_size=3, padding=1),
+            nn.GroupNorm(32, intermediate_channels),
+            nn.ReLU(inplace=True),
+            
+            # Up-projection to match SAM2 expected format
+            nn.Conv2d(intermediate_channels, output_channels, kernel_size=1),
             nn.GroupNorm(32, output_channels),
             nn.ReLU(inplace=True)
         )
         
-        # Optional simple self-attention for later use
-        self.use_attention = use_attention
-        if use_attention:
-            self.attention = nn.Sequential(
-                nn.Conv2d(intermediate_channels, 1, kernel_size=1),
-                nn.Sigmoid()
-            )
+        # Variable to count calls for limiting diagnostic prints
+        self.call_count = 0
     
     def forward(self, x):
-        # Initial projection
-        initial_features = self.initial_proj(x)
+        self.call_count += 1
         
-        # Process through middle block
-        processed = self.middle_block(initial_features)
+        # Only print diagnostics for the first few calls
+        if self.call_count <= 3:
+            print(f"\n--- Bridge Call #{self.call_count} ---")
+            print(f"Input shape: {x.shape}")
+            print(f"Input stats: min={x.min().item():.4f}, max={x.max().item():.4f}, mean={x.mean().item():.4f}")
+            
+            # Check for anomalies
+            if torch.isnan(x).any() or torch.isinf(x).any():
+                print("WARNING: Input contains NaN or Inf values!")
         
-        # Apply attention if enabled
-        if self.use_attention:
-            attention_map = self.attention(processed)
-            processed = processed * attention_map
+        # Process through bridge
+        output = self.bridge(x)
         
-        # Concatenate initial features with processed ones (like UNet skip connections)
-        combined = torch.cat([initial_features, processed], dim=1)
-        
-        # Final projection
-        output = self.output_proj(combined)
+        # Print output diagnostics
+        if self.call_count <= 3:
+            print(f"Output shape: {output.shape}")
+            print(f"Output stats: min={output.min().item():.4f}, max={output.max().item():.4f}, mean={output.mean().item():.4f}")
+            print(f"--- End of Bridge Call #{self.call_count} ---\n")
         
         return output
 
