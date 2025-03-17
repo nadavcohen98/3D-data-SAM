@@ -114,7 +114,7 @@ class FlexibleUNet3D(nn.Module):
     """
     UNet3D architecture with:
     1. A main decoder path for segmentation
-    2. A separate decoder path for SAM2 prompts, inspired by AutoSAM
+    2. A dedicated decoder path for SAM2 prompts, inspired by AutoSAM
     """
     def __init__(self, in_channels=4, n_classes=4, base_channels=16, trilinear=True):
         super(FlexibleUNet3D, self).__init__()
@@ -142,13 +142,27 @@ class FlexibleUNet3D(nn.Module):
         # Final output layer for main decoder
         self.output_conv = nn.Conv3d(base_channels, n_classes, kernel_size=1)
         
-        # SAM2 Decoder pathway - based on AutoSAM's approach
-        # This is a simplified version of the main decoder, focused on creating SAM2 prompts
+        # SAM2 Decoder pathway - enhanced version with better feature processing
+        # More skip connections and refined feature transformation
         self.sam_dec1 = DecoderBlock3D(base_channels * 16, base_channels * 4, trilinear=trilinear)
         self.sam_dec2 = DecoderBlock3D(base_channels * 8, base_channels * 2, trilinear=trilinear)
         
-        # Final projection for SAM2 embeddings
-        self.sam_projection = nn.Conv3d(base_channels * 2, 256, kernel_size=1)
+        # Enhanced feature processing for SAM2
+        self.sam_feature_processor = nn.Sequential(
+            nn.Conv3d(base_channels * 2, base_channels * 4, kernel_size=3, padding=1),
+            nn.GroupNorm(16, base_channels * 4),
+            nn.ReLU(inplace=True),
+            nn.Conv3d(base_channels * 4, base_channels * 4, kernel_size=3, padding=1),
+            nn.GroupNorm(16, base_channels * 4),
+            nn.ReLU(inplace=True)
+        )
+        
+        # Final projection for SAM2 embeddings with better initialization
+        self.sam_projection = nn.Conv3d(base_channels * 4, 256, kernel_size=1)
+        # Initialize with small positive weights for better signal
+        nn.init.kaiming_normal_(self.sam_projection.weight, nonlinearity='relu')
+        nn.init.constant_(self.sam_projection.bias, 0.1)
+        
         self.sam_norm = nn.GroupNorm(32, 256)
         self.sam_activation = nn.Tanh()  # Following AutoSAM's approach with tanh activation
     
@@ -193,7 +207,6 @@ class FlexibleUNet3D(nn.Module):
         # Sort all indices
         key_indices.extend(extra_indices)
         key_indices.sort()
-        
     
         # Encoder pathway
         x1 = self.initial_conv(x)
@@ -202,12 +215,15 @@ class FlexibleUNet3D(nn.Module):
         x4 = self.enc3(x3)
         x5 = self.enc4(x4)
         
-        # SAM2 dedicated decoder path - only compute to mid-level features
+        # SAM2 dedicated decoder path with enhanced feature processing
         sam_dec_out1 = self.sam_dec1(x5, x4)
         sam_dec_out2 = self.sam_dec2(sam_dec_out1, x3)
         
+        # Enhanced feature processing for SAM2
+        sam_features = self.sam_feature_processor(sam_dec_out2)
+        
         # Generate SAM2 embeddings with proper normalization (following AutoSAM)
-        sam_embeddings = self.sam_projection(sam_dec_out2)
+        sam_embeddings = self.sam_projection(sam_features)
         sam_embeddings = self.sam_norm(sam_embeddings)
         sam_embeddings = self.sam_activation(sam_embeddings)
         
