@@ -608,6 +608,7 @@ class AutoSAM2(nn.Module):
                 box=box,
                 mask_input=mask_prompt,
                 multimask_output=True
+            )
 
             # Select best mask based on score
             best_idx = scores.argmax()
