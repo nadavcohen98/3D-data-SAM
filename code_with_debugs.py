@@ -204,10 +204,17 @@ class FlexibleUNet3D(nn.Module):
         dec_out1 = self.dec1(x5, x4)
         dec_out2 = self.dec2(dec_out1, x3)
         
-        # Generate SAM2 embeddings directly from regular decoder path
-        # This keeps the architecture closer to original while adding minimal adaptation for SAM2
-        sam_embeddings = self.sam_projection(dec_out2)
-        sam_embeddings = self.sam_norm(sam_embeddings)
+        # Generate SAM2 embeddings with careful normalization
+        # This version keeps the existing architecture but improves SAM2 feature quality
+        
+        # First, get a copy of dec_out2 for SAM2 (to avoid modifying the main path)
+        sam_features = dec_out2.clone()
+        
+        # Apply channel-wise normalization to improve feature quality
+        sam_embeddings = self.sam_projection(sam_features)
+        
+        # Proper range for SAM2 - normalize to [-1, 1] range
+        sam_embeddings = torch.tanh(self.sam_norm(sam_embeddings))
         
         # Calculate downsampled indices safely
         downsampled_depth = max(1, depth // 4)  # Prevent divide by zero
@@ -639,67 +646,33 @@ class AutoSAM2(nn.Module):
         
         return volume
     
-    def combine_results(self, unet_output, sam2_slices, depth_dim_idx, blend_weight=0.6):
-        """
-        Combine UNet output with SAM2 results for selected slices.
-        This function intelligently blends SAM2 results into the UNet output
-        only for the specific slices where SAM2 was run.
-        
-        Args:
-            unet_output: Full volume output from UNet3D
-            sam2_slices: Dictionary of slice results from SAM2
-            depth_dim_idx: Which dimension is the depth dimension
-            blend_weight: Base weight for UNet result (0-1)
-                          
-        Returns:
-            Combined segmentation volume
-        """
-        # Start with UNet output
-        combined = unet_output.clone()
-        
-        # For diagnostics
-        total_processed = 0
-        sam2_contributions = 0
-        
-        # Replace or blend slices with SAM2 results
-        for slice_idx, mask in sam2_slices.items():
-            if mask is not None:
-                total_processed += 1
-                
-                # Extract UNet slice for this position
-                if depth_dim_idx == 0:
-                    unet_slice = combined[:, :, slice_idx]
-                elif depth_dim_idx == 1:
-                    unet_slice = combined[:, :, :, slice_idx]
-                else:  # depth_dim_idx == 2
-                    unet_slice = combined[:, :, :, :, slice_idx]
-                
-                # Check if SAM2 finds any tumor
-                sam_has_tumor = torch.sum(mask[:, 1:] > 0.5) > 10  # At least 10 tumor pixels
-                
-                # Determine blending weight
-                local_weight = blend_weight
-                if sam_has_tumor:
-                    # Give SAM2 more influence when it finds tumor
-                    local_weight = max(0.4, blend_weight - 0.2)  # Reduce UNet weight by 0.2, min 0.4
-                    sam2_contributions += 1
-                
-                # Apply the blending
-                if depth_dim_idx == 0:
-                    combined[:, :, slice_idx] = (
-                        local_weight * unet_slice + (1 - local_weight) * mask
-                    )
-                elif depth_dim_idx == 1:
-                    combined[:, :, :, slice_idx] = (
-                        local_weight * unet_slice + (1 - local_weight) * mask
-                    )
-                else:  # depth_dim_idx == 2
-                    combined[:, :, :, :, slice_idx] = (
-                        local_weight * unet_slice + (1 - local_weight) * mask
-                    )
-        
-       
-        return combined
+def combine_results(self, unet_output, sam2_slices, depth_dim_idx, blend_weight=0.7):
+    """
+    Simple, conservative combination of UNet output with SAM2 results.
+    """
+    # Start with UNet output
+    combined = unet_output.clone()
+    
+    # Replace or blend slices with SAM2 results
+    for slice_idx, mask in sam2_slices.items():
+        if mask is not None:
+            if depth_dim_idx == 0:
+                combined[:, :, slice_idx] = (
+                    blend_weight * combined[:, :, slice_idx] + 
+                    (1 - blend_weight) * mask
+                )
+            elif depth_dim_idx == 1:
+                combined[:, :, :, slice_idx] = (
+                    blend_weight * combined[:, :, :, slice_idx] + 
+                    (1 - blend_weight) * mask
+                )
+            else:  # depth_dim_idx == 2
+                combined[:, :, :, :, slice_idx] = (
+                    blend_weight * combined[:, :, :, :, slice_idx] + 
+                    (1 - blend_weight) * mask
+                )
+    
+    return combined
     
     def forward(self, x):
         """
