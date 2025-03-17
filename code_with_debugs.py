@@ -232,6 +232,119 @@ class FlexibleUNet3D(nn.Module):
         return segmentation, dec_out2, sam_embeddings, metadata
 
 
+class MulticlassPointPromptGenerator:
+    """
+    Generates intelligent point prompts for SAM2 based on UNet3D probability maps
+    Provides multiple strategic points for each tumor class
+    """
+    def __init__(self, num_points_per_class=3, num_background_points=4):
+        self.num_points_per_class = num_points_per_class
+        self.num_background_points = num_background_points
+    
+    def generate_prompts(self, prob_maps, slice_idx, height, width, threshold=0.5):
+        """
+        Generate point prompts for each tumor class based on probability maps
+        
+        Args:
+            prob_maps: Probability maps [B, C, D, H, W] from UNet3D
+            slice_idx: Current slice index
+            height, width: Dimensions of the slice
+            threshold: Probability threshold for tumor regions
+            
+        Returns:
+            Point coordinates and labels for each batch item
+        """
+        batch_size, num_classes, depth, _, _ = prob_maps.shape
+        all_points = []
+        all_labels = []
+        
+        # Ensure slice_idx is within bounds of prob_maps depth
+        slice_idx_safe = min(max(slice_idx, 0), depth-1)
+        
+        for b in range(batch_size):
+            # Initialize lists for points and labels
+            batch_points = []
+            batch_labels = []
+            
+            # Process each tumor class (skip background class 0)
+            for c in range(1, num_classes):
+                # Get probability map for this class in the current slice
+                class_prob = prob_maps[b, c, slice_idx_safe].cpu().detach().numpy()
+                
+                # Resize probability map to match height and width if needed
+                if class_prob.shape[0] != height or class_prob.shape[1] != width:
+                    from scipy.ndimage import zoom
+                    h_factor = height / class_prob.shape[0]
+                    w_factor = width / class_prob.shape[1]
+                    class_prob = zoom(class_prob, (h_factor, w_factor), order=1)
+                
+                # Find regions above threshold
+                high_prob_mask = class_prob > threshold
+                
+                # If we found high probability regions
+                if np.any(high_prob_mask):
+                    # Label connected components
+                    from scipy import ndimage
+                    labeled_mask, num_features = ndimage.label(high_prob_mask)
+                    
+                    # Sort components by size
+                    sizes = ndimage.sum(high_prob_mask, labeled_mask, range(1, num_features+1))
+                    sorted_indices = np.argsort(-sizes)  # Descending order
+                    
+                    # Take up to the specified number of largest components
+                    num_components = min(self.num_points_per_class, num_features)
+                    points_added = 0
+                    
+                    for i in range(num_components):
+                        component_idx = sorted_indices[i] + 1
+                        component_mask = labeled_mask == component_idx
+                        
+                        # Find center of mass of the component
+                        cy, cx = ndimage.center_of_mass(component_mask)
+                        
+                        # Add point to the list
+                        batch_points.append([int(cx), int(cy)])
+                        batch_labels.append(1)  # Foreground (1) for all tumor points
+                        points_added += 1
+                    
+                    # If we didn't add enough points, add additional points from the same component
+                    if points_added < self.num_points_per_class and num_features > 0:
+                        largest_component = labeled_mask == (sorted_indices[0] + 1)
+                        
+                        # Find additional points within the largest component
+                        y_indices, x_indices = np.where(largest_component)
+                        
+                        # If we have enough points
+                        if len(y_indices) > 0:
+                            # Randomly select additional points
+                            remaining = self.num_points_per_class - points_added
+                            indices = np.random.choice(len(y_indices), 
+                                                     min(remaining, len(y_indices)), 
+                                                     replace=False)
+                            
+                            for idx in indices:
+                                batch_points.append([int(x_indices[idx]), int(y_indices[idx])])
+                                batch_labels.append(1)  # Foreground
+            
+            # Add background points (class 0) strategically
+            # Around the edges of the image and regions with low tumor probability
+            edge_points = [
+                [width//4, height//4],              # Top-left quadrant
+                [3*width//4, height//4],            # Top-right quadrant
+                [width//4, 3*height//4],            # Bottom-left quadrant
+                [3*width//4, 3*height//4]           # Bottom-right quadrant
+            ]
+            
+            for point in edge_points[:self.num_background_points]:
+                batch_points.append(point)
+                batch_labels.append(0)  # Background class
+            
+            # Convert to numpy arrays
+            all_points.append(np.array(batch_points) if batch_points else np.zeros((0, 2)))
+            all_labels.append(np.array(batch_labels) if batch_labels else np.zeros(0))
+        
+        return all_points, all_labels
+
 
 # ======= SAM2 integration components =======
 
@@ -355,6 +468,11 @@ class AutoSAM2(nn.Module):
         sam2_model_id="facebook/sam2-hiera-small"
     ):
         super().__init__()
+
+        self.point_generator = MulticlassPointPromptGenerator(
+            num_points_per_class=3,
+            num_background_points=4
+        )
         
         # Configuration
         self.num_classes = num_classes
@@ -464,14 +582,14 @@ class AutoSAM2(nn.Module):
         
         return img_rgb
     
-    def process_slice_with_sam2(self, input_vol, slice_idx, embedding, depth_dim_idx, device):
-        """Process a single slice with SAM2 using smart MRI to RGB mapping."""
+    def process_slice_with_sam2(self, input_vol, slice_idx, probability_maps, depth_dim_idx, device):
+        """Process a single slice with SAM2 using intelligent point prompts"""
         if not self.has_sam2:
             logger.warning(f"SAM2 not available for slice {slice_idx}")
             return None
             
         try:
-            # Extract original slice with all MRI channels
+            # Extract original slice
             if depth_dim_idx == 0:
                 orig_slice = input_vol[:, :, slice_idx]  # [B, C, H, W]
             elif depth_dim_idx == 1:
@@ -483,7 +601,7 @@ class AutoSAM2(nn.Module):
             if orig_slice.shape[0] > 1:
                 orig_slice = orig_slice[0:1]  # [1, C, H, W]
             
-            # Convert MRI to RGB using our learnable mapper
+            # Convert MRI to RGB using our hybrid mapper
             rgb_tensor = self.mri_to_rgb(orig_slice)  # [1, 3, H, W]
             
             # Convert to numpy array in the format SAM2 expects: [H, W, 3]
@@ -497,39 +615,49 @@ class AutoSAM2(nn.Module):
             # Set image in SAM2
             self.sam2.set_image(rgb_image)
             
-            # Generate point prompts
+            # Generate intelligent point prompts using probability maps
             h, w = rgb_image.shape[:2]
-            points = np.array([[w//2, h//2]])  # Center point
-            labels = np.array([1])  # Foreground
-            
-            # Get masks from SAM2
-            masks, scores, _ = self.sam2.predict(
-                point_coords=points,
-                point_labels=labels,
-                multimask_output=True
+            points, labels = self.point_generator.generate_prompts(
+                probability_maps, slice_idx, h, w, threshold=0.5
             )
             
-            # Select best mask based on score
-            best_idx = scores.argmax()
-            best_mask = masks[best_idx]
+            # Get the points for the first batch item
+            batch_points = points[0]
+            batch_labels = labels[0]
             
-            # Convert to tensor and format
-            mask_tensor = torch.from_numpy(best_mask).float().to(device)
-            mask_tensor = mask_tensor.unsqueeze(0).unsqueeze(0)  # [1, 1, H, W]
-            
-            # Create multi-class output
-            height, width = mask_tensor.shape[2:]
-            multi_class_mask = torch.zeros((1, self.num_classes, height, width), device=device)
-            
-            # Fill tumor classes (1,2,3)
-            for c in range(1, self.num_classes):
-                multi_class_mask[:, c] = mask_tensor[:, 0]
-            
-            # Update metrics
-            self.performance_metrics["sam2_slices_processed"] += 1
-            
-            return multi_class_mask
-            
+            # Only proceed if we have points
+            if len(batch_points) > 0:
+                # Get masks from SAM2
+                masks, scores, _ = self.sam2.predict(
+                    point_coords=batch_points,
+                    point_labels=batch_labels,
+                    multimask_output=True
+                )
+                
+                # Select best mask based on score
+                best_idx = scores.argmax()
+                best_mask = masks[best_idx]
+                
+                # Convert to tensor and format
+                mask_tensor = torch.from_numpy(best_mask).float().to(device)
+                mask_tensor = mask_tensor.unsqueeze(0).unsqueeze(0)  # [1, 1, H, W]
+                
+                # Create multi-class output
+                height, width = mask_tensor.shape[2:]
+                multi_class_mask = torch.zeros((1, self.num_classes, height, width), device=device)
+                
+                # Fill tumor classes (1,2,3)
+                for c in range(1, self.num_classes):
+                    multi_class_mask[:, c] = mask_tensor[:, 0]
+                
+                # Update metrics
+                self.performance_metrics["sam2_slices_processed"] += 1
+                
+                return multi_class_mask
+            else:
+                logger.warning(f"No points generated for slice {slice_idx}")
+                return None
+                
         except Exception as e:
             logger.error(f"Error processing slice {slice_idx} with SAM2: {e}")
             return None
