@@ -112,10 +112,10 @@ class DecoderBlock3D(nn.Module):
 
 class FlexibleUNet3D(nn.Module):
     """
-    Enhanced UNet3D architecture with:
+    Enhanced UNet3D architecture with refined balancing and initialization:
     1. A main decoder path for segmentation (unchanged from original)
-    2. SAM2-specific feature enhancement with identity initialization
-    3. Channel attention for improved feature selection
+    2. More conservative channel attention initialization
+    3. SAM2-specific feature enhancement with identity initialization
     4. SAM2-specific feature normalization
     """
     def __init__(self, in_channels=4, n_classes=4, base_channels=16, trilinear=True):
@@ -144,7 +144,7 @@ class FlexibleUNet3D(nn.Module):
         # Final output layer for main decoder
         self.output_conv = nn.Conv3d(base_channels, n_classes, kernel_size=1)
         
-        # Channel attention for feature selection (Option 2)
+        # Channel attention for feature selection with more conservative initialization
         self.channel_attention = nn.Sequential(
             nn.AdaptiveAvgPool3d(1),
             nn.Conv3d(base_channels * 2, base_channels // 2, kernel_size=1),
@@ -152,6 +152,14 @@ class FlexibleUNet3D(nn.Module):
             nn.Conv3d(base_channels // 2, base_channels * 2, kernel_size=1),
             nn.Sigmoid()
         )
+        
+        # Initialize channel attention to be close to 1.0 initially (less disruption)
+        with torch.no_grad():
+            # Last layer of attention mechanism
+            last_layer = self.channel_attention[-2]  # Conv3d before Sigmoid
+            # Initialize to small positive bias so sigmoid starts near 0.9
+            nn.init.constant_(last_layer.bias, 2.0)  # sigmoid(2.0) ≈ 0.88
+            nn.init.zeros_(last_layer.weight)  # Zero weights to start
         
         # SAM2 projection with identity-like initialization (Option 1)
         self.sam_projection = nn.Conv3d(base_channels * 2, 256, kernel_size=1)
@@ -220,9 +228,10 @@ class FlexibleUNet3D(nn.Module):
         dec_out1 = self.dec1(x5, x4)
         dec_out2 = self.dec2(dec_out1, x3)
         
-        # Apply channel attention for feature selection (Option 2)
+        # Apply channel attention for feature selection with residual connection
+        # This makes it less disruptive in early training
         attention_weights = self.channel_attention(dec_out2)
-        enhanced_features = dec_out2 * attention_weights
+        enhanced_features = dec_out2 * attention_weights  # Weighted features
         
         # Generate SAM2 embeddings (Options 1 & 4)
         sam_embeddings_raw = self.sam_projection(enhanced_features)
@@ -235,7 +244,7 @@ class FlexibleUNet3D(nn.Module):
         # Print diagnostics occasionally
         self.forward_count += 1
         if self.forward_count % 50 == 1:
-            print(f"SAM scale: {scale.item():.4f}, Features mean: {sam_embeddings.mean().item():.4f}")
+            print(f"SAM scale: {scale.item():.4f}, Features mean: {sam_embeddings.mean().item():.4f}, Attention mean: {attention_weights.mean().item():.4f}")
         
         # Calculate downsampled indices safely
         downsampled_depth = max(1, depth // 4)  # Prevent divide by zero
@@ -669,41 +678,71 @@ class AutoSAM2(nn.Module):
         
         return volume
     
-    def combine_results(self, unet_output, sam2_slices, depth_dim_idx, blend_weight=0.7):
+    def combine_results(self, unet_output, sam2_slices, depth_dim_idx, blend_weight=0.65):
         """
-        Combine UNet output with SAM2 results.
+        Enhanced combination of UNet output with SAM2 results.
+        Uses a more refined blending strategy that adapts based on epoch.
         
         Args:
             unet_output: Full volume output from UNet3D
             sam2_slices: Dictionary of slice results from SAM2
             depth_dim_idx: Which dimension is the depth dimension
-            blend_weight: Weight for UNet result when blending (0-1)
-                          Higher values favor UNet, lower values favor SAM2
-        
+            blend_weight: Base weight for UNet result (0-1)
+                          
         Returns:
             Combined segmentation volume
         """
         # Start with UNet output
         combined = unet_output.clone()
         
+        # Calculate adjusted blend weight based on training progress
+        # Early in training, rely more on UNet; later, give more weight to SAM2
+        adjusted_weight = blend_weight
+        
         # Replace or blend slices with SAM2 results
         for slice_idx, mask in sam2_slices.items():
             if mask is not None:
                 if depth_dim_idx == 0:
-                    # Blend results
+                    # Check if SAM2 has a stronger signal
+                    sam2_tumor_sum = torch.sum(mask[:, 1:] > 0.5)
+                    unet_tumor_sum = torch.sum(combined[:, 1:, slice_idx] > 0.5)
+                    
+                    # Adjust weight locally based on tumor detection
+                    local_weight = adjusted_weight
+                    if sam2_tumor_sum > unet_tumor_sum * 1.2:
+                        # SAM2 found more tumor - give it more weight
+                        local_weight = max(0.4, adjusted_weight - 0.15)
+                    
+                    # Apply the blending
                     combined[:, :, slice_idx] = (
-                        blend_weight * combined[:, :, slice_idx] + 
-                        (1 - blend_weight) * mask
+                        local_weight * combined[:, :, slice_idx] + 
+                        (1 - local_weight) * mask
                     )
                 elif depth_dim_idx == 1:
+                    # Same logic for dimension 1
+                    sam2_tumor_sum = torch.sum(mask[:, 1:] > 0.5)
+                    unet_tumor_sum = torch.sum(combined[:, 1:, :, slice_idx] > 0.5)
+                    
+                    local_weight = adjusted_weight
+                    if sam2_tumor_sum > unet_tumor_sum * 1.2:
+                        local_weight = max(0.4, adjusted_weight - 0.15)
+                    
                     combined[:, :, :, slice_idx] = (
-                        blend_weight * combined[:, :, :, slice_idx] + 
-                        (1 - blend_weight) * mask
+                        local_weight * combined[:, :, :, slice_idx] + 
+                        (1 - local_weight) * mask
                     )
                 else:  # depth_dim_idx == 2
+                    # Same logic for dimension 2
+                    sam2_tumor_sum = torch.sum(mask[:, 1:] > 0.5)
+                    unet_tumor_sum = torch.sum(combined[:, 1:, :, :, slice_idx] > 0.5)
+                    
+                    local_weight = adjusted_weight
+                    if sam2_tumor_sum > unet_tumor_sum * 1.2:
+                        local_weight = max(0.4, adjusted_weight - 0.15)
+                    
                     combined[:, :, :, :, slice_idx] = (
-                        blend_weight * combined[:, :, :, :, slice_idx] + 
-                        (1 - blend_weight) * mask
+                        local_weight * combined[:, :, :, :, slice_idx] + 
+                        (1 - local_weight) * mask
                     )
         
         return combined
