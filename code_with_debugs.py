@@ -112,9 +112,10 @@ class DecoderBlock3D(nn.Module):
 
 class FlexibleUNet3D(nn.Module):
     """
-    UNet3D architecture with:
-    1. A main decoder path for segmentation
-    2. A separate decoder path for SAM2 prompts, inspired by AutoSAM
+    Enhanced UNet3D architecture with:
+    1. A main decoder path for segmentation (unchanged from original)
+    2. SAM2-specific feature enhancement from the main decoder path
+    3. Improved feature selection for SAM2 compatibility
     """
     def __init__(self, in_channels=4, n_classes=4, base_channels=16, trilinear=True):
         super(FlexibleUNet3D, self).__init__()
@@ -127,34 +128,78 @@ class FlexibleUNet3D(nn.Module):
         # Initial convolution block
         self.initial_conv = ResidualBlock3D(in_channels, base_channels)
         
-        # Encoder pathway
+        # Encoder pathway - unchanged
         self.enc1 = EncoderBlock3D(base_channels, base_channels * 2)
         self.enc2 = EncoderBlock3D(base_channels * 2, base_channels * 4)
         self.enc3 = EncoderBlock3D(base_channels * 4, base_channels * 8)
         self.enc4 = EncoderBlock3D(base_channels * 8, base_channels * 8)  # Keep channel count at 128
         
-        # Main Decoder pathway with skip connections
-        self.dec1 = DecoderBlock3D(base_channels * 16, base_channels * 4, trilinear=trilinear)  # 8 + 8 = 16
-        self.dec2 = DecoderBlock3D(base_channels * 8, base_channels * 2, trilinear=trilinear)   # 4 + 4 = 8
-        self.dec3 = DecoderBlock3D(base_channels * 4, base_channels, trilinear=trilinear)       # 2 + 2 = 4
-        self.dec4 = DecoderBlock3D(base_channels * 2, base_channels, trilinear=trilinear)       # 1 + 1 = 2
+        # Main Decoder pathway - unchanged
+        self.dec1 = DecoderBlock3D(base_channels * 16, base_channels * 4, trilinear=trilinear)
+        self.dec2 = DecoderBlock3D(base_channels * 8, base_channels * 2, trilinear=trilinear)
+        self.dec3 = DecoderBlock3D(base_channels * 4, base_channels, trilinear=trilinear)
+        self.dec4 = DecoderBlock3D(base_channels * 2, base_channels, trilinear=trilinear)
         
         # Final output layer for main decoder
         self.output_conv = nn.Conv3d(base_channels, n_classes, kernel_size=1)
         
-        # SAM2 Decoder pathway - based on AutoSAM's approach
-        # This is a simplified version of the main decoder, focused on creating SAM2 prompts
-        self.sam_dec1 = DecoderBlock3D(base_channels * 16, base_channels * 4, trilinear=trilinear)
-        self.sam_dec2 = DecoderBlock3D(base_channels * 8, base_channels * 2, trilinear=trilinear)
+        # SAM2 Feature Enhancement (Option 2 & 4)
+        # Channel attention to select the most informative features
+        self.channel_attention = nn.Sequential(
+            nn.AdaptiveAvgPool3d(1),  # Global average pooling
+            nn.Conv3d(base_channels * 2, base_channels * 2 // 4, kernel_size=1),
+            nn.ReLU(inplace=True),
+            nn.Conv3d(base_channels * 2 // 4, base_channels * 2, kernel_size=1),
+            nn.Sigmoid()
+        )
         
-        # Final projection for SAM2 embeddings
+        # SAM2 projection with proper initialization
         self.sam_projection = nn.Conv3d(base_channels * 2, 256, kernel_size=1)
         self.sam_norm = nn.GroupNorm(32, 256)
-        self.sam_activation = nn.Tanh()  # Following AutoSAM's approach with tanh activation
+        
+        # Initialize weights to start close to identity mapping (Option 1)
+        nn.init.normal_(self.sam_projection.weight, std=0.01)
+        nn.init.zeros_(self.sam_projection.bias)
+        
+        # Learnable scale parameter for SAM2 features (Option 1)
+        self.sam_scale = nn.Parameter(torch.tensor(0.5))
+        
+        # Register forward hooks for diagnostics
+        self.register_diagnostic_hooks()
+        
+    def register_diagnostic_hooks(self):
+        """Register hooks to track feature statistics during training"""
+        self.feature_stats = {}
+        
+        def hook_fn(name):
+            def fn(module, input, output):
+                # Only log stats occasionally to avoid slowing training
+                if not hasattr(self, 'hook_counter'):
+                    self.hook_counter = 0
+                self.hook_counter += 1
+                
+                if self.hook_counter % 100 == 1 and self.training:
+                    if isinstance(output, tuple):
+                        output = output[0]
+                    
+                    # Compute basic statistics
+                    with torch.no_grad():
+                        stats = {
+                            'mean': output.mean().item(),
+                            'std': output.std().item(),
+                            'min': output.min().item(),
+                            'max': output.max().item()
+                        }
+                        self.feature_stats[name] = stats
+            return fn
+        
+        # Register hooks at key points
+        self.sam_projection.register_forward_hook(hook_fn('sam_projection'))
+        self.sam_norm.register_forward_hook(hook_fn('sam_norm'))
     
     def forward(self, x, use_full_decoder=True):
         """
-        Forward pass with both decoder paths
+        Forward pass with enhanced SAM2 feature generation
         """
         # Get batch dimensions
         batch_size, channels, dim1, dim2, dim3 = x.shape
@@ -193,7 +238,6 @@ class FlexibleUNet3D(nn.Module):
         # Sort all indices
         key_indices.extend(extra_indices)
         key_indices.sort()
-        
     
         # Encoder pathway
         x1 = self.initial_conv(x)
@@ -202,14 +246,30 @@ class FlexibleUNet3D(nn.Module):
         x4 = self.enc3(x3)
         x5 = self.enc4(x4)
         
-        # SAM2 dedicated decoder path - only compute to mid-level features
-        sam_dec_out1 = self.sam_dec1(x5, x4)
-        sam_dec_out2 = self.sam_dec2(sam_dec_out1, x3)
+        # Process for both decoders
+        dec_out1 = self.dec1(x5, x4)
+        dec_out2 = self.dec2(dec_out1, x3)
         
-        # Generate SAM2 embeddings with proper normalization (following AutoSAM)
-        sam_embeddings = self.sam_projection(sam_dec_out2)
-        sam_embeddings = self.sam_norm(sam_embeddings)
-        sam_embeddings = self.sam_activation(sam_embeddings)
+        # Generate SAM2 embeddings with enhanced feature selection (Option 2)
+        # Apply channel attention to select informative features
+        attention_weights = self.channel_attention(dec_out2)
+        sam_features = dec_out2 * attention_weights
+        
+        # Project to SAM2-compatible format
+        sam_embeddings_raw = self.sam_projection(sam_features)
+        sam_embeddings_norm = self.sam_norm(sam_embeddings_raw)
+        
+        # Apply tanh activation for SAM2 format (Option 4)
+        # Using the learnable scale parameter (Option 1)
+        scale = torch.sigmoid(self.sam_scale)  # Keep scale in [0,1] range
+        sam_embeddings = torch.tanh(sam_embeddings_norm) * scale
+        
+        # Occasionally print diagnostics
+        if self.training and hasattr(self, 'hook_counter') and self.hook_counter % 100 == 1:
+            print(f"SAM scale: {scale.item():.4f}")
+            if 'sam_norm' in self.feature_stats:
+                stats = self.feature_stats['sam_norm']
+                print(f"SAM features: mean={stats['mean']:.4f}, std={stats['std']:.4f}")
         
         # Calculate downsampled indices safely
         downsampled_depth = max(1, depth // 4)  # Prevent divide by zero
@@ -220,16 +280,14 @@ class FlexibleUNet3D(nn.Module):
             "key_indices": key_indices,
             "ds_key_indices": ds_key_indices,
             "depth_dim_idx": depth_idx,
-            "sam_decoder_shape": sam_dec_out2.shape
+            "mid_decoder_shape": dec_out2.shape
         }
         
-        # If not using full decoder, return SAM2 features only
+        # If not using full decoder, return mid-features
         if not use_full_decoder:
-            return None, sam_dec_out2, sam_embeddings, metadata
+            return None, dec_out2, sam_embeddings, metadata
         
-        # Main decoder pathway
-        dec_out1 = self.dec1(x5, x4)
-        dec_out2 = self.dec2(dec_out1, x3)
+        # Continue with main decoder pathway
         dec_out3 = self.dec3(dec_out2, x2)
         dec_out4 = self.dec4(dec_out3, x1)
         
@@ -239,7 +297,7 @@ class FlexibleUNet3D(nn.Module):
         # Apply sigmoid
         segmentation = torch.sigmoid(output)
         
-        return segmentation, sam_dec_out2, sam_embeddings, metadata
+        return segmentation, dec_out2, sam_embeddings, metadata
 
 class MultiPointPromptGenerator:
     """Generates strategic point prompts for SAM2 based on probability maps"""
