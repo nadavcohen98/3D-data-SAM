@@ -240,119 +240,77 @@ class MultiPointPromptGenerator:
     def generate_prompts(self, probability_maps, slice_idx, height, width):
         """
         Generate point prompts based on probability maps
-        
-        Args:
-            probability_maps: UNet3D output tensor [B, C, H, W]
-            slice_idx: Not used, kept for compatibility
-            height, width: Target dimensions for points
-            
-        Returns:
-            points: np.array of point coordinates
-            labels: np.array of point labels (1=foreground, 0=background)
         """
-        try:
-            # Safety check - make sure tensor exists
-            if probability_maps is None:
-                print("Warning: probability_maps is None")
-                return self._fallback_points(height, width)
+        # Print detailed tensor information
+        print(f"Tensor type: {type(probability_maps)}")
+        print(f"Tensor device: {probability_maps.device if hasattr(probability_maps, 'device') else 'unknown'}")
+        print(f"Tensor shape: {probability_maps.shape}")
+        
+        # Print shape details
+        batch_size = probability_maps.shape[0]
+        channels = probability_maps.shape[1]
+        h = probability_maps.shape[2]
+        w = probability_maps.shape[3]
+        print(f"Dimensions: batch={batch_size}, channels={channels}, height={h}, width={w}")
+        
+        # Print first few channel information
+        print(f"Number of channels: {channels}")
+        print(f"Target channels are 1+ (tumor classes)")
+        
+        # Extract just the middle portion for tumor probabilities (assuming channels 1+ are tumor)
+        # Let's try with only channel 1 for simplicity
+        print(f"Extracting tumor probability from channel 1")
+        tumor_prob = probability_maps[0, 1].cpu().detach().numpy()
+        print(f"Tumor probability shape: {tumor_prob.shape}")
+        
+        # Resize if necessary
+        curr_h, curr_w = tumor_prob.shape
+        if curr_h != height or curr_w != width:
+            from scipy.ndimage import zoom
+            zoom_h = height / curr_h
+            zoom_w = width / curr_w
+            tumor_prob = zoom(tumor_prob, (zoom_h, zoom_w), order=1)
+            print(f"Resized to {tumor_prob.shape}")
+        
+        # Find high probability regions
+        high_prob = tumor_prob > 0.5
+        high_count = np.sum(high_prob)
+        print(f"Found {high_count} high probability points")
+        
+        # Get coordinates of regions above threshold
+        y_coords, x_coords = np.where(high_prob)
+        print(f"Coordinates arrays shape: y={y_coords.shape}, x={x_coords.shape}")
+        
+        # Initialize point lists
+        foreground_points = []
+        
+        # Add foreground points from high probability areas
+        if len(y_coords) > 0:
+            # Select random indices from high probability areas
+            num_to_select = min(self.num_points, len(y_coords))
+            print(f"Selecting {num_to_select} points")
+            indices = np.random.choice(len(y_coords), num_to_select, replace=False)
             
-            # Print detailed tensor information for debugging
-            print(f"Tensor type: {type(probability_maps)}")
-            print(f"Tensor device: {probability_maps.device if hasattr(probability_maps, 'device') else 'unknown'}")
-            print(f"Tensor shape: {probability_maps.shape}")
-            
-            # Make sure tensor has the right number of dimensions
-            if len(probability_maps.shape) != 4:  # [B, C, H, W]
-                print(f"Warning: Expected 4D tensor, got {len(probability_maps.shape)}D")
-                return self._fallback_points(height, width)
-            
-            # Extract tumor probability (sum channels 1 and up)
-            # Get first batch item and all non-background channels
-            try:
-                # Safely extract the first batch item
-                batch_item = probability_maps[0]
-                
-                # Check if there are tumor classes (channels index 1+)
-                if batch_item.shape[0] <= 1:
-                    print(f"Warning: No tumor classes found, shape: {batch_item.shape}")
-                    return self._fallback_points(height, width)
-                
-                # Get tumor classes (all except background)
-                tumor_channels = batch_item[1:]
-                
-                # Sum across tumor channels
-                tumor_prob = tumor_channels.sum(dim=0).cpu().detach().numpy()
-                
-                # Resize if necessary
-                curr_h, curr_w = tumor_prob.shape
-                if curr_h != height or curr_w != width:
-                    from scipy.ndimage import zoom
-                    zoom_h = height / curr_h
-                    zoom_w = width / curr_w
-                    tumor_prob = zoom(tumor_prob, (zoom_h, zoom_w), order=1)
-                
-                # Find high probability regions
-                high_prob = tumor_prob > 0.5
-                
-                # Get coordinates of regions above threshold
-                y_coords, x_coords = np.where(high_prob)
-                
-                # Initialize point lists
-                foreground_points = []
-                background_points = []
-                
-                # Add foreground points from high probability areas
-                if len(y_coords) > 0:
-                    # Select random indices from high probability areas
-                    indices = np.random.choice(
-                        len(y_coords),
-                        min(self.num_points, len(y_coords)),
-                        replace=False
-                    )
-                    
-                    # Add selected points
-                    for idx in indices:
-                        foreground_points.append([int(x_coords[idx]), int(y_coords[idx])])
-                
-                # If no foreground points found, use center
-                if not foreground_points:
-                    foreground_points.append([width//2, height//2])
-                
-                # Add background points in corners
-                background_points = [
-                    [width//4, height//4],           # Top-left
-                    [3*width//4, height//4],         # Top-right
-                    [width//4, 3*height//4],         # Bottom-left
-                    [3*width//4, 3*height//4]        # Bottom-right
-                ]
-                
-                # Take just the first background point
-                background_points = background_points[:1]
-                
-                # Combine points and labels
-                all_points = foreground_points + background_points
-                all_labels = [1] * len(foreground_points) + [0] * len(background_points)
-                
-                return np.array(all_points), np.array(all_labels)
-                
-            except Exception as e:
-                print(f"Error in tensor processing: {str(e)}")
-                import traceback
-                traceback.print_exc()
-                return self._fallback_points(height, width)
-                
-        except Exception as e:
-            print(f"Error in generate_prompts: {str(e)}")
-            import traceback
-            traceback.print_exc()
-            return self._fallback_points(height, width)
-    
-    def _fallback_points(self, height, width):
-        """Generate fallback points if any errors occur"""
-        points = np.array([[width//2, height//2], [width//4, height//4]])
-        labels = np.array([1, 0])  # 1=foreground, 0=background
-        return points, labels
-
+            # Add selected points
+            for idx in indices:
+                foreground_points.append([int(x_coords[idx]), int(y_coords[idx])])
+        
+        # If no foreground points found, use center
+        if not foreground_points:
+            print("No high probability regions found, using center point")
+            foreground_points.append([width//2, height//2])
+        
+        # Add one background point
+        background_points = [[width//4, height//4]]
+        
+        # Combine points and labels
+        all_points = foreground_points + background_points
+        all_labels = [1] * len(foreground_points) + [0] * len(background_points)
+        
+        print(f"Final points: {all_points}")
+        print(f"Final labels: {all_labels}")
+        
+        return np.array(all_points), np.array(all_labels)
 
 # ======= SAM2 integration components =======
 
