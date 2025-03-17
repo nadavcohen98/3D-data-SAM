@@ -398,28 +398,27 @@ class MRItoRGBMapper(nn.Module):
 
 class UNet3DtoSAM2Bridge(nn.Module):
     """
-    A bridge that follows AutoSAM's approach to produce prompt encodings for SAM2.
-    This bridge emulates how AutoSAM creates prompt embeddings.
+    A bridge that transforms UNet3D features to SAM2-compatible prompts
+    while preserving the hybrid architecture approach.
     """
     def __init__(self, input_channels=32, output_channels=256):
         super().__init__()
         
-        # Following AutoSAM's SmallDecoder pattern
-        # Two upsampling blocks with skip connections (simplified for our case)
-        self.up_block = nn.Sequential(
-            nn.Conv2d(input_channels, 64, kernel_size=3, padding=1),
-            nn.GroupNorm(8, 64),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(64, 128, kernel_size=3, padding=1),
+        # Direct transformation path
+        self.transformer = nn.Sequential(
+            # Initial feature processing
+            nn.Conv2d(input_channels, 128, kernel_size=3, padding=1),
             nn.GroupNorm(16, 128),
-            nn.ReLU(inplace=True)
+            nn.ReLU(inplace=True),
+            
+            # SAM2-specific formatting
+            nn.Conv2d(128, output_channels, kernel_size=1),
+            # Normalization without tanh to preserve signal strength
+            nn.GroupNorm(32, output_channels)
         )
         
-        # Final projection to output_channels (256 for SAM2)
-        self.final = nn.Sequential(
-            nn.Conv2d(128, output_channels, kernel_size=1),
-            nn.Tanh()  # AutoSAM uses tanh for final activation
-        )
+        # Importance weighting parameter (learns how much to scale the output)
+        self.importance = nn.Parameter(torch.tensor(1.0))
         
         # For monitoring
         self.call_count = 0
@@ -427,19 +426,15 @@ class UNet3DtoSAM2Bridge(nn.Module):
     def forward(self, x):
         self.call_count += 1
         
-        # Process features through upsampling blocks
-        features = self.up_block(x)
+        # Transform features
+        transformed = self.transformer(x)
         
-        # Final projection to match SAM2's expected format
-        output = self.final(features)
-        
-        # Ensure output is the right size (64×64)
-        if output.shape[2:] != (64, 64):
-            output = F.interpolate(output, size=(64, 64), mode='bilinear', align_corners=True)
+        # Apply learnable importance weighting
+        output = transformed * torch.sigmoid(self.importance)
         
         # Print diagnostics occasionally
         if self.call_count % 50 == 1:
-            print(f"AutoSAM-style Bridge: in_mean={x.mean().item():.4f}, out_mean={output.mean().item():.4f}")
+            print(f"Bridge: in_mean={x.mean().item():.4f}, out_mean={output.mean().item():.4f}, importance={torch.sigmoid(self.importance).item():.4f}")
         
         return output
 
