@@ -420,21 +420,13 @@ class UNet3DtoSAM2Bridge(nn.Module):
         # Importance weighting parameter (learns how much to scale the output)
         self.importance = nn.Parameter(torch.tensor(1.0))
         
-        # For monitoring
-        self.call_count = 0
     
-    def forward(self, x):
-        self.call_count += 1
-        
+    def forward(self, x):        
         # Transform features
         transformed = self.transformer(x)
         
         # Apply learnable importance weighting
         output = transformed * torch.sigmoid(self.importance)
-        
-        # Print diagnostics occasionally
-        if self.call_count % 50 == 1:
-            print(f"Bridge: in_mean={x.mean().item():.4f}, out_mean={output.mean().item():.4f}, importance={torch.sigmoid(self.importance).item():.4f}")
         
         return output
 
