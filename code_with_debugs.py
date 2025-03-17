@@ -609,6 +609,7 @@ class AutoSAM2(nn.Module):
             
             # Set image in SAM2
             self.sam2.set_image(rgb_image)
+            print(f"Internal SAM2 image embedding size: {self.sam2.model.image_embedding.shape if hasattr(self.sam2.model, 'image_embedding') else 'unknown'}")
             
             # Generate intelligent point prompts using probability maps
             # Make sure we use the original probability_maps here to avoid double resizing
@@ -624,6 +625,13 @@ class AutoSAM2(nn.Module):
                 mask_input=mask_tensor,
                 multimask_output=True
             )
+            print(f"DETAILED DEBUG:")
+            print(f"Image shape passed to set_image: {rgb_image.shape}")
+            print(f"point_coords shape: {points.shape}, dtype: {points.dtype}")
+            print(f"point_labels shape: {labels.shape}, dtype: {labels.dtype}")
+            if box is not None:
+                print(f"box shape: {box.shape}, dtype: {box.dtype}, value: {box}")
+            print(f"mask_input shape: {mask_tensor.shape}, dtype: {mask_tensor.dtype}")
             
             # Select best mask based on score
             best_idx = scores.argmax()
