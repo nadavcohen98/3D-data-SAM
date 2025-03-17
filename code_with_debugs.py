@@ -543,11 +543,18 @@ class EnhancedPromptGenerator:
                         foreground_points.extend(region_points)
             
             # --- EDGE DETECTION FOR BOUNDARY POINTS ---
+            # --- EDGE DETECTION FOR BOUNDARY POINTS ---
             if self.edge_detection:
                 # Create boundary mask (dilated - eroded)
                 eroded = binary_erosion(binary_mask, iterations=2)
                 dilated = binary_dilation(binary_mask, iterations=2)
-                boundary = dilated & ~eroded
+                
+                # Convert to boolean explicitly before bitwise operations
+                dilated_bool = np.bool_(dilated)
+                eroded_bool = np.bool_(eroded)
+                
+                # Now use bitwise NOT on boolean arrays
+                boundary = dilated_bool & ~eroded_bool
                 
                 # Find boundary points
                 boundary_y, boundary_x = np.where(boundary)
@@ -677,7 +684,13 @@ class EnhancedPromptGenerator:
         
         # Dilate the mask to find nearby background
         dilated = binary_dilation(binary_mask, iterations=3)
-        near_boundary = dilated & ~binary_mask
+        
+        # Convert to boolean explicitly before using bitwise NOT
+        dilated_bool = np.bool_(dilated)
+        binary_mask_bool = np.bool_(binary_mask)
+        
+        # Now use bitwise NOT on boolean arrays
+        near_boundary = dilated_bool & ~binary_mask_bool
         
         # Find regions with low probability that are near boundary
         background_regions = (prob_map < 0.3) & near_boundary
@@ -696,8 +709,8 @@ class EnhancedPromptGenerator:
         
         # If not enough points, add some far from tumor
         if len(points) < num_points:
-            # Find regions far from tumor
-            far_bg_mask = ~dilated
+            # Find regions far from tumor - use boolean type explicitly
+            far_bg_mask = ~dilated_bool
             if np.sum(far_bg_mask) > 0:
                 far_y, far_x = np.where(far_bg_mask)
                 remaining = num_points - len(points)
