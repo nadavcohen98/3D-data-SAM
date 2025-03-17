@@ -113,8 +113,8 @@ class DecoderBlock3D(nn.Module):
 class FlexibleUNet3D(nn.Module):
     """
     UNet3D architecture with:
-    1. A main decoder path for segmentation (unchanged from original)
-    2. A minimally modified path for SAM2 prompts that stays close to original architecture
+    1. A main decoder path for segmentation
+    2. A separate decoder path for SAM2 prompts, inspired by AutoSAM
     """
     def __init__(self, in_channels=4, n_classes=4, base_channels=16, trilinear=True):
         super(FlexibleUNet3D, self).__init__()
@@ -127,29 +127,30 @@ class FlexibleUNet3D(nn.Module):
         # Initial convolution block
         self.initial_conv = ResidualBlock3D(in_channels, base_channels)
         
-        # Encoder pathway - unchanged
+        # Encoder pathway
         self.enc1 = EncoderBlock3D(base_channels, base_channels * 2)
         self.enc2 = EncoderBlock3D(base_channels * 2, base_channels * 4)
         self.enc3 = EncoderBlock3D(base_channels * 4, base_channels * 8)
         self.enc4 = EncoderBlock3D(base_channels * 8, base_channels * 8)  # Keep channel count at 128
         
-        # Main Decoder pathway - unchanged
-        self.dec1 = DecoderBlock3D(base_channels * 16, base_channels * 4, trilinear=trilinear)
-        self.dec2 = DecoderBlock3D(base_channels * 8, base_channels * 2, trilinear=trilinear)
-        self.dec3 = DecoderBlock3D(base_channels * 4, base_channels, trilinear=trilinear)
-        self.dec4 = DecoderBlock3D(base_channels * 2, base_channels, trilinear=trilinear)
+        # Main Decoder pathway with skip connections
+        self.dec1 = DecoderBlock3D(base_channels * 16, base_channels * 4, trilinear=trilinear)  # 8 + 8 = 16
+        self.dec2 = DecoderBlock3D(base_channels * 8, base_channels * 2, trilinear=trilinear)   # 4 + 4 = 8
+        self.dec3 = DecoderBlock3D(base_channels * 4, base_channels, trilinear=trilinear)       # 2 + 2 = 4
+        self.dec4 = DecoderBlock3D(base_channels * 2, base_channels, trilinear=trilinear)       # 1 + 1 = 2
         
         # Final output layer for main decoder
         self.output_conv = nn.Conv3d(base_channels, n_classes, kernel_size=1)
         
-        # SAM2 adaptation - using the same first two decoder steps
-        # but with a simple projection for SAM2 format at the end
+        # SAM2 Decoder pathway - based on AutoSAM's approach
+        # This is a simplified version of the main decoder, focused on creating SAM2 prompts
+        self.sam_dec1 = DecoderBlock3D(base_channels * 16, base_channels * 4, trilinear=trilinear)
+        self.sam_dec2 = DecoderBlock3D(base_channels * 8, base_channels * 2, trilinear=trilinear)
+        
+        # Final projection for SAM2 embeddings
         self.sam_projection = nn.Conv3d(base_channels * 2, 256, kernel_size=1)
         self.sam_norm = nn.GroupNorm(32, 256)
-        
-        # Simple identity-like initialization so initial behavior is similar to original
-        nn.init.normal_(self.sam_projection.weight, std=0.01)
-        nn.init.zeros_(self.sam_projection.bias)
+        self.sam_activation = nn.Tanh()  # Following AutoSAM's approach with tanh activation
     
     def forward(self, x, use_full_decoder=True):
         """
@@ -192,6 +193,7 @@ class FlexibleUNet3D(nn.Module):
         # Sort all indices
         key_indices.extend(extra_indices)
         key_indices.sort()
+        
     
         # Encoder pathway
         x1 = self.initial_conv(x)
@@ -200,21 +202,14 @@ class FlexibleUNet3D(nn.Module):
         x4 = self.enc3(x3)
         x5 = self.enc4(x4)
         
-        # Process for both decoders
-        dec_out1 = self.dec1(x5, x4)
-        dec_out2 = self.dec2(dec_out1, x3)
+        # SAM2 dedicated decoder path - only compute to mid-level features
+        sam_dec_out1 = self.sam_dec1(x5, x4)
+        sam_dec_out2 = self.sam_dec2(sam_dec_out1, x3)
         
-        # Generate SAM2 embeddings with careful normalization
-        # This version keeps the existing architecture but improves SAM2 feature quality
-        
-        # First, get a copy of dec_out2 for SAM2 (to avoid modifying the main path)
-        sam_features = dec_out2.clone()
-        
-        # Apply channel-wise normalization to improve feature quality
-        sam_embeddings = self.sam_projection(sam_features)
-        
-        # Proper range for SAM2 - normalize to [-1, 1] range
-        sam_embeddings = torch.tanh(self.sam_norm(sam_embeddings))
+        # Generate SAM2 embeddings with proper normalization (following AutoSAM)
+        sam_embeddings = self.sam_projection(sam_dec_out2)
+        sam_embeddings = self.sam_norm(sam_embeddings)
+        sam_embeddings = self.sam_activation(sam_embeddings)
         
         # Calculate downsampled indices safely
         downsampled_depth = max(1, depth // 4)  # Prevent divide by zero
@@ -225,14 +220,16 @@ class FlexibleUNet3D(nn.Module):
             "key_indices": key_indices,
             "ds_key_indices": ds_key_indices,
             "depth_dim_idx": depth_idx,
-            "mid_decoder_shape": dec_out2.shape
+            "sam_decoder_shape": sam_dec_out2.shape
         }
         
-        # If not using full decoder, return mid-features
+        # If not using full decoder, return SAM2 features only
         if not use_full_decoder:
-            return None, dec_out2, sam_embeddings, metadata
+            return None, sam_dec_out2, sam_embeddings, metadata
         
-        # Continue with main decoder pathway
+        # Main decoder pathway
+        dec_out1 = self.dec1(x5, x4)
+        dec_out2 = self.dec2(dec_out1, x3)
         dec_out3 = self.dec3(dec_out2, x2)
         dec_out4 = self.dec4(dec_out3, x1)
         
@@ -242,7 +239,7 @@ class FlexibleUNet3D(nn.Module):
         # Apply sigmoid
         segmentation = torch.sigmoid(output)
         
-        return segmentation, dec_out2, sam_embeddings, metadata
+        return segmentation, sam_dec_out2, sam_embeddings, metadata
 
 class MultiPointPromptGenerator:
     """Generates strategic point prompts for SAM2 based on probability maps"""
@@ -648,7 +645,17 @@ class AutoSAM2(nn.Module):
     
     def combine_results(self, unet_output, sam2_slices, depth_dim_idx, blend_weight=0.7):
         """
-        Simple, conservative combination of UNet output with SAM2 results.
+        Combine UNet output with SAM2 results.
+        
+        Args:
+            unet_output: Full volume output from UNet3D
+            sam2_slices: Dictionary of slice results from SAM2
+            depth_dim_idx: Which dimension is the depth dimension
+            blend_weight: Weight for UNet result when blending (0-1)
+                          Higher values favor UNet, lower values favor SAM2
+        
+        Returns:
+            Combined segmentation volume
         """
         # Start with UNet output
         combined = unet_output.clone()
@@ -657,6 +664,7 @@ class AutoSAM2(nn.Module):
         for slice_idx, mask in sam2_slices.items():
             if mask is not None:
                 if depth_dim_idx == 0:
+                    # Blend results
                     combined[:, :, slice_idx] = (
                         blend_weight * combined[:, :, slice_idx] + 
                         (1 - blend_weight) * mask
@@ -767,7 +775,6 @@ class AutoSAM2(nn.Module):
             return "invalid_config"
 
 print("=== AUTOSAM2 WITH DUAL DECODER ARCHITECTURE LOADED SUCCESSFULLY ===")
-
 
 
 #dataset.py
