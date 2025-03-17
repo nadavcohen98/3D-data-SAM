@@ -586,46 +586,42 @@ class AutoSAM2(nn.Module):
             # Get tumor probability map
             tumor_prob = probability_maps[0, 1:].sum(dim=0).cpu().detach().numpy()
             
-            # Extract box
+            # First resize the tumor probability map to match the image dimensions
+            if tumor_prob.shape != (h, w):
+                from scipy.ndimage import zoom
+                zoom_h = h / tumor_prob.shape[0]
+                zoom_w = w / tumor_prob.shape[1]
+                tumor_prob = zoom(tumor_prob, (zoom_h, zoom_w), order=1)
+            
+            # Now extract box from the resized probability map
             box = self.extract_tumor_box(tumor_prob)
             
-            # Create mask prompt
+            # Create mask prompt from the resized probability map
             mask_prompt = self.create_mask_prompt(tumor_prob)
             
             # Convert to tensor with proper dimensions
             mask_tensor = torch.from_numpy(mask_prompt).float().unsqueeze(0).unsqueeze(0).to(device)
             
-            # Ensure mask matches RGB image dimensions
-            if mask_tensor.shape[2:] != (h, w):
-                mask_tensor = F.interpolate(mask_tensor, size=(h, w), mode='nearest')
-            
             # Optional: Enhance contrast
             p1, p99 = np.percentile(rgb_image, (1, 99))
             if p99 > p1:
                 rgb_image = np.clip((rgb_image - p1) / (p99 - p1), 0, 1)
-                
-            # Resize box to match image dimensions
-            if box is not None and tumor_prob.shape != (h, w):
-                # Scale box coordinates to match image size
-                scale_h = h / tumor_prob.shape[0]
-                scale_w = w / tumor_prob.shape[1]
-                box[0] = int(box[0] * scale_w)
-                box[1] = int(box[1] * scale_h)
-                box[2] = int(box[2] * scale_w)
-                box[3] = int(box[3] * scale_h)
             
             # Set image in SAM2
             self.sam2.set_image(rgb_image)
             
             # Generate intelligent point prompts using probability maps
-            points, labels = self.point_generator.generate_prompts(probability_maps, slice_idx, h, w)
+            # Make sure we use the original probability_maps here to avoid double resizing
+            points, labels = self.point_generator.generate_prompts(
+                probability_maps, slice_idx, h, w
+            )
             
             # Call SAM2 with all prompt types
             masks, scores, _ = self.sam2.predict(
                 point_coords=points,
                 point_labels=labels,
                 box=box,
-                mask_input=mask_tensor,  # Use the resized tensor here, not mask_prompt
+                mask_input=mask_tensor,
                 multimask_output=True
             )
             
@@ -653,7 +649,7 @@ class AutoSAM2(nn.Module):
         except Exception as e:
             logger.error(f"Error processing slice {slice_idx} with SAM2: {e}")
             return None
-    
+        
     def create_3d_from_slices(self, input_shape, sam2_slices, depth_dim_idx, device):
         """
         Create a 3D volume from 2D slice results.
