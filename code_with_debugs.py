@@ -622,7 +622,6 @@ class AutoSAM2(nn.Module):
                 point_coords=points,
                 point_labels=labels,
                 box=box,
-                mask_input=mask_tensor,
                 multimask_output=True
             )
             print(f"DETAILED DEBUG:")
