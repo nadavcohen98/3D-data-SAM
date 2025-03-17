@@ -412,7 +412,7 @@ class AutoSAM2(nn.Module):
         num_classes=4, 
         base_channels=16, 
         trilinear=True,
-        enable_unet_decoder=False,
+        enable_unet_decoder=True,
         enable_sam2=True,
         sam2_model_id="facebook/sam2-hiera-small"
     ):
