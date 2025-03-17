@@ -1,3 +1,4 @@
+#model.py
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -19,7 +20,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("AutoSAM2")
 
-print("=== LOADING AUTOSAM2 WITH FLEXIBLE ARCHITECTURE ===")
+print("=== LOADING AUTOSAM2 WITH DUAL DECODER ARCHITECTURE ===")
 
 # Import SAM2 with error handling
 try:
@@ -107,14 +108,15 @@ class DecoderBlock3D(nn.Module):
         # Apply residual convolution block
         return self.conv(x)
 
-# ======= UNet3D flexible architecture with mid-decoder hooks =======
+# ======= UNet3D flexible architecture with dual decoders =======
 
 class FlexibleUNet3D(nn.Module):
     """
-    UNet3D architecture with hooks for mid-decoder features at 64x64 resolution.
-    Allows flexible configuration with enable/disable switches for different paths.
+    UNet3D architecture with:
+    1. A main decoder path for segmentation
+    2. A separate decoder path for SAM2 prompts, inspired by AutoSAM
     """
-    def __init__(self, in_channels=4, n_classes=4, base_channels=16,trilinear=True):
+    def __init__(self, in_channels=4, n_classes=4, base_channels=16, trilinear=True):
         super(FlexibleUNet3D, self).__init__()
         
         # Configuration
@@ -131,24 +133,28 @@ class FlexibleUNet3D(nn.Module):
         self.enc3 = EncoderBlock3D(base_channels * 4, base_channels * 8)
         self.enc4 = EncoderBlock3D(base_channels * 8, base_channels * 8)  # Keep channel count at 128
         
-        # Decoder pathway with skip connections
-        # Early decoder stages (to reach 64x64 resolution)
+        # Main Decoder pathway with skip connections
         self.dec1 = DecoderBlock3D(base_channels * 16, base_channels * 4, trilinear=trilinear)  # 8 + 8 = 16
         self.dec2 = DecoderBlock3D(base_channels * 8, base_channels * 2, trilinear=trilinear)   # 4 + 4 = 8
-        
-        # Late decoder stages (after 64x64 resolution)
         self.dec3 = DecoderBlock3D(base_channels * 4, base_channels, trilinear=trilinear)       # 2 + 2 = 4
         self.dec4 = DecoderBlock3D(base_channels * 2, base_channels, trilinear=trilinear)       # 1 + 1 = 2
         
-        # Final output layer
+        # Final output layer for main decoder
         self.output_conv = nn.Conv3d(base_channels, n_classes, kernel_size=1)
         
-        # Projection for SAM2 embeddings (from mid-decoder features)
+        # SAM2 Decoder pathway - based on AutoSAM's approach
+        # This is a simplified version of the main decoder, focused on creating SAM2 prompts
+        self.sam_dec1 = DecoderBlock3D(base_channels * 16, base_channels * 4, trilinear=trilinear)
+        self.sam_dec2 = DecoderBlock3D(base_channels * 8, base_channels * 2, trilinear=trilinear)
+        
+        # Final projection for SAM2 embeddings
         self.sam_projection = nn.Conv3d(base_channels * 2, 256, kernel_size=1)
+        self.sam_norm = nn.GroupNorm(32, 256)
+        self.sam_activation = nn.Tanh()  # Following AutoSAM's approach with tanh activation
     
     def forward(self, x, use_full_decoder=True):
         """
-        Forward pass with flexible options
+        Forward pass with both decoder paths
         """
         # Get batch dimensions
         batch_size, channels, dim1, dim2, dim3 = x.shape
@@ -196,12 +202,14 @@ class FlexibleUNet3D(nn.Module):
         x4 = self.enc3(x3)
         x5 = self.enc4(x4)
         
-        # Early decoder stages
-        dec_out1 = self.dec1(x5, x4)
-        dec_out2 = self.dec2(dec_out1, x3)
+        # SAM2 dedicated decoder path - only compute to mid-level features
+        sam_dec_out1 = self.sam_dec1(x5, x4)
+        sam_dec_out2 = self.sam_dec2(sam_dec_out1, x3)
         
-        # Generate SAM2 embeddings
-        sam_embeddings = self.sam_projection(dec_out2)
+        # Generate SAM2 embeddings with proper normalization (following AutoSAM)
+        sam_embeddings = self.sam_projection(sam_dec_out2)
+        sam_embeddings = self.sam_norm(sam_embeddings)
+        sam_embeddings = self.sam_activation(sam_embeddings)
         
         # Calculate downsampled indices safely
         downsampled_depth = max(1, depth // 4)  # Prevent divide by zero
@@ -212,14 +220,16 @@ class FlexibleUNet3D(nn.Module):
             "key_indices": key_indices,
             "ds_key_indices": ds_key_indices,
             "depth_dim_idx": depth_idx,
-            "mid_decoder_shape": dec_out2.shape
+            "sam_decoder_shape": sam_dec_out2.shape
         }
         
-        # If not using full decoder, return mid-decoder features
+        # If not using full decoder, return SAM2 features only
         if not use_full_decoder:
-            return None, dec_out2, sam_embeddings, metadata
+            return None, sam_dec_out2, sam_embeddings, metadata
         
-        # Late decoder stages
+        # Main decoder pathway
+        dec_out1 = self.dec1(x5, x4)
+        dec_out2 = self.dec2(dec_out1, x3)
         dec_out3 = self.dec3(dec_out2, x2)
         dec_out4 = self.dec4(dec_out3, x1)
         
@@ -229,8 +239,7 @@ class FlexibleUNet3D(nn.Module):
         # Apply sigmoid
         segmentation = torch.sigmoid(output)
         
-        return segmentation, dec_out2, sam_embeddings, metadata
-
+        return segmentation, sam_dec_out2, sam_embeddings, metadata
 
 class MultiPointPromptGenerator:
     """Generates strategic point prompts for SAM2 based on probability maps"""
@@ -242,7 +251,7 @@ class MultiPointPromptGenerator:
         Generate point prompts based on probability maps
         
         Args:
-            probability_maps: UNet3D output tensor [B, C, H, W]
+            probability_maps: Tensor [B, C, H, W] with feature maps from SAM2 decoder 
             slice_idx: Not used, kept for compatibility
             height, width: Target dimensions for points
             
@@ -250,8 +259,11 @@ class MultiPointPromptGenerator:
             points: np.array of point coordinates
             labels: np.array of point labels (1=foreground, 0=background)
         """
-        # Extract tumor probability from channel 1 (first tumor class)
-        tumor_prob = probability_maps[0, 1].cpu().detach().numpy()
+        # Extract tumor probability from feature map (using the first 3 channels)
+        feature_map = probability_maps[0, :3].cpu().detach()
+        
+        # Create a simple probability map by averaging the first 3 channels
+        tumor_prob = torch.sigmoid(feature_map.mean(dim=0)).numpy()
         
         # Resize if necessary
         curr_h, curr_w = tumor_prob.shape
@@ -293,8 +305,6 @@ class MultiPointPromptGenerator:
         
         return np.array(all_points), np.array(all_labels)
 
-
-
 # ======= SAM2 integration components =======
 
 class SliceProcessor(nn.Module):
@@ -304,12 +314,9 @@ class SliceProcessor(nn.Module):
         
         self.output_size = output_size
         
-        # Refinement for slice features
+        # Refinement for slice features - lightweight processing
         self.refine = nn.Sequential(
             nn.Conv2d(input_channels, input_channels, kernel_size=3, padding=1),
-            nn.GroupNorm(num_groups=32, num_channels=input_channels),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(input_channels, input_channels, kernel_size=1),
             nn.GroupNorm(num_groups=32, num_channels=input_channels),
             nn.ReLU(inplace=True)
         )
@@ -396,50 +403,13 @@ class MRItoRGBMapper(nn.Module):
         
         return enhanced_rgb
 
-class UNet3DtoSAM2Bridge(nn.Module):
-    """
-    A bridge that transforms UNet3D features to SAM2-compatible prompts
-    while preserving the hybrid architecture approach.
-    """
-    def __init__(self, input_channels=32, output_channels=256):
-        super().__init__()
-        
-        # Direct transformation path
-        self.transformer = nn.Sequential(
-            # Initial feature processing
-            nn.Conv2d(input_channels, 128, kernel_size=3, padding=1),
-            nn.GroupNorm(16, 128),
-            nn.ReLU(inplace=True),
-            
-            # SAM2-specific formatting
-            nn.Conv2d(128, output_channels, kernel_size=1),
-            # Normalization without tanh to preserve signal strength
-            nn.GroupNorm(32, output_channels)
-        )
-        
-        # Importance weighting parameter (learns how much to scale the output)
-        self.importance = nn.Parameter(torch.tensor(1.0))
-        
-    
-    def forward(self, x):        
-        # Transform features
-        transformed = self.transformer(x)
-        
-        # Apply learnable importance weighting
-        output = transformed * torch.sigmoid(self.importance)
-        
-        return output
-
-
 # ======= Main AutoSAM2 model =======
 
 class AutoSAM2(nn.Module):
     """
-    AutoSAM2 with flexible architecture configurations.
-    Supports multiple modes:
-    1. Full UNet3D only (SAM2 disabled)
-    2. SAM2 only using mid-decoder features (UNet3D decoder disabled)
-    3. Hybrid mode with both paths
+    AutoSAM2 with dedicated decoder paths:
+    1. Main UNet3D decoder for segmentation
+    2. SAM2 decoder path for generating prompts (inspired by AutoSAM)
     """
     def __init__(
         self, 
@@ -453,11 +423,6 @@ class AutoSAM2(nn.Module):
         super().__init__()
 
         self.point_generator = MultiPointPromptGenerator(num_points=3)
-
-        self.unet_sam_bridge = UNet3DtoSAM2Bridge(
-            input_channels=32, 
-            output_channels=256 
-        )
         
         # Configuration
         self.num_classes = num_classes
@@ -465,8 +430,7 @@ class AutoSAM2(nn.Module):
         self.enable_sam2 = enable_sam2
         self.sam2_model_id = sam2_model_id
         
-        
-        # Create flexible UNet3D
+        # Create flexible UNet3D with dual decoders
         self.unet3d = FlexibleUNet3D(
             in_channels=4,
             n_classes=num_classes,
@@ -487,7 +451,6 @@ class AutoSAM2(nn.Module):
         
         # Initialize tracking variables
         self.has_sam2 = False
-        self.has_sam2_enabled = False
         self.sam2 = None
         
         # Performance tracking
@@ -564,42 +527,12 @@ class AutoSAM2(nn.Module):
         return mask
         
     
-    def preprocess_slice_for_sam2(self, img_slice):
-        """Preprocess a slice for SAM2."""
-        # Convert to numpy and standardize
-        img_np = img_slice[0, 0].detach().cpu().numpy()
-        
-        # Apply contrast enhancement
-        try:
-            p1, p99 = np.percentile(img_np, (1, 99))
-            if p99 > p1:
-                img_np = np.clip((img_np - p1) / (p99 - p1), 0, 1)
-            else:
-                # If percentile fails, use min-max normalization
-                min_val, max_val = np.min(img_np), np.max(img_np)
-                if max_val > min_val:
-                    img_np = (img_np - min_val) / (max_val - min_val)
-                else:
-                    img_np = np.zeros_like(img_np)
-        except Exception as e:
-            logger.warning(f"Error in contrast enhancement: {e}. Using basic normalization.")
-            min_val, max_val = np.min(img_np), np.max(img_np)
-            if max_val > min_val:
-                img_np = (img_np - min_val) / (max_val - min_val)
-            else:
-                img_np = np.zeros_like(img_np)
-        
-        # Create RGB image for SAM2
-        img_rgb = np.stack([img_np, img_np, img_np], axis=2)
-        
-        return img_rgb
-    
-    def process_slice_with_sam2(self, input_vol, slice_idx, slice_features, depth_dim_idx, device):
-        """Process a single slice with SAM2 using the bridge network"""
+    def process_slice_with_sam2(self, input_vol, slice_idx, sam_embeddings, depth_dim_idx, device):
+        """Process a single slice with SAM2 using embeddings from dedicated SAM2 decoder"""
         if not self.has_sam2:
             logger.warning(f"SAM2 not available for slice {slice_idx}")
             return None
-                
+            
         try:
             # Extract original slice
             if depth_dim_idx == 0:
@@ -622,26 +555,23 @@ class AutoSAM2(nn.Module):
             # Get image dimensions
             h, w = rgb_image.shape[:2]
             
-            # Process through bridge network
-            enhanced_features = self.unet_sam_bridge(slice_features)
+            # Create SAM2-specific probability map from embeddings
+            # Use the first few channels to create a tumor probability map
+            feature_activations = torch.mean(sam_embeddings[:, :16], dim=1, keepdim=True)
+            tumor_prob = torch.sigmoid(feature_activations)[0, 0].cpu().detach().numpy()
             
-            # Get a simple probability map from the enhanced features
-            # We'll use a reduction over feature channels with a sigmoid activation
-            prob_map = torch.sigmoid(enhanced_features.mean(dim=1, keepdim=True))
-            prob_map = prob_map[0, 0].cpu().detach().numpy()
-            
-            # Resize probability map to match image dimensions if needed
-            if prob_map.shape != (h, w):
+            # First resize the tumor probability map to match the image dimensions
+            if tumor_prob.shape != (h, w):
                 from scipy.ndimage import zoom
-                zoom_h = h / prob_map.shape[0]
-                zoom_w = w / prob_map.shape[1]
-                prob_map = zoom(prob_map, (zoom_h, zoom_w), order=1)
+                zoom_h = h / tumor_prob.shape[0]
+                zoom_w = w / tumor_prob.shape[1]
+                tumor_prob = zoom(tumor_prob, (zoom_h, zoom_w), order=1)
             
-            # Extract box from probability map
-            box = self.extract_tumor_box(prob_map)
+            # Now extract box from the resized probability map
+            box = self.extract_tumor_box(tumor_prob)
             
-            # Create mask prompt
-            mask_prompt = self.create_mask_prompt(prob_map)
+            # Create mask prompt from the resized probability map
+            mask_prompt = self.create_mask_prompt(tumor_prob)
             
             # Optional: Enhance contrast
             p1, p99 = np.percentile(rgb_image, (1, 99))
@@ -651,11 +581,9 @@ class AutoSAM2(nn.Module):
             # Set image in SAM2
             self.sam2.set_image(rgb_image)
             
-            # Generate intelligent point prompts using probability map
-            # We'll use the original point generator but with our enhanced features
-            enhanced_prob = torch.sigmoid(enhanced_features)  # Convert to probabilities
+            # Generate intelligent point prompts using dedicated SAM2 embeddings
             points, labels = self.point_generator.generate_prompts(
-                enhanced_prob, slice_idx, h, w
+                sam_embeddings, slice_idx, h, w
             )
             
             # Call SAM2 with all prompt types
@@ -686,11 +614,10 @@ class AutoSAM2(nn.Module):
             self.performance_metrics["sam2_slices_processed"] += 1
             
             return multi_class_mask
-                    
+                
         except Exception as e:
             logger.error(f"Error processing slice {slice_idx} with SAM2: {e}")
             return None
-
     
     def create_3d_from_slices(self, input_shape, sam2_slices, depth_dim_idx, device):
         """
@@ -767,11 +694,8 @@ class AutoSAM2(nn.Module):
         start_time = time.time()
         device = x.device
         
-        # Flag for SAM2 usage tracking
-        self.has_sam2_enabled = self.enable_sam2 and self.has_sam2
-        
-        # Process with UNet3D to get mid-decoder features
-        unet_output, mid_features, sam_embeddings, metadata = self.unet3d(
+        # Process with UNet3D dual-decoder architecture
+        unet_output, sam_features, sam_embeddings, metadata = self.unet3d(
             x, 
             use_full_decoder=self.enable_unet_decoder
         )
@@ -785,18 +709,17 @@ class AutoSAM2(nn.Module):
             self.performance_metrics["total_time"].append(time.time() - start_time)
             return unet_output
         
-
-        # Process selected slices with SAM2
+        # Process selected slices with SAM2 using the dedicated SAM2 embeddings
         sam2_results = {}
         for idx in key_indices:
-            # Extract the specific slice from mid_features
-            slice_features = self.slice_processor.extract_slice(
-                mid_features, idx // 4, depth_dim_idx
+            # Get embedding for this slice
+            slice_embedding = self.slice_processor.extract_slice(
+                sam_embeddings, idx // 4, depth_dim_idx
             )
             
-            # Process with SAM2 using the bridge
+            # Process with SAM2
             sam2_mask = self.process_slice_with_sam2(
-                x, idx, slice_features, depth_dim_idx, device
+                x, idx, slice_embedding, depth_dim_idx, device
             )
             
             # Store valid results
@@ -827,7 +750,7 @@ class AutoSAM2(nn.Module):
         """Return performance statistics."""
         stats = {
             "has_sam2": self.has_sam2,
-            "sam2_enabled": self.has_sam2_enabled,
+            "sam2_enabled": self.enable_sam2 and self.has_sam2,
             "unet_enabled": self.enable_unet_decoder,
             "sam2_slices_processed": self.performance_metrics["sam2_slices_processed"],
             "model_mode": self._get_current_mode()
@@ -841,16 +764,18 @@ class AutoSAM2(nn.Module):
     
     def _get_current_mode(self):
         """Return string describing current mode."""
-        if self.enable_unet_decoder and not self.has_sam2_enabled:
+        has_sam2_enabled = self.enable_sam2 and self.has_sam2
+        if self.enable_unet_decoder and not has_sam2_enabled:
             return "unet3d_only"
-        elif not self.enable_unet_decoder and self.has_sam2_enabled:
+        elif not self.enable_unet_decoder and has_sam2_enabled:
             return "sam2_only"
-        elif self.enable_unet_decoder and self.has_sam2_enabled:
+        elif self.enable_unet_decoder and has_sam2_enabled:
             return "hybrid"
         else:
             return "invalid_config"
 
-print("=== AUTOSAM2 WITH FLEXIBLE ARCHITECTURE LOADED SUCCESSFULLY ===")
+print("=== AUTOSAM2 WITH DUAL DECODER ARCHITECTURE LOADED SUCCESSFULLY ===")
+
 
 
 #dataset.py
