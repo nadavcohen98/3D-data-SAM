@@ -263,12 +263,6 @@ class MultiPointPromptGenerator:
         
         # Find high probability regions
         high_prob = tumor_prob > 0.5
-
-        # Extract box
-        box = extract_tumor_box(tumor_prob)
-        
-        # Create mask prompt
-        mask_prompt = create_mask_prompt(tumor_prob)
                 
         # Get coordinates of regions above threshold
         y_coords, x_coords = np.where(high_prob)
@@ -505,7 +499,7 @@ class AutoSAM2(nn.Module):
         logger.info(f"Mode set to: UNet Decoder={self.enable_unet_decoder}, SAM2={self.enable_sam2}")
 
     
-    def extract_tumor_box(prob_map, threshold=0.5):
+    def extract_tumor_box(self, prob_map, threshold=0.5):
         # Threshold the probability map
         binary_mask = prob_map > threshold
         
@@ -522,8 +516,8 @@ class AutoSAM2(nn.Module):
         
         # Return as [x1, y1, x2, y2] format
         return np.array([x1, y1, x2, y2])
-
-    def create_mask_prompt(prob_map, threshold=0.5):
+    
+    def create_mask_prompt(self, prob_map, threshold=0.5):
         # Create binary mask
         mask = (prob_map > threshold).astype(np.float32)
         
@@ -582,7 +576,16 @@ class AutoSAM2(nn.Module):
             
             # Convert MRI to RGB using our hybrid mapper
             rgb_tensor = self.mri_to_rgb(orig_slice)  # [1, 3, H, W]
+
+            # Get tumor probability map
+            tumor_prob = probability_maps[0, 1:].sum(dim=0).cpu().detach().numpy()
+
+            # Extract box
+            box = self.extract_tumor_box(tumor_prob)
             
+            # Create mask prompt
+            mask_prompt = self.create_mask_prompt(tumor_prob)
+                        
             # Convert to numpy array in the format SAM2 expects: [H, W, 3]
             rgb_image = rgb_tensor[0].permute(1, 2, 0).detach().cpu().numpy()
             
