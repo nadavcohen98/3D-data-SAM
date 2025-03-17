@@ -398,56 +398,22 @@ class MRItoRGBMapper(nn.Module):
 
 class UNet3DtoSAM2Bridge(nn.Module):
     """
-    A bridge module to connect UNet3D features to SAM2 with diagnostic prints
-    for understanding data flow.
+    A minimal bridge that preserves most of the original signal
+    while adapting it to SAM2's expected format.
     """
-    def __init__(self, input_channels=32, output_channels=256, intermediate_channels=128):
+    def __init__(self, input_channels=32, output_channels=256):
         super().__init__()
         
-        # Basic feature refinement
-        self.bridge = nn.Sequential(
-            # Down-projection
-            nn.Conv2d(input_channels, intermediate_channels, kernel_size=3, padding=1),
-            nn.GroupNorm(32, intermediate_channels),
-            nn.ReLU(inplace=True),
-            
-            # Feature refinement
-            nn.Conv2d(intermediate_channels, intermediate_channels, kernel_size=3, padding=1),
-            nn.GroupNorm(32, intermediate_channels),
-            nn.ReLU(inplace=True),
-            
-            # Up-projection to match SAM2 expected format
-            nn.Conv2d(intermediate_channels, output_channels, kernel_size=1),
-            nn.GroupNorm(32, output_channels),
-            nn.ReLU(inplace=True)
-        )
+        # Simple 1x1 projection to match channel dimensions
+        self.projection = nn.Conv2d(input_channels, output_channels, kernel_size=1)
         
-        # Variable to count calls for limiting diagnostic prints
-        self.call_count = 0
+        # Initialize with near-identity weights
+        nn.init.dirac_(self.projection.weight.data[:input_channels])
+        nn.init.zeros_(self.projection.weight.data[input_channels:])
+        nn.init.zeros_(self.projection.bias.data)
     
     def forward(self, x):
-        self.call_count += 1
-        
-        # Only print diagnostics for the first few calls
-        if self.call_count <= 3:
-            print(f"\n--- Bridge Call #{self.call_count} ---")
-            print(f"Input shape: {x.shape}")
-            print(f"Input stats: min={x.min().item():.4f}, max={x.max().item():.4f}, mean={x.mean().item():.4f}")
-            
-            # Check for anomalies
-            if torch.isnan(x).any() or torch.isinf(x).any():
-                print("WARNING: Input contains NaN or Inf values!")
-        
-        # Process through bridge
-        output = self.bridge(x)
-        
-        # Print output diagnostics
-        if self.call_count <= 3:
-            print(f"Output shape: {output.shape}")
-            print(f"Output stats: min={output.min().item():.4f}, max={output.max().item():.4f}, mean={output.mean().item():.4f}")
-            print(f"--- End of Bridge Call #{self.call_count} ---\n")
-        
-        return output
+        return self.projection(x)
 
 
 # ======= Main AutoSAM2 model =======
