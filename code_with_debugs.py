@@ -112,11 +112,7 @@ class DecoderBlock3D(nn.Module):
 
 class FlexibleUNet3D(nn.Module):
     """
-    Enhanced UNet3D architecture with refined balancing and initialization:
-    1. A main decoder path for segmentation (unchanged from original)
-    2. More conservative channel attention initialization
-    3. SAM2-specific feature enhancement with identity initialization
-    4. SAM2-specific feature normalization
+    Back-to-basics UNet3D with minimal SAM2 adaptation and improved diagnostics
     """
     def __init__(self, in_channels=4, n_classes=4, base_channels=16, trilinear=True):
         super(FlexibleUNet3D, self).__init__()
@@ -144,40 +140,28 @@ class FlexibleUNet3D(nn.Module):
         # Final output layer for main decoder
         self.output_conv = nn.Conv3d(base_channels, n_classes, kernel_size=1)
         
-        # Channel attention for feature selection with more conservative initialization
-        self.channel_attention = nn.Sequential(
-            nn.AdaptiveAvgPool3d(1),
-            nn.Conv3d(base_channels * 2, base_channels // 2, kernel_size=1),
-            nn.ReLU(inplace=True),
-            nn.Conv3d(base_channels // 2, base_channels * 2, kernel_size=1),
-            nn.Sigmoid()
-        )
-        
-        # Initialize channel attention to be close to 1.0 initially (less disruption)
-        with torch.no_grad():
-            # Last layer of attention mechanism
-            last_layer = self.channel_attention[-2]  # Conv3d before Sigmoid
-            # Initialize to small positive bias so sigmoid starts near 0.9
-            nn.init.constant_(last_layer.bias, 2.0)  # sigmoid(2.0) ≈ 0.88
-            nn.init.zeros_(last_layer.weight)  # Zero weights to start
-        
-        # SAM2 projection with identity-like initialization (Option 1)
+        # Simple, direct SAM2 projection - back to basics
         self.sam_projection = nn.Conv3d(base_channels * 2, 256, kernel_size=1)
+        self.sam_norm = nn.GroupNorm(32, 256)
+        
+        # Initialize with small random weights
         nn.init.normal_(self.sam_projection.weight, std=0.01)
         nn.init.zeros_(self.sam_projection.bias)
         
-        # Normalization for SAM2 features (Option 4)
-        self.sam_norm = nn.GroupNorm(32, 256)
-        
-        # Learnable scale parameter (Option 1)
-        self.sam_scale = nn.Parameter(torch.tensor(1.0))
-        
         # Counter for diagnostics
         self.forward_count = 0
+        
+        # For tracking SAM2 feature statistics
+        self.sam_stats = {
+            'means': [],
+            'stds': [],
+            'mins': [],
+            'maxs': []
+        }
     
     def forward(self, x, use_full_decoder=True):
         """
-        Forward pass with enhanced SAM2 feature generation
+        Forward pass with simple SAM2 adaptation and better diagnostics
         """
         # Get batch dimensions
         batch_size, channels, dim1, dim2, dim3 = x.shape
@@ -228,23 +212,27 @@ class FlexibleUNet3D(nn.Module):
         dec_out1 = self.dec1(x5, x4)
         dec_out2 = self.dec2(dec_out1, x3)
         
-        # Apply channel attention for feature selection with residual connection
-        # This makes it less disruptive in early training
-        attention_weights = self.channel_attention(dec_out2)
-        enhanced_features = dec_out2 * attention_weights  # Weighted features
+        # Simple projection for SAM2 embeddings
+        sam_raw = self.sam_projection(dec_out2)
+        sam_embeddings = self.sam_norm(sam_raw)
         
-        # Generate SAM2 embeddings (Options 1 & 4)
-        sam_embeddings_raw = self.sam_projection(enhanced_features)
-        sam_embeddings_norm = self.sam_norm(sam_embeddings_raw)
-        
-        # Apply tanh and learnable scale (Option 1 & 4)
-        scale = torch.sigmoid(self.sam_scale)  # Scale between 0 and 1
-        sam_embeddings = torch.tanh(sam_embeddings_norm) * scale
-        
-        # Print diagnostics occasionally
-        self.forward_count += 1
-        if self.forward_count % 50 == 1:
-            print(f"SAM scale: {scale.item():.4f}, Features mean: {sam_embeddings.mean().item():.4f}, Attention mean: {attention_weights.mean().item():.4f}")
+        # Collect statistics for diagnostics
+        if self.training:
+            with torch.no_grad():
+                # Track statistics
+                self.sam_stats['means'].append(sam_embeddings.mean().item())
+                self.sam_stats['stds'].append(sam_embeddings.std().item())
+                self.sam_stats['mins'].append(sam_embeddings.min().item())
+                self.sam_stats['maxs'].append(sam_embeddings.max().item())
+                
+                # Print diagnostics occasionally
+                self.forward_count += 1
+                if self.forward_count % 50 == 1:
+                    last_means = self.sam_stats['means'][-10:] if len(self.sam_stats['means']) >= 10 else self.sam_stats['means']
+                    last_stds = self.sam_stats['stds'][-10:] if len(self.sam_stats['stds']) >= 10 else self.sam_stats['stds']
+                    
+                    print(f"SAM2 stats - Mean: {np.mean(last_means):.4f} (±{np.std(last_means):.4f}), "
+                          f"StdDev: {np.mean(last_stds):.4f}")
         
         # Calculate downsampled indices safely
         downsampled_depth = max(1, depth // 4)  # Prevent divide by zero
@@ -678,10 +666,10 @@ class AutoSAM2(nn.Module):
         
         return volume
     
-    def combine_results(self, unet_output, sam2_slices, depth_dim_idx, blend_weight=0.65):
+    def combine_results(self, unet_output, sam2_slices, depth_dim_idx, blend_weight=0.7):
         """
         Enhanced combination of UNet output with SAM2 results.
-        Uses a more refined blending strategy that adapts based on epoch.
+        Includes detailed diagnostics about SAM2 vs. UNet performance.
         
         Args:
             unet_output: Full volume output from UNet3D
@@ -695,55 +683,73 @@ class AutoSAM2(nn.Module):
         # Start with UNet output
         combined = unet_output.clone()
         
-        # Calculate adjusted blend weight based on training progress
-        # Early in training, rely more on UNet; later, give more weight to SAM2
-        adjusted_weight = blend_weight
+        # For diagnostics
+        total_slices = 0
+        sam2_better_slices = 0
+        sam2_dice_scores = []
+        unet_dice_scores = []
         
         # Replace or blend slices with SAM2 results
         for slice_idx, mask in sam2_slices.items():
             if mask is not None:
+                total_slices += 1
+                
+                # Extract UNet slice
                 if depth_dim_idx == 0:
-                    # Check if SAM2 has a stronger signal
-                    sam2_tumor_sum = torch.sum(mask[:, 1:] > 0.5)
-                    unet_tumor_sum = torch.sum(combined[:, 1:, slice_idx] > 0.5)
-                    
-                    # Adjust weight locally based on tumor detection
-                    local_weight = adjusted_weight
-                    if sam2_tumor_sum > unet_tumor_sum * 1.2:
-                        # SAM2 found more tumor - give it more weight
-                        local_weight = max(0.4, adjusted_weight - 0.15)
-                    
-                    # Apply the blending
+                    unet_slice = combined[:, :, slice_idx]
+                elif depth_dim_idx == 1:
+                    unet_slice = combined[:, :, :, slice_idx]
+                else:  # depth_dim_idx == 2
+                    unet_slice = combined[:, :, :, :, slice_idx]
+                
+                # Simple binary tumor metrics for diagnostics
+                sam2_tumor = torch.sum(mask[:, 1:] > 0.5)
+                unet_tumor = torch.sum(unet_slice[:, 1:] > 0.5)
+                
+                # Calculate approximate quality metrics
+                # Higher tumor area generally correlates with better recall
+                sam2_better = sam2_tumor > unet_tumor * 1.1
+                if sam2_better:
+                    sam2_better_slices += 1
+                
+                # Store tumor metrics
+                if sam2_tumor > 0:
+                    sam2_dice_scores.append(sam2_tumor.item())
+                if unet_tumor > 0:
+                    unet_dice_scores.append(unet_tumor.item())
+                
+                # Combine results with slightly adaptive weighting
+                local_weight = blend_weight
+                if sam2_better:
+                    # If SAM2 seems better on this slice, give it slightly more weight
+                    local_weight = max(0.5, blend_weight - 0.1)
+                
+                # Apply the blending
+                if depth_dim_idx == 0:
                     combined[:, :, slice_idx] = (
-                        local_weight * combined[:, :, slice_idx] + 
+                        local_weight * unet_slice + 
                         (1 - local_weight) * mask
                     )
                 elif depth_dim_idx == 1:
-                    # Same logic for dimension 1
-                    sam2_tumor_sum = torch.sum(mask[:, 1:] > 0.5)
-                    unet_tumor_sum = torch.sum(combined[:, 1:, :, slice_idx] > 0.5)
-                    
-                    local_weight = adjusted_weight
-                    if sam2_tumor_sum > unet_tumor_sum * 1.2:
-                        local_weight = max(0.4, adjusted_weight - 0.15)
-                    
                     combined[:, :, :, slice_idx] = (
-                        local_weight * combined[:, :, :, slice_idx] + 
+                        local_weight * unet_slice + 
                         (1 - local_weight) * mask
                     )
                 else:  # depth_dim_idx == 2
-                    # Same logic for dimension 2
-                    sam2_tumor_sum = torch.sum(mask[:, 1:] > 0.5)
-                    unet_tumor_sum = torch.sum(combined[:, 1:, :, :, slice_idx] > 0.5)
-                    
-                    local_weight = adjusted_weight
-                    if sam2_tumor_sum > unet_tumor_sum * 1.2:
-                        local_weight = max(0.4, adjusted_weight - 0.15)
-                    
                     combined[:, :, :, :, slice_idx] = (
-                        local_weight * combined[:, :, :, :, slice_idx] + 
+                        local_weight * unet_slice + 
                         (1 - local_weight) * mask
                     )
+        
+        # Print diagnostics if available
+        if total_slices > 0 and self.forward_count % 50 == 0:
+            sam2_better_pct = (sam2_better_slices / total_slices) * 100 if total_slices > 0 else 0
+            
+            sam2_avg = np.mean(sam2_dice_scores) if sam2_dice_scores else 0
+            unet_avg = np.mean(unet_dice_scores) if unet_dice_scores else 0
+            
+            print(f"Slice comparison - SAM2 better: {sam2_better_pct:.1f}% of slices, "
+                  f"Avg. tumor pixels - SAM2: {sam2_avg:.1f}, UNet: {unet_avg:.1f}")
         
         return combined
     
