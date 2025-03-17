@@ -470,7 +470,7 @@ class AutoSAM2(nn.Module):
         base_channels=16, 
         trilinear=True,
         enable_unet_decoder=True,
-        enable_sam2=True,
+        enable_sam2=False,
         sam2_model_id="facebook/sam2-hiera-small"
     ):
         super().__init__()
@@ -756,7 +756,7 @@ class AutoSAM2(nn.Module):
         self.slice_comparison['batch_count'] += 1
         
         # For detailed comparison every 20 batches
-        save_detailed = (self.slice_comparison['batch_count'] % 20 == 0)
+        save_detailed = (self.slice_comparison['batch_count'] % 40 == 0)
         if save_detailed:
             print("\n===== Detailed SAM2 vs UNet3D Comparison =====")
         
