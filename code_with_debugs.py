@@ -451,7 +451,7 @@ class AutoSAM2(nn.Module):
         self.point_generator = MultiPointPromptGenerator(num_points=3)
 
         self.unet_sam_bridge = UNet3DtoSAM2Bridge(
-            input_channels=256, 
+            input_channels=32, 
             output_channels=256 
         )
         
