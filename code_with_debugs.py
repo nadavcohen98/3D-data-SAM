@@ -398,22 +398,54 @@ class MRItoRGBMapper(nn.Module):
 
 class UNet3DtoSAM2Bridge(nn.Module):
     """
-    A minimal bridge that preserves most of the original signal
-    while adapting it to SAM2's expected format.
+    A diagnostic pass-through bridge that analyzes but doesn't modify the data.
     """
     def __init__(self, input_channels=32, output_channels=256):
         super().__init__()
+        self.input_channels = input_channels
+        self.output_channels = output_channels
         
-        # Simple 1x1 projection to match channel dimensions
-        self.projection = nn.Conv2d(input_channels, output_channels, kernel_size=1)
+        # Simple identity mapper with diagnostics
+        self.mapper = nn.Conv2d(input_channels, output_channels, kernel_size=1)
         
-        # Initialize with near-identity weights
-        nn.init.dirac_(self.projection.weight.data[:input_channels])
-        nn.init.zeros_(self.projection.weight.data[input_channels:])
-        nn.init.zeros_(self.projection.bias.data)
+        # Initialize weights to be very small (near zero)
+        nn.init.zeros_(self.mapper.weight)
+        nn.init.zeros_(self.mapper.bias)
+        
+        # Add small random noise to weights (to avoid all zeros)
+        with torch.no_grad():
+            self.mapper.weight.data += torch.randn_like(self.mapper.weight.data) * 0.001
+        
+        # Track gradients
+        self.register_gradient_tracking()
+        
+    def register_gradient_tracking(self):
+        self.gradient_stats = {"count": 0, "magnitudes": []}
+        
+        # Set up gradient hooks
+        for name, param in self.named_parameters():
+            param.register_hook(lambda grad, name=name: self.log_gradient(name, grad))
+    
+    def log_gradient(self, param_name, grad):
+        if self.gradient_stats["count"] < 10:  # Limit logging to first 10 batches
+            magnitude = grad.abs().mean().item()
+            self.gradient_stats["magnitudes"].append(magnitude)
+            if self.gradient_stats["count"] % 5 == 0:  # Print every 5 batches
+                avg_magnitude = sum(self.gradient_stats["magnitudes"]) / len(self.gradient_stats["magnitudes"])
+                print(f"Bridge gradient magnitude (batch {self.gradient_stats['count']}): {avg_magnitude:.8f}")
+            self.gradient_stats["count"] += 1
+        return grad
     
     def forward(self, x):
-        return self.projection(x)
+        # Use mapper with minimal effect
+        result = self.mapper(x)
+        
+        # Print diagnostic info for first few batches
+        if self.training and (self.gradient_stats["count"] < 3):
+            print(f"Bridge: input shape={x.shape}, output shape={result.shape}")
+            print(f"Bridge stats: input_mean={x.mean().item():.4f}, output_mean={result.mean().item():.4f}")
+        
+        return result
 
 
 # ======= Main AutoSAM2 model =======
