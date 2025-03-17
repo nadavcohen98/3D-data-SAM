@@ -579,13 +579,28 @@ class AutoSAM2(nn.Module):
 
             # Get tumor probability map
             tumor_prob = probability_maps[0, 1:].sum(dim=0).cpu().detach().numpy()
+            print(f"DEBUG: tumor_prob shape: {tumor_prob.shape}")
 
             # Extract box
             box = self.extract_tumor_box(tumor_prob)
+            print(f"DEBUG: box: {box}")
             
             # Create mask prompt
             mask_prompt = self.create_mask_prompt(tumor_prob)
-            mask_prompt = torch.from_numpy(mask_prompt).unsqueeze(0).unsqueeze(0).to(device)
+            print(f"DEBUG: mask_prompt shape before: {mask_prompt.shape}")
+            
+            # Convert to tensor with proper dimensions
+            mask_tensor = torch.from_numpy(mask_prompt).float().unsqueeze(0).unsqueeze(0).to(device)
+            print(f"DEBUG: mask_tensor shape: {mask_tensor.shape}")
+            
+            # Get RGB image dimensions
+            h, w = rgb_image.shape[:2]
+            print(f"DEBUG: rgb_image shape: {rgb_image.shape}")
+            
+            # Ensure mask matches RGB image dimensions
+            if mask_tensor.shape[2:] != (h, w):
+                print(f"DEBUG: Resizing mask from {mask_tensor.shape[2:]} to {(h, w)}")
+                mask_tensor = F.interpolate(mask_tensor, size=(h, w), mode='nearest')
                         
             # Convert to numpy array in the format SAM2 expects: [H, W, 3]
             rgb_image = rgb_tensor[0].permute(1, 2, 0).detach().cpu().numpy()
