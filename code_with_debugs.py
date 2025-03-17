@@ -752,6 +752,7 @@ class AutoSAM2(nn.Module):
                   f"Avg. tumor pixels - SAM2: {sam2_avg:.1f}, UNet: {unet_avg:.1f}")
         
         return combined
+        
     
     def forward(self, x):
         """
