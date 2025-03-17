@@ -602,40 +602,33 @@ class AutoSAM2(nn.Module):
             points, labels = self.point_generator.generate_prompts(probability_maps, slice_idx, h, w)
 
             
-            # Only proceed if we have points
-            if len(batch_points) > 0:
-                # Get masks from SAM2
-                masks, scores, _ = self.sam2.predict(
-                    point_coords=points,
-                    point_labels=labels,
-                    box=box,
-                    mask_input=mask_prompt,
-                    multimask_output=True
-                )
-                
-                # Select best mask based on score
-                best_idx = scores.argmax()
-                best_mask = masks[best_idx]
-                
-                # Convert to tensor and format
-                mask_tensor = torch.from_numpy(best_mask).float().to(device)
-                mask_tensor = mask_tensor.unsqueeze(0).unsqueeze(0)  # [1, 1, H, W]
-                
-                # Create multi-class output
-                height, width = mask_tensor.shape[2:]
-                multi_class_mask = torch.zeros((1, self.num_classes, height, width), device=device)
-                
-                # Fill tumor classes (1,2,3)
-                for c in range(1, self.num_classes):
-                    multi_class_mask[:, c] = mask_tensor[:, 0]
-                
-                # Update metrics
-                self.performance_metrics["sam2_slices_processed"] += 1
-                
-                return multi_class_mask
-            else:
-                logger.warning(f"No points generated for slice {slice_idx}")
-                return None
+            masks, scores, _ = self.sam2.predict(
+                point_coords=points,
+                point_labels=labels,
+                box=box,
+                mask_input=mask_prompt,
+                multimask_output=True
+
+            # Select best mask based on score
+            best_idx = scores.argmax()
+            best_mask = masks[best_idx]
+            
+            # Convert to tensor and format
+            mask_tensor = torch.from_numpy(best_mask).float().to(device)
+            mask_tensor = mask_tensor.unsqueeze(0).unsqueeze(0)  # [1, 1, H, W]
+            
+            # Create multi-class output
+            height, width = mask_tensor.shape[2:]
+            multi_class_mask = torch.zeros((1, self.num_classes, height, width), device=device)
+            
+            # Fill tumor classes (1,2,3)
+            for c in range(1, self.num_classes):
+                multi_class_mask[:, c] = mask_tensor[:, 0]
+            
+            # Update metrics
+            self.performance_metrics["sam2_slices_processed"] += 1
+            
+            return multi_class_mask
                 
         except Exception as e:
             logger.error(f"Error processing slice {slice_idx} with SAM2: {e}")
