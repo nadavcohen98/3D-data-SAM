@@ -639,42 +639,73 @@ class AutoSAM2(nn.Module):
         
         return volume
     
-    def combine_results(self, unet_output, sam2_slices, depth_dim_idx, blend_weight=0.7):
+    def combine_results(self, unet_output, sam2_slices, depth_dim_idx, blend_weight=0.6):
         """
-        Combine UNet output with SAM2 results.
+        Improved combination of UNet output with SAM2 results.
+        This function preserves more of the original UNet output while
+        intelligently incorporating SAM2 results where they add value.
         
         Args:
             unet_output: Full volume output from UNet3D
             sam2_slices: Dictionary of slice results from SAM2
             depth_dim_idx: Which dimension is the depth dimension
-            blend_weight: Weight for UNet result when blending (0-1)
-                          Higher values favor UNet, lower values favor SAM2
-        
+            blend_weight: Base weight for UNet result (0-1)
+                          
         Returns:
             Combined segmentation volume
         """
         # Start with UNet output
         combined = unet_output.clone()
         
+        # For tracking how many slices were significantly improved
+        improved_slices = 0
+        
         # Replace or blend slices with SAM2 results
         for slice_idx, mask in sam2_slices.items():
             if mask is not None:
+                # Extract UNet slice for this position
                 if depth_dim_idx == 0:
-                    # Blend results
+                    unet_slice = combined[:, :, slice_idx]
+                elif depth_dim_idx == 1:
+                    unet_slice = combined[:, :, :, slice_idx]
+                else:  # depth_dim_idx == 2
+                    unet_slice = combined[:, :, :, :, slice_idx]
+                
+                # Check for significant tumor detection in SAM2 result
+                sam_tumor_pixels = torch.sum(mask[:, 1:] > 0.5)
+                unet_tumor_pixels = torch.sum(unet_slice[:, 1:] > 0.5)
+                
+                # Adaptive blending based on tumor detection
+                local_weight = blend_weight
+                
+                # If SAM finds significantly more tumor, adjust weight to favor SAM
+                if sam_tumor_pixels > unet_tumor_pixels * 1.2:
+                    local_weight = blend_weight * 0.7  # Reduce UNet influence
+                    improved_slices += 1
+                # If both find similar amounts, use standard weight
+                elif sam_tumor_pixels > 0 and unet_tumor_pixels > 0:
+                    local_weight = blend_weight
+                # If UNet finds more, favor UNet more strongly
+                else:
+                    local_weight = min(blend_weight * 1.2, 0.9)  # Increase UNet influence
+                
+                # Apply the blending
+                if depth_dim_idx == 0:
                     combined[:, :, slice_idx] = (
-                        blend_weight * combined[:, :, slice_idx] + 
-                        (1 - blend_weight) * mask
+                        local_weight * unet_slice + (1 - local_weight) * mask
                     )
                 elif depth_dim_idx == 1:
                     combined[:, :, :, slice_idx] = (
-                        blend_weight * combined[:, :, :, slice_idx] + 
-                        (1 - blend_weight) * mask
+                        local_weight * unet_slice + (1 - local_weight) * mask
                     )
                 else:  # depth_dim_idx == 2
                     combined[:, :, :, :, slice_idx] = (
-                        blend_weight * combined[:, :, :, :, slice_idx] + 
-                        (1 - blend_weight) * mask
+                        local_weight * unet_slice + (1 - local_weight) * mask
                     )
+        
+        # Print diagnostic info about blending process
+        if improved_slices > 0 and self.sam2 is not None:
+            print(f"SAM2 significantly improved {improved_slices} slices")
         
         return combined
     
