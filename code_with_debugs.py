@@ -240,28 +240,18 @@ class MultiPointPromptGenerator:
     def generate_prompts(self, probability_maps, slice_idx, height, width):
         """
         Generate point prompts based on probability maps
+        
+        Args:
+            probability_maps: UNet3D output tensor [B, C, H, W]
+            slice_idx: Not used, kept for compatibility
+            height, width: Target dimensions for points
+            
+        Returns:
+            points: np.array of point coordinates
+            labels: np.array of point labels (1=foreground, 0=background)
         """
-        # Print detailed tensor information
-        print(f"Tensor type: {type(probability_maps)}")
-        print(f"Tensor device: {probability_maps.device if hasattr(probability_maps, 'device') else 'unknown'}")
-        print(f"Tensor shape: {probability_maps.shape}")
-        
-        # Print shape details
-        batch_size = probability_maps.shape[0]
-        channels = probability_maps.shape[1]
-        h = probability_maps.shape[2]
-        w = probability_maps.shape[3]
-        print(f"Dimensions: batch={batch_size}, channels={channels}, height={h}, width={w}")
-        
-        # Print first few channel information
-        print(f"Number of channels: {channels}")
-        print(f"Target channels are 1+ (tumor classes)")
-        
-        # Extract just the middle portion for tumor probabilities (assuming channels 1+ are tumor)
-        # Let's try with only channel 1 for simplicity
-        print(f"Extracting tumor probability from channel 1")
+        # Extract tumor probability from channel 1 (first tumor class)
         tumor_prob = probability_maps[0, 1].cpu().detach().numpy()
-        print(f"Tumor probability shape: {tumor_prob.shape}")
         
         # Resize if necessary
         curr_h, curr_w = tumor_prob.shape
@@ -270,16 +260,12 @@ class MultiPointPromptGenerator:
             zoom_h = height / curr_h
             zoom_w = width / curr_w
             tumor_prob = zoom(tumor_prob, (zoom_h, zoom_w), order=1)
-            print(f"Resized to {tumor_prob.shape}")
         
         # Find high probability regions
         high_prob = tumor_prob > 0.5
-        high_count = np.sum(high_prob)
-        print(f"Found {high_count} high probability points")
         
         # Get coordinates of regions above threshold
         y_coords, x_coords = np.where(high_prob)
-        print(f"Coordinates arrays shape: y={y_coords.shape}, x={x_coords.shape}")
         
         # Initialize point lists
         foreground_points = []
@@ -288,7 +274,6 @@ class MultiPointPromptGenerator:
         if len(y_coords) > 0:
             # Select random indices from high probability areas
             num_to_select = min(self.num_points, len(y_coords))
-            print(f"Selecting {num_to_select} points")
             indices = np.random.choice(len(y_coords), num_to_select, replace=False)
             
             # Add selected points
@@ -297,7 +282,6 @@ class MultiPointPromptGenerator:
         
         # If no foreground points found, use center
         if not foreground_points:
-            print("No high probability regions found, using center point")
             foreground_points.append([width//2, height//2])
         
         # Add one background point
@@ -307,10 +291,9 @@ class MultiPointPromptGenerator:
         all_points = foreground_points + background_points
         all_labels = [1] * len(foreground_points) + [0] * len(background_points)
         
-        print(f"Final points: {all_points}")
-        print(f"Final labels: {all_labels}")
-        
         return np.array(all_points), np.array(all_labels)
+
+
 
 # ======= SAM2 integration components =======
 
