@@ -577,9 +577,17 @@ class AutoSAM2(nn.Module):
             # Convert MRI to RGB using our hybrid mapper
             rgb_tensor = self.mri_to_rgb(orig_slice)  # [1, 3, H, W]
 
+    
+            # Convert to numpy array in the format SAM2 expects: [H, W, 3]
+            rgb_image = rgb_tensor[0].permute(1, 2, 0).detach().cpu().numpy()
+
             # Get tumor probability map
             tumor_prob = probability_maps[0, 1:].sum(dim=0).cpu().detach().numpy()
             print(f"DEBUG: tumor_prob shape: {tumor_prob.shape}")
+
+            # Get image dimensions
+            h, w = rgb_image.shape[:2]
+            print(f"DEBUG: rgb_image shape: {rgb_image.shape}")
 
             # Extract box
             box = self.extract_tumor_box(tumor_prob)
@@ -601,14 +609,24 @@ class AutoSAM2(nn.Module):
             if mask_tensor.shape[2:] != (h, w):
                 print(f"DEBUG: Resizing mask from {mask_tensor.shape[2:]} to {(h, w)}")
                 mask_tensor = F.interpolate(mask_tensor, size=(h, w), mode='nearest')
+                print(f"DEBUG: Resized mask shape: {mask_tensor.shape}")
                         
-            # Convert to numpy array in the format SAM2 expects: [H, W, 3]
-            rgb_image = rgb_tensor[0].permute(1, 2, 0).detach().cpu().numpy()
             
             # Optional: Enhance contrast
             p1, p99 = np.percentile(rgb_image, (1, 99))
             if p99 > p1:
                 rgb_image = np.clip((rgb_image - p1) / (p99 - p1), 0, 1)
+
+            # Resize box to match image dimensions
+            if box is not None and tumor_prob.shape != (h, w):
+                # Scale box coordinates to match image size
+                scale_h = h / tumor_prob.shape[0]
+                scale_w = w / tumor_prob.shape[1]
+                box[0] = int(box[0] * scale_w)
+                box[1] = int(box[1] * scale_h)
+                box[2] = int(box[2] * scale_w)
+                box[3] = int(box[3] * scale_h)
+                print(f"DEBUG: Scaled box: {box}")
             
             # Set image in SAM2
             self.sam2.set_image(rgb_image)
