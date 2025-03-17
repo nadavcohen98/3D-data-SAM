@@ -698,10 +698,7 @@ class AutoSAM2(nn.Module):
                         local_weight * unet_slice + (1 - local_weight) * mask
                     )
         
-        # Print diagnostic info 
-        if total_processed > 0 and sam2_contributions > 0:
-            print(f"SAM2 found tumors in {sam2_contributions}/{total_processed} processed slices")
-        
+       
         return combined
     
     def forward(self, x):
