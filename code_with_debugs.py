@@ -563,9 +563,7 @@ class AutoSAM2(nn.Module):
             
             # Generate intelligent point prompts using probability maps
             h, w = rgb_image.shape[:2]
-            points, labels = self.point_generator.generate_prompts(
-                probability_maps, slice_idx, h, w
-            )
+            points, labels = self.point_generator.generate_prompts(probability_maps, slice_idx, h, w)
             
             # Get the points for the first batch item
             batch_points = points[0]
@@ -575,8 +573,8 @@ class AutoSAM2(nn.Module):
             if len(batch_points) > 0:
                 # Get masks from SAM2
                 masks, scores, _ = self.sam2.predict(
-                    point_coords=batch_points,
-                    point_labels=batch_labels,
+                    point_coords=points,
+                    point_labels=labels,
                     multimask_output=True
                 )
                 
