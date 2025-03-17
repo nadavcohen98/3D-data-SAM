@@ -398,57 +398,48 @@ class MRItoRGBMapper(nn.Module):
 
 class UNet3DtoSAM2Bridge(nn.Module):
     """
-    A residual bridge that preserves original features while adding learnable components.
+    A bridge that follows AutoSAM's approach to produce prompt encodings for SAM2.
+    This bridge emulates how AutoSAM creates prompt embeddings.
     """
     def __init__(self, input_channels=32, output_channels=256):
         super().__init__()
         
-        # Base channel expander (non-learnable, just for proper shaping)
-        self.base_expander = nn.Conv2d(input_channels, output_channels, kernel_size=1, bias=False)
-        with torch.no_grad():
-            nn.init.zeros_(self.base_expander.weight)
-            for i in range(min(input_channels, output_channels)):
-                self.base_expander.weight[i, i, 0, 0] = 1.0
-        
-        # Freeze the base expander
-        for param in self.base_expander.parameters():
-            param.requires_grad = False
-        
-        # Additional learnable residual path
-        self.residual = nn.Sequential(
-            nn.Conv2d(input_channels, 64, kernel_size=1),
+        # Following AutoSAM's SmallDecoder pattern
+        # Two upsampling blocks with skip connections (simplified for our case)
+        self.up_block = nn.Sequential(
+            nn.Conv2d(input_channels, 64, kernel_size=3, padding=1),
+            nn.GroupNorm(8, 64),
             nn.ReLU(inplace=True),
-            nn.Conv2d(64, output_channels, kernel_size=1),
+            nn.Conv2d(64, 128, kernel_size=3, padding=1),
+            nn.GroupNorm(16, 128),
+            nn.ReLU(inplace=True)
         )
         
-        # Initialize residual path to be very small initially
-        for layer in self.residual:
-            if isinstance(layer, nn.Conv2d):
-                nn.init.normal_(layer.weight, std=0.01)
-                if layer.bias is not None:
-                    nn.init.zeros_(layer.bias)
+        # Final projection to output_channels (256 for SAM2)
+        self.final = nn.Sequential(
+            nn.Conv2d(128, output_channels, kernel_size=1),
+            nn.Tanh()  # AutoSAM uses tanh for final activation
+        )
         
-        # Learnable weight for residual contribution
-        self.residual_weight = nn.Parameter(torch.tensor(0.1))
-        
+        # For monitoring
         self.call_count = 0
     
     def forward(self, x):
         self.call_count += 1
         
-        # Get base expanded features (identity-like mapping)
-        base_features = self.base_expander(x)
+        # Process features through upsampling blocks
+        features = self.up_block(x)
         
-        # Get residual features
-        res_features = self.residual(x)
+        # Final projection to match SAM2's expected format
+        output = self.final(features)
         
-        # Combine with learnable weight
-        alpha = torch.sigmoid(self.residual_weight) * 0.5  # Limit to 0-0.5 range initially
-        output = base_features + alpha * res_features
+        # Ensure output is the right size (64×64)
+        if output.shape[2:] != (64, 64):
+            output = F.interpolate(output, size=(64, 64), mode='bilinear', align_corners=True)
         
-        # Print diagnostics
+        # Print diagnostics occasionally
         if self.call_count % 50 == 1:
-            print(f"Bridge-2: in_mean={x.mean().item():.4f}, out_mean={output.mean().item():.4f}, alpha={alpha.item():.4f}")
+            print(f"AutoSAM-style Bridge: in_mean={x.mean().item():.4f}, out_mean={output.mean().item():.4f}")
         
         return output
 
