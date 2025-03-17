@@ -646,33 +646,33 @@ class AutoSAM2(nn.Module):
         
         return volume
     
-def combine_results(self, unet_output, sam2_slices, depth_dim_idx, blend_weight=0.7):
-    """
-    Simple, conservative combination of UNet output with SAM2 results.
-    """
-    # Start with UNet output
-    combined = unet_output.clone()
-    
-    # Replace or blend slices with SAM2 results
-    for slice_idx, mask in sam2_slices.items():
-        if mask is not None:
-            if depth_dim_idx == 0:
-                combined[:, :, slice_idx] = (
-                    blend_weight * combined[:, :, slice_idx] + 
-                    (1 - blend_weight) * mask
-                )
-            elif depth_dim_idx == 1:
-                combined[:, :, :, slice_idx] = (
-                    blend_weight * combined[:, :, :, slice_idx] + 
-                    (1 - blend_weight) * mask
-                )
-            else:  # depth_dim_idx == 2
-                combined[:, :, :, :, slice_idx] = (
-                    blend_weight * combined[:, :, :, :, slice_idx] + 
-                    (1 - blend_weight) * mask
-                )
-    
-    return combined
+    def combine_results(self, unet_output, sam2_slices, depth_dim_idx, blend_weight=0.7):
+        """
+        Simple, conservative combination of UNet output with SAM2 results.
+        """
+        # Start with UNet output
+        combined = unet_output.clone()
+        
+        # Replace or blend slices with SAM2 results
+        for slice_idx, mask in sam2_slices.items():
+            if mask is not None:
+                if depth_dim_idx == 0:
+                    combined[:, :, slice_idx] = (
+                        blend_weight * combined[:, :, slice_idx] + 
+                        (1 - blend_weight) * mask
+                    )
+                elif depth_dim_idx == 1:
+                    combined[:, :, :, slice_idx] = (
+                        blend_weight * combined[:, :, :, slice_idx] + 
+                        (1 - blend_weight) * mask
+                    )
+                else:  # depth_dim_idx == 2
+                    combined[:, :, :, :, slice_idx] = (
+                        blend_weight * combined[:, :, :, :, slice_idx] + 
+                        (1 - blend_weight) * mask
+                    )
+        
+        return combined
     
     def forward(self, x):
         """
