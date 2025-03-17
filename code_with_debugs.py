@@ -585,6 +585,7 @@ class AutoSAM2(nn.Module):
             
             # Create mask prompt
             mask_prompt = self.create_mask_prompt(tumor_prob)
+            mask_prompt = torch.from_numpy(mask_prompt).unsqueeze(0).unsqueeze(0).to(device)
                         
             # Convert to numpy array in the format SAM2 expects: [H, W, 3]
             rgb_image = rgb_tensor[0].permute(1, 2, 0).detach().cpu().numpy()
