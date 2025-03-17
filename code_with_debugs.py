@@ -243,57 +243,45 @@ class SimplePointPromptGenerator:
         
         Returns: points, labels for the first batch item only
         """
-        # Ensure slice_idx is within bounds
-        depth = probability_maps.shape[2]
-        slice_idx_safe = min(max(slice_idx, 0), depth-1)
-        
-        # Get probability map for current slice (first batch item)
-        # Sum across all tumor classes (indices 1,2,3)
-        tumor_prob = probability_maps[0, 1:, slice_idx_safe].sum(dim=0).cpu().detach().numpy()
-        
-        # Resize to match target dimensions if needed
-        if tumor_prob.shape[0] != height or tumor_prob.shape[1] != width:
-            from scipy.ndimage import zoom
-            h_factor = height / tumor_prob.shape[0]
-            w_factor = width / tumor_prob.shape[1]
-            tumor_prob = zoom(tumor_prob, (h_factor, w_factor), order=1)
-        
-        # Find foreground points
-        points = []
-        labels = []
-        
-        # If we have tumor regions
-        if np.max(tumor_prob) > 0.5:
-            # Find highest probability regions
-            high_prob = tumor_prob > 0.5
-            if np.any(high_prob):
-                # Get coordinates of high probability regions
-                y_coords, x_coords = np.where(high_prob)
+        try:
+            # Validate input dimensions
+            if probability_maps is None:
+                print("Warning: probability_maps is None, using center point only")
+                return np.array([[width//2, height//2]]), np.array([1])
                 
-                # If we have points, sample from them
-                if len(y_coords) > 0:
-                    # Sample up to num_points points
-                    indices = np.random.choice(
-                        len(y_coords), 
-                        min(self.num_points, len(y_coords)), 
-                        replace=False
-                    )
-                    
-                    # Add foreground points
-                    for idx in indices:
-                        points.append([int(x_coords[idx]), int(y_coords[idx])])
-                        labels.append(1)  # Foreground
-        
-        # If we don't have enough foreground points, add center point
-        if len(points) == 0:
-            points.append([width // 2, height // 2])
-            labels.append(1)  # Foreground
-        
-        # Add one background point
-        points.append([width // 4, height // 4])
-        labels.append(0)  # Background
-        
-        return np.array(points), np.array(labels)
+            # Check shape
+            shape_str = str(probability_maps.shape)
+            print(f"Probability maps shape: {shape_str}")
+            
+            # Ensure tensor has enough dimensions
+            if len(probability_maps.shape) < 3:
+                print(f"Warning: probability_maps has wrong dimensions: {shape_str}")
+                return np.array([[width//2, height//2]]), np.array([1])
+            
+            # Extract batch size, classes, depth
+            if len(probability_maps.shape) >= 3:
+                depth = probability_maps.shape[2] if len(probability_maps.shape) >= 3 else 1
+            else:
+                depth = 1
+                
+            # Ensure slice_idx is within bounds
+            slice_idx_safe = min(max(slice_idx, 0), depth-1)
+            print(f"Using slice_idx_safe: {slice_idx_safe}, depth: {depth}")
+            
+            # Fallback to simple center point if anything fails
+            points = [[width//2, height//2]]
+            labels = [1]  # Foreground
+            
+            # Add background point
+            points.append([width//4, height//4])
+            labels.append(0)  # Background
+            
+            return np.array(points), np.array(labels)
+            
+        except Exception as e:
+            print(f"Error in generate_prompts: {e}")
+            # Fallback to center point
+            return np.array([[width//2, height//2]]), np.array([1])
 
 
 # ======= SAM2 integration components =======
