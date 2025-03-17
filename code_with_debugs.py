@@ -479,6 +479,9 @@ class AutoSAM2(nn.Module):
         # Performance tracking
         self.performance_metrics = defaultdict(list)
         self.performance_metrics["sam2_slices_processed"] = 0
+
+        # Add counter for diagnostics (fix for the error)
+        self.forward_count = 0
         
         # Initialize SAM2 if enabled
         if enable_sam2:
@@ -743,6 +746,9 @@ class AutoSAM2(nn.Module):
         
         # Print diagnostics if available
         if total_slices > 0 and self.forward_count % 50 == 0:
+            # Increment counter - moved here from FlexibleUNet3D
+            self.forward_count += 1
+            
             sam2_better_pct = (sam2_better_slices / total_slices) * 100 if total_slices > 0 else 0
             
             sam2_avg = np.mean(sam2_dice_scores) if sam2_dice_scores else 0
