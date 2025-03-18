@@ -1347,7 +1347,10 @@ class AutoSAM2(nn.Module):
             for idx in context_indices:
                 if idx in previous_masks and idx != center_idx:
                     # Get mask from previous results, using class 1 as representative
-                    mask = previous_masks[idx][0, 1].squeeze().numpy()
+                    mask = previous_masks[idx][0, 1].squeeze()
+                    # Handle both tensor and numpy array cases
+                    if isinstance(mask, torch.Tensor):
+                        mask = mask.cpu().numpy()
                     neighbor_masks.append(mask)
             
             if neighbor_masks:
