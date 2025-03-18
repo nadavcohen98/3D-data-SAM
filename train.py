@@ -512,6 +512,7 @@ def validate(model, val_loader, criterion, device, epoch):
                 
                 # Visualize first batch
                 if batch_idx == 40:
+                    print(f"Generating visualization for epoch {epoch}, batch {batch_idx}")
                     visualize_batch_comprehensive(images, masks, outputs, epoch, mode="hybrid", prefix="val")
                 
                 # Update total loss
