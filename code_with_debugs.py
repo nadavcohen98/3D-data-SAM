@@ -1460,7 +1460,7 @@ class AutoSAM2(nn.Module):
                 self.slice_comparison['total_slices'] += 1
                 
                 # Save detailed comparison for selected slices
-                if show_details and (len(batch_dice_scores) < 5 or slice_idx % 30 == 0):
+                if show_details and slice_idx in [30, 77, 124]:
                     print(f"Slice {slice_idx}:")
                     print(f"  SAM2 tumor size: {sam2_pixels} pixels")
                     print(f"  UNet tumor size: {unet_pixels} pixels")
@@ -1481,14 +1481,14 @@ class AutoSAM2(nn.Module):
                     elif unet_pixels > sam2_pixels:
                         print(f"  UNet3D finds {(unet_pixels/max(1, sam2_pixels) - 1)*100:.1f}% more tumor than SAM2")
                     print()
-                
-                # Apply blending
-                if depth_dim_idx == 0:
-                    combined[:, :, slice_idx] = blend_weight * unet_slice + (1 - blend_weight) * mask
-                elif depth_dim_idx == 1:
-                    combined[:, :, :, slice_idx] = blend_weight * unet_slice + (1 - blend_weight) * mask
-                else:  # depth_dim_idx == 2:
-                    combined[:, :, :, :, slice_idx] = blend_weight * unet_slice + (1 - blend_weight) * mask
+                    
+                    # Apply blending
+                    if depth_dim_idx == 0:
+                        combined[:, :, slice_idx] = blend_weight * unet_slice + (1 - blend_weight) * mask
+                    elif depth_dim_idx == 1:
+                        combined[:, :, :, slice_idx] = blend_weight * unet_slice + (1 - blend_weight) * mask
+                    else:  # depth_dim_idx == 2:
+                        combined[:, :, :, :, slice_idx] = blend_weight * unet_slice + (1 - blend_weight) * mask
         
         # Print summary statistics
         if show_details:
