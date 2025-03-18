@@ -1454,41 +1454,50 @@ class AutoSAM2(nn.Module):
         else:
             return "invalid_config"
 
-    def visualize_slice_comparison(self, input_vol, model_output, ground_truth, slice_indices, save_dir="results"):
-        """
-        Instead of plotting, print a textual comparison between model output and ground truth for selected slices.
-        """
-        # Move tensors to CPU
-        input_vol = input_vol.detach().cpu()
-        model_output = model_output.detach().cpu()
-        ground_truth = ground_truth.detach().cpu()
+def visualize_slice_comparison(self, input_vol, unet_output, sam2_output, ground_truth, slice_indices):
+    """
+    For each selected slice, compute the Dice score (per channel and average)
+    for UNet3D output and for SAM2 output separately, comparing each to the ground truth.
+    """
+    # Move tensors to CPU and detach
+    input_vol = input_vol.detach().cpu()
+    unet_output = unet_output.detach().cpu()
+    sam2_output = sam2_output.detach().cpu()
+    ground_truth = ground_truth.detach().cpu()
+    
+    import numpy as np
+    b = 0  # Visualize the first item in the batch
+    for idx in slice_indices:
+        dice_unet_channels = []
+        dice_sam2_channels = []
+        # Assume channels 1,2,3 represent tumor regions
+        for ch in range(1, ground_truth.shape[1]):
+            gt_ch = ground_truth[b, ch, idx].numpy()
+            unet_ch = unet_output[b, ch, idx].numpy()
+            sam2_ch = sam2_output[b, ch, idx].numpy()
+            
+            # Convert to binary masks using threshold 0.5
+            gt_bin = (gt_ch > 0.5).astype(np.float32)
+            unet_bin = (unet_ch > 0.5).astype(np.float32)
+            sam2_bin = (sam2_ch > 0.5).astype(np.float32)
+            
+            # Compute Dice for each channel
+            intersection_unet = np.sum(gt_bin * unet_bin)
+            dice_unet = (2 * intersection_unet) / (np.sum(gt_bin) + np.sum(unet_bin) + 1e-5)
+            dice_unet_channels.append(dice_unet)
+            
+            intersection_sam2 = np.sum(gt_bin * sam2_bin)
+            dice_sam2 = (2 * intersection_sam2) / (np.sum(gt_bin) + np.sum(sam2_bin) + 1e-5)
+            dice_sam2_channels.append(dice_sam2)
         
-        b = 0  # use the first item in the batch
-        import numpy as np
-        for idx in slice_indices:
-            # Extract original slice (from channel 0)
-            original_slice = input_vol[b, 0, idx].numpy()
-            
-            # Ground truth for tumor channels (channels 1,2,3)
-            gt = ground_truth[b, 1:, idx].numpy()  # shape: [num_classes, H, W]
-            # Prediction for tumor channels
-            pred = model_output[b, 1:, idx].numpy()
-            
-            # Create binary masks by summing channels
-            gt_mask = (np.sum(gt, axis=0) > 0).astype(np.float32)
-            pred_mask = (np.sum(pred, axis=0) > 0).astype(np.float32)
-            
-            gt_pixels = np.sum(gt_mask)
-            pred_pixels = np.sum(pred_mask)
-            overlap = np.sum(gt_mask * pred_mask)
-            dice_score = (2 * overlap) / (gt_pixels + pred_pixels + 1e-5)
-            
-            print(f"Slice {idx}:")
-            print(f"  Ground truth tumor size: {gt_pixels:.1f} pixels")
-            print(f"  Prediction tumor size: {pred_pixels:.1f} pixels")
-            print(f"  Overlap: {overlap:.1f} pixels")
-            print(f"  Dice score: {dice_score:.4f}")
-            print()
+        avg_dice_unet = np.mean(dice_unet_channels) if dice_unet_channels else 0.0
+        avg_dice_sam2 = np.mean(dice_sam2_channels) if dice_sam2_channels else 0.0
+        
+        print(f"Slice {idx}:")
+        print(f"  UNet Dice per channel: {['{:.4f}'.format(d) for d in dice_unet_channels]}")
+        print(f"  Average UNet Dice: {avg_dice_unet:.4f}")
+        print(f"  SAM2 Dice per channel: {['{:.4f}'.format(d) for d in dice_sam2_channels]}")
+        print(f"  Average SAM2 Dice: {avg_dice_sam2:.4f}\n")
 
 
 
@@ -2273,7 +2282,9 @@ def train_epoch(model, train_loader, optimizer, criterion, device, epoch, schedu
             if batch_idx % 40 == 0:
                 with torch.no_grad():
                     slice_indices = [38, 77, 124]
-                    model.visualize_slice_comparison(images, outputs, masks, slice_indices)
+                    unet_out = model.unet3d(images, use_full_decoder=True)[0]
+                    sam2_out = model.process_volume_with_3d_context(images, mid_features, metadata, device)
+                    model.visualize_slice_comparison(images, unet_out, sam2_out, masks, slice_indices)
                 
             # Visualize first batch
             if batch_idx == 0 and epoch % 5 == 0:
