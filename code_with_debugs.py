@@ -1454,50 +1454,52 @@ class AutoSAM2(nn.Module):
         else:
             return "invalid_config"
 
-def visualize_slice_comparison(self, input_vol, unet_output, sam2_output, ground_truth, slice_indices):
-    """
-    For each selected slice, compute the Dice score (per channel and average)
-    for UNet3D output and for SAM2 output separately, comparing each to the ground truth.
-    """
-    # Move tensors to CPU and detach
-    input_vol = input_vol.detach().cpu()
-    unet_output = unet_output.detach().cpu()
-    sam2_output = sam2_output.detach().cpu()
-    ground_truth = ground_truth.detach().cpu()
-    
-    import numpy as np
-    b = 0  # Visualize the first item in the batch
-    for idx in slice_indices:
-        dice_unet_channels = []
-        dice_sam2_channels = []
-        # Assume channels 1,2,3 represent tumor regions
-        for ch in range(1, ground_truth.shape[1]):
-            gt_ch = ground_truth[b, ch, idx].numpy()
-            unet_ch = unet_output[b, ch, idx].numpy()
-            sam2_ch = sam2_output[b, ch, idx].numpy()
-            
-            # Convert to binary masks using threshold 0.5
-            gt_bin = (gt_ch > 0.5).astype(np.float32)
-            unet_bin = (unet_ch > 0.5).astype(np.float32)
-            sam2_bin = (sam2_ch > 0.5).astype(np.float32)
-            
-            # Compute Dice for each channel
-            intersection_unet = np.sum(gt_bin * unet_bin)
-            dice_unet = (2 * intersection_unet) / (np.sum(gt_bin) + np.sum(unet_bin) + 1e-5)
-            dice_unet_channels.append(dice_unet)
-            
-            intersection_sam2 = np.sum(gt_bin * sam2_bin)
-            dice_sam2 = (2 * intersection_sam2) / (np.sum(gt_bin) + np.sum(sam2_bin) + 1e-5)
-            dice_sam2_channels.append(dice_sam2)
+    def visualize_slice_comparison(self, input_vol, unet_output, sam2_output, ground_truth, slice_indices):
+        """
+        For each selected slice, compute the Dice score for UNet and SAM2 outputs separately,
+        comparing each to the ground truth. The Dice is computed per channel (channels 1-3)
+        and then averaged.
+        """
+        # Move tensors to CPU and detach them
+        input_vol = input_vol.detach().cpu()
+        unet_output = unet_output.detach().cpu()
+        sam2_output = sam2_output.detach().cpu()
+        ground_truth = ground_truth.detach().cpu()
         
-        avg_dice_unet = np.mean(dice_unet_channels) if dice_unet_channels else 0.0
-        avg_dice_sam2 = np.mean(dice_sam2_channels) if dice_sam2_channels else 0.0
-        
-        print(f"Slice {idx}:")
-        print(f"  UNet Dice per channel: {['{:.4f}'.format(d) for d in dice_unet_channels]}")
-        print(f"  Average UNet Dice: {avg_dice_unet:.4f}")
-        print(f"  SAM2 Dice per channel: {['{:.4f}'.format(d) for d in dice_sam2_channels]}")
-        print(f"  Average SAM2 Dice: {avg_dice_sam2:.4f}\n")
+        import numpy as np
+        b = 0  # Visualize the first sample in the batch
+        for idx in slice_indices:
+            print(f"Slice {idx}:")
+            dice_unet_channels = []
+            dice_sam2_channels = []
+            for ch in range(1, ground_truth.shape[1]):  # assume channels 1,2,3 represent tumor classes
+                gt_ch = ground_truth[b, ch, idx].numpy()
+                unet_ch = unet_output[b, ch, idx].numpy()
+                sam2_ch = sam2_output[b, ch, idx].numpy()
+                
+                # Convert to binary masks using threshold 0.5
+                gt_bin = (gt_ch > 0.5).astype(np.float32)
+                unet_bin = (unet_ch > 0.5).astype(np.float32)
+                sam2_bin = (sam2_ch > 0.5).astype(np.float32)
+                
+                # Compute Dice for UNet channel
+                intersection_unet = np.sum(gt_bin * unet_bin)
+                dice_unet = (2 * intersection_unet) / (np.sum(gt_bin) + np.sum(unet_bin) + 1e-5)
+                dice_unet_channels.append(dice_unet)
+                
+                # Compute Dice for SAM2 channel
+                intersection_sam2 = np.sum(gt_bin * sam2_bin)
+                dice_sam2 = (2 * intersection_sam2) / (np.sum(gt_bin) + np.sum(sam2_bin) + 1e-5)
+                dice_sam2_channels.append(dice_sam2)
+                
+                print(f"  Channel {ch} - UNet Dice: {dice_unet:.4f}, SAM2 Dice: {dice_sam2:.4f}")
+            
+            avg_dice_unet = np.mean(dice_unet_channels) if dice_unet_channels else 0.0
+            avg_dice_sam2 = np.mean(dice_sam2_channels) if dice_sam2_channels else 0.0
+            
+            print(f"  Average UNet Dice: {avg_dice_unet:.4f}")
+            print(f"  Average SAM2 Dice: {avg_dice_sam2:.4f}\n")
+
 
 
 
