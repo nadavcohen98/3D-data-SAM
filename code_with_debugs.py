@@ -1454,6 +1454,117 @@ class AutoSAM2(nn.Module):
         else:
             return "invalid_config"
 
+    def visualize_slice_comparison(model, images, masks, outputs, slice_indices=[38, 77, 124], depth_dim_idx=2):
+        """
+        Compare SAM2 outputs and UNet3D outputs to ground truth on specific slices.
+        
+        Args:
+            model: The AutoSAM2 model
+            images: Input images [B, C, D, H, W]
+            masks: Ground truth masks [B, C, D, H, W]
+            outputs: Model predictions [B, C, D, H, W]
+            slice_indices: List of slices to visualize
+            depth_dim_idx: Which dimension is the depth dimension
+        """
+        if not model.has_sam2 or not model.enable_sam2:
+            print("SAM2 is not enabled - no comparison possible")
+            return
+            
+        batch_idx = 0  # Use first batch item
+        device = images.device
+        
+        print("\n===== Slice-by-Slice Model Comparison (Dice scores) =====")
+        
+        for slice_idx in slice_indices:
+            # Check if slice index is valid
+            if slice_idx >= images.shape[depth_dim_idx + 1]:
+                continue
+                
+            # Extract slices from images, masks, and outputs
+            if depth_dim_idx == 0:
+                image_slice = images[batch_idx, :, slice_idx].unsqueeze(0)
+                mask_slice = masks[batch_idx, :, slice_idx].unsqueeze(0)
+                output_slice = outputs[batch_idx, :, slice_idx].unsqueeze(0)
+            elif depth_dim_idx == 1:
+                image_slice = images[batch_idx, :, :, slice_idx].unsqueeze(0)
+                mask_slice = masks[batch_idx, :, :, slice_idx].unsqueeze(0)
+                output_slice = outputs[batch_idx, :, :, slice_idx].unsqueeze(0)
+            else:  # depth_dim_idx == 2
+                image_slice = images[batch_idx, :, :, :, slice_idx].unsqueeze(0)
+                mask_slice = masks[batch_idx, :, :, :, slice_idx].unsqueeze(0)
+                output_slice = outputs[batch_idx, :, :, :, slice_idx].unsqueeze(0)
+            
+            # Process with UNet3D only
+            model.set_mode(enable_unet_decoder=True, enable_sam2=False)
+            with torch.no_grad():
+                unet_output = model(image_slice)
+            
+            # Process with SAM2
+            model.set_mode(enable_unet_decoder=True, enable_sam2=True)
+            with torch.no_grad():
+                # For SAM2, we need to get the slice result directly
+                # Extract mid-decoder features
+                _, mid_features, sam_embeddings, metadata = model.unet3d(image_slice, use_full_decoder=True)
+                
+                # Get SAM2 result for this slice
+                sam2_result = model.process_slice_with_sam2(
+                    image_slice, slice_idx, model.slice_processor.extract_slice(mid_features, slice_idx // 4, depth_dim_idx), 
+                    depth_dim_idx, device
+                )
+                
+                # If SAM2 failed to produce a result, use zeros
+                if sam2_result is None:
+                    sam2_result = torch.zeros_like(unet_output)
+            
+            # Reset model to original mode
+            model.set_mode(enable_unet_decoder=True, enable_sam2=True)
+            
+            # Calculate Dice scores for UNet, SAM2 and Combined outputs
+            # Format for better readability
+            print(f"\nSlice {slice_idx}:")
+            
+            # Calculate UNet dice scores
+            unet_dice = calculate_region_dice(unet_output, mask_slice)
+            print(f"  UNet3D:   WT={unet_dice['WT']:.1f}%, TC={unet_dice['TC']:.1f}%, ET={unet_dice['ET']:.1f}%")
+            
+            # Calculate SAM2 dice scores (if available)
+            if sam2_result is not None:
+                sam2_dice = calculate_region_dice(sam2_result, mask_slice)
+                print(f"  SAM2:     WT={sam2_dice['WT']:.1f}%, TC={sam2_dice['TC']:.1f}%, ET={sam2_dice['ET']:.1f}%")
+            
+            # Calculate Combined dice scores
+            combined_dice = calculate_region_dice(output_slice, mask_slice)
+            print(f"  Combined: WT={combined_dice['WT']:.1f}%, TC={combined_dice['TC']:.1f}%, ET={combined_dice['ET']:.1f}%")
+    
+    def calculate_region_dice(pred, gt):
+        """Calculate Dice scores for BraTS tumor regions."""
+        # Apply sigmoid to logits if needed
+        if torch.min(pred) < 0 or torch.max(pred) > 1:
+            pred = torch.sigmoid(pred)
+        
+        # Apply threshold
+        pred_bin = (pred > 0.5).float()
+        
+        # Calculate WT (Whole Tumor) Dice - Classes 1+2+4 (indices 1,2,3)
+        pred_wt = (pred_bin[:, 1:4].sum(dim=1) > 0).float()
+        gt_wt = (gt[:, 1:4].sum(dim=1) > 0).float()
+        
+        wt_dice = 2.0 * (pred_wt * gt_wt).sum() / (pred_wt.sum() + gt_wt.sum() + 1e-5) * 100
+        
+        # Calculate TC (Tumor Core) Dice - Classes 1+4 (indices 1,3)
+        pred_tc = ((pred_bin[:, 1] + pred_bin[:, 3]) > 0).float()
+        gt_tc = ((gt[:, 1] + gt[:, 3]) > 0).float()
+        
+        tc_dice = 2.0 * (pred_tc * gt_tc).sum() / (pred_tc.sum() + gt_tc.sum() + 1e-5) * 100
+        
+        # Calculate ET (Enhancing Tumor) Dice - Class 4 (index 3)
+        pred_et = pred_bin[:, 3]
+        gt_et = gt[:, 3]
+        
+        et_dice = 2.0 * (pred_et * gt_et).sum() / (pred_et.sum() + gt_et.sum() + 1e-5) * 100
+        
+        return {'WT': wt_dice.item(), 'TC': tc_dice.item(), 'ET': et_dice.item()}
+
 
 
 
@@ -2235,6 +2346,9 @@ def train_epoch(model, train_loader, optimizer, criterion, device, epoch, schedu
                 'TC': f"{dice_metrics.get('TC_mean', 0.0):.1f}%",
                 'ET': f"{dice_metrics.get('ET_mean', 0.0):.1f}%"
             })
+
+            if batch_idx % 40 == 0:
+                visualize_slice_comparison(model, images, masks, outputs, depth_dim_idx=2) 
 
                 
             # Visualize first batch
