@@ -1,48 +1,25 @@
-# Standard library imports
 import os
-import gc
-import time
-import random
-import argparse
-from datetime import datetime, timedelta
-
-# External libraries
 import torch
 import torch.nn as nn
 import torch.optim as optim
 import numpy as np
 import matplotlib.pyplot as plt
 from tqdm import tqdm
+import argparse
+import gc
+import time
+from datetime import datetime, timedelta
+import random
+import torch.nn.functional as F
 
 # Local imports
 from model import AutoSAM2
 from dataset import get_brats_dataloader, preprocess_batch
 from visualization import visualize_batch_comprehensive
 
-torch.serialization.add_safe_globals([np.core.multiarray.scalar])
-
-
 def calculate_dice_score(y_pred, y_true):
     """
     Enhanced Dice score calculation for BraTS data with correct class mapping.
-    
-    BraTS label convention:
-    - 0: Background
-    - 1: Necrotic Tumor Core (NCR)
-    - 2: Peritumoral Edema (ED)
-    - 4: Enhancing Tumor (ET) (represented at index 3 in tensors)
-    
-    Regions:
-    - ET: Enhancing Tumor (class 4)
-    - WT: Whole Tumor (classes 1+2+4)
-    - TC: Tumor Core (classes 1+4)
-    
-    Args:
-        y_pred (Tensor): Model predictions of shape [B, C, D, H, W]
-        y_true (Tensor): Ground truth masks of shape [B, C, D, H, W]
-        
-    Returns:
-        dict: Dictionary with Dice metrics
     """
     # For raw logits, apply sigmoid first
     if not torch.is_tensor(y_pred):
@@ -74,7 +51,7 @@ def calculate_dice_score(y_pred, y_true):
     
     # Calculate per-sample Dice scores for each class and region
     for b in range(batch_size):
-        # Calculate per-class Dice (assuming 4 channels: 0=background, 1=NCR, 2=ED, 3=ET)
+        # Calculate per-class Dice
         # Class 1 (NCR) - at index 1
         pred_ncr = preds[b, 1].reshape(-1)
         true_ncr = y_true[b, 1].reshape(-1)
@@ -109,7 +86,6 @@ def calculate_dice_score(y_pred, y_true):
             all_dice_scores['WT'].append(dice_wt)
         
         # Calculate TC (Tumor Core) - Classes 1+4 (indices 1,3)
-        # Create TC masks by combining NCR and ET
         pred_tc = ((preds[b, 1] + preds[b, 3]) > 0).float().reshape(-1)
         true_tc = ((y_true[b, 1] + y_true[b, 3]) > 0).float().reshape(-1)
         if true_tc.sum() > 0 or pred_tc.sum() > 0:
@@ -147,21 +123,6 @@ def calculate_dice_score(y_pred, y_true):
 def calculate_iou(y_pred, y_true, threshold=0.5, eps=1e-6):
     """
     Calculate IoU for BraTS tumor regions with correct class mapping.
-    
-    BraTS label convention:
-    - 0: Background
-    - 1: Necrotic Tumor Core (NCR)
-    - 2: Peritumoral Edema (ED)
-    - 4: Enhancing Tumor (ET) (represented at index 3 in tensors)
-    
-    Args:
-        y_pred (Tensor): Model predictions of shape [B, C, D, H, W]
-        y_true (Tensor): Ground truth masks of shape [B, C, D, H, W]
-        threshold (float): Threshold for binarization of predictions.
-        eps (float): Small value to avoid division by zero.
-
-    Returns:
-        dict: IoU metrics for individual classes and tumor regions.
     """
     if y_pred.shape != y_true.shape:
         raise ValueError("Shape mismatch: y_pred and y_true must have the same shape.")
@@ -259,13 +220,6 @@ def calculate_iou(y_pred, y_true, threshold=0.5, eps=1e-6):
 class BraTSDiceLoss(nn.Module):
     """
     Dice Loss specifically designed for BraTS segmentation task.
-    Calculates loss for the three tumor regions: ET, WT, and TC.
-    
-    BraTS label convention:
-    - 0: Background
-    - 1: Necrotic Tumor Core (NCR)
-    - 2: Peritumoral Edema (ED)
-    - 4: Enhancing Tumor (ET) (represented at index 3 in tensors)
     """
     def __init__(self, smooth=1.0, region_weights={'ET': 1.0, 'WT': 1.0, 'TC': 1.0}):
         super(BraTSDiceLoss, self).__init__()
@@ -305,7 +259,6 @@ class BraTSDiceLoss(nn.Module):
                 et_count += 1
             
             # WT (Whole Tumor) - Classes 1+2+4 (indices 1,2,3)
-            # Combine predictions across class channels
             pred_wt = (probs[b, 1:4].sum(dim=0) > 0.5).float().reshape(-1)
             true_wt = (y_true[b, 1:4].sum(dim=0) > 0.5).float().reshape(-1)
             
@@ -316,7 +269,6 @@ class BraTSDiceLoss(nn.Module):
                 wt_count += 1
             
             # TC (Tumor Core) - Classes 1+4 (indices 1,3)
-            # Combine predictions for relevant classes
             pred_tc = ((probs[b, 1] + probs[b, 3]) > 0.5).float().reshape(-1)
             true_tc = ((y_true[b, 1] + y_true[b, 3]) > 0.5).float().reshape(-1)
             
@@ -352,13 +304,6 @@ class BraTSDiceLoss(nn.Module):
 class BraTSCombinedLoss(nn.Module):
     """
     Combined loss function for BraTS segmentation task.
-    Combines Dice loss, BCE loss, and Focal loss with configurable weights.
-    
-    BraTS label convention:
-    - 0: Background
-    - 1: Necrotic Tumor Core (NCR)
-    - 2: Peritumoral Edema (ED)
-    - 4: Enhancing Tumor (ET) (represented at index 3 in tensors)
     """
     def __init__(self, dice_weight=0.7, bce_weight=0.2, focal_weight=0.1, 
                  region_weights={'ET': 1.2, 'WT': 1.0, 'TC': 1.0}):
@@ -369,7 +314,6 @@ class BraTSCombinedLoss(nn.Module):
         self.brats_dice_loss = BraTSDiceLoss(region_weights=region_weights)
         
         # Set class weights for BCE - higher weight for tumor classes
-        # For BraTS with channels 0,1,2,3 representing classes 0,1,2,4
         pos_weight = torch.ones(4)
         pos_weight[1:] = 5.0  # Higher weight for tumor classes (1,2,4)
         self.bce_loss = nn.BCEWithLogitsLoss(pos_weight=pos_weight.cuda() if torch.cuda.is_available() else pos_weight)
@@ -388,14 +332,11 @@ class BraTSCombinedLoss(nn.Module):
         bce = self.bce_loss(y_pred, y_true)
         
         # Focal loss calculation - convert multi-class mask to class indices
-        # First create target with shape [B, H, W, D] with class indices
         target = y_true.argmax(dim=1)
         focal = self.focal_loss(y_pred, target)
         
         # Return weighted sum of losses
         return self.dice_weight * dice + self.bce_weight * bce + self.focal_weight * focal
-
-
 
 def train_epoch(model, train_loader, optimizer, criterion, device, epoch, scheduler=None):
     """
@@ -469,7 +410,6 @@ def train_epoch(model, train_loader, optimizer, criterion, device, epoch, schedu
                 'TC': f"{dice_metrics.get('TC_mean', 0.0):.1f}%",
                 'ET': f"{dice_metrics.get('ET_mean', 0.0):.1f}%"
             })
-
             
             # Update total loss
             total_loss += loss.item()
@@ -569,7 +509,7 @@ def validate(model, val_loader, criterion, device, epoch):
                 
                 # Visualize first batch
                 if batch_idx == 0:
-                    visualize_batch(images, masks, outputs, epoch, "val")
+                    visualize_batch_comprehensive(images, masks, outputs, epoch, mode="hybrid", prefix="val")
                 
                 # Update total loss
                 total_loss += loss.item()
@@ -595,71 +535,12 @@ def validate(model, val_loader, criterion, device, epoch):
             'dice_et': np.mean([m['dice_et'] for m in all_metrics]) if all_metrics else 0.0,
             'dice_wt': np.mean([m['dice_wt'] for m in all_metrics]) if all_metrics else 0.0,
             'dice_tc': np.mean([m['dice_tc'] for m in all_metrics]) if all_metrics else 0.0,
-            'iou_et': np.mean([m['iou_et'] for m in all_metrics]) if all_metrics else 0.0,
+'iou_et': np.mean([m['iou_et'] for m in all_metrics]) if all_metrics else 0.0,
             'iou_wt': np.mean([m['iou_wt'] for m in all_metrics]) if all_metrics else 0.0,
             'iou_tc': np.mean([m['iou_tc'] for m in all_metrics]) if all_metrics else 0.0
         }
 
         return avg_loss, avg_metrics
-
-def visualize_batch(images, masks, outputs, epoch, prefix=""):
-   """
-   Visualize a batch of images, masks, and predictions with BraTS class conventions
-   """
-   # Create results directory
-   os.makedirs("results", exist_ok=True)
-   
-   # Get middle slice of first batch item
-   b = 0
-   depth = images.shape[2]
-   middle_idx = depth // 2
-   
-   # Get slice data
-   image_slice = images[b, :, middle_idx].cpu().detach().numpy()
-   mask_slice = masks[b, :, middle_idx].cpu().detach().numpy()
-   
-   # Apply sigmoid if outputs are logits
-   if torch.min(outputs) < 0 or torch.max(outputs) > 1:
-       output_slice = torch.sigmoid(outputs[b, :, middle_idx]).cpu().detach().numpy()
-   else:
-       output_slice = outputs[b, :, middle_idx].cpu().detach().numpy()
-   
-   # Create figure
-   fig, axes = plt.subplots(1, 3, figsize=(12, 4))
-   
-   # Show FLAIR image
-   axes[0].imshow(image_slice[0], cmap='gray')
-   axes[0].set_title('FLAIR')
-   axes[0].axis('off')
-   
-   # Create RGB mask for ground truth
-   # BraTS: 1=NCR (Blue), 2=ED (Green), 4=ET (Red)
-   rgb_mask = np.zeros((mask_slice.shape[1], mask_slice.shape[2], 3))
-   rgb_mask[mask_slice[1] > 0.5, :] = [0, 0, 1]  # NCR: Blue
-   rgb_mask[mask_slice[2] > 0.5, :] = [0, 1, 0]  # ED: Green
-   rgb_mask[mask_slice[3] > 0.5, :] = [1, 0, 0]  # ET: Red
-   
-   # Show ground truth
-   axes[1].imshow(image_slice[0], cmap='gray')
-   axes[1].imshow(rgb_mask, alpha=0.5)
-   axes[1].set_title('Ground Truth')
-   axes[1].axis('off')
-   
-   # Create RGB mask for prediction
-   rgb_pred = np.zeros((output_slice.shape[1], output_slice.shape[2], 3))
-   rgb_pred[output_slice[1] > 0.5, :] = [0, 0, 1]  # NCR: Blue
-   rgb_pred[output_slice[2] > 0.5, :] = [0, 1, 0]  # ED: Green
-   rgb_pred[output_slice[3] > 0.5, :] = [1, 0, 0]  # ET: Red
-   
-   # Show prediction
-   axes[2].imshow(image_slice[0], cmap='gray')
-   axes[2].imshow(rgb_pred, alpha=0.5)
-   axes[2].set_title('Prediction')
-   axes[2].axis('off')
-   
-   plt.tight_layout()
-   plt.savefig(f"results/{prefix}_epoch{epoch}.png")
-   plt.close()
 
 def save_training_history(history, filename):
    """
@@ -767,48 +648,6 @@ def save_training_history(history, filename):
    plt.savefig(f"results/{filename.replace('.png', '_iou.png')}")
    plt.close()
 
-def preprocess_batch(batch, device=None):
-   """
-   Preprocess batch for BraTS segmentation with class labels 0, 1, 2, 4
-   """
-   images, masks = batch
-   
-   # Convert binary masks to multi-class format if needed
-   if masks.shape[1] == 1:
-       # For binary masks, create proper BraTS format with classes 0, 1, 2, 4
-       multi_class_masks = torch.zeros((masks.shape[0], 4, *masks.shape[2:]), dtype=torch.float32)
-       
-       # Class 0: Background (where mask is 0)
-       multi_class_masks[:, 0] = (masks[:, 0] == 0).float()
-       
-       # If we have a binary tumor mask, distribute it to the three tumor classes
-       # This is a simplified approach when we only have tumor/no-tumor labels
-       if torch.sum(masks[:, 0]) > 0:
-           # Use percentages of the tumor mask for each class
-           # Class 1: NCR (Necrotic tumor core)
-           multi_class_masks[:, 1] = (masks[:, 0] * (torch.rand_like(masks[:, 0]) < 0.3)).float()
-           
-           # Class 2: ED (Peritumoral edema)
-           multi_class_masks[:, 2] = (masks[:, 0] * (torch.rand_like(masks[:, 0]) < 0.5)).float()
-           
-           # Class 4 (at index 3): ET (Enhancing tumor)
-           multi_class_masks[:, 3] = (masks[:, 0] * (torch.rand_like(masks[:, 0]) < 0.2)).float()
-       
-       masks = multi_class_masks
-   
-   # Ensure mask values are within expected range
-   masks = torch.clamp(masks, 0, 1)
-   
-   # Move to device if specified
-   if device is not None:
-       images = images.to(device)
-       masks = masks.to(device)
-   
-   return images, masks
-
-        
-
-
 def train_model(data_path, batch_size=1, epochs=20, learning_rate=1e-3,
                use_mixed_precision=False, test_run=False, reset=True):
     """
@@ -842,7 +681,7 @@ def train_model(data_path, batch_size=1, epochs=20, learning_rate=1e-3,
     if os.path.exists(model_path) and not reset:
         print(f"Found existing model checkpoint at {model_path}, loading...")
         try:
-            checkpoint = torch.load(model_path, map_location=device, weights_only=False)
+            checkpoint = torch.load(model_path, map_location=device)
             model.load_state_dict(checkpoint['model_state_dict'])
             start_epoch = checkpoint['epoch'] + 1
             best_dice = checkpoint.get('best_dice', 0.0)
@@ -866,7 +705,7 @@ def train_model(data_path, batch_size=1, epochs=20, learning_rate=1e-3,
     )
     
     # Load optimizer state if resuming
-    if os.path.exists(model_path) and not reset and 'optimizer_state_dict' in checkpoint:
+    if os.path.exists(model_path) and not reset and 'optimizer_state_dict' in locals().get('checkpoint', {}):
         try:
             optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
             print("Optimizer state loaded")
@@ -1004,6 +843,9 @@ def train_model(data_path, batch_size=1, epochs=20, learning_rate=1e-3,
                 'best_dice': best_dice,
             }, model_path)
             print(f"Saved new best model with Dice score: {best_dice:.4f}")
+            counter = 0  # Reset early stopping counter
+        else:
+            counter += 1  # Increment counter if no improvement
         
         # Save checkpoint every 5 epochs
         if epoch % 5 == 0 or epoch == epochs - 1:
@@ -1062,7 +904,7 @@ def train_model(data_path, batch_size=1, epochs=20, learning_rate=1e-3,
     
     print(f"Training complete! Best overall Dice score: {best_dice:.4f}")
 
-    return model, history, val_metrics
+    return model, history, best_metrics
 
 def main():
     parser = argparse.ArgumentParser(description="Train AutoSAM2 for brain tumor segmentation")
