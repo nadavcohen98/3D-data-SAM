@@ -1460,7 +1460,7 @@ class AutoSAM2(nn.Module):
                 self.slice_comparison['total_slices'] += 1
                 
                 # Save detailed comparison for selected slices
-                if show_details and slice_idx in [30, 77, 124]:
+                if show_details and slice_idx in [38, 77, 124]:
                     print(f"Slice {slice_idx}:")
                     print(f"  SAM2 tumor size: {sam2_pixels} pixels")
                     print(f"  UNet tumor size: {unet_pixels} pixels")
