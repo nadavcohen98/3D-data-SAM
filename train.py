@@ -515,7 +515,7 @@ def validate(model, val_loader, criterion, device, epoch):
                 # Visualize first batch
                 
                 if (batch_idx == random_number):
-                    print(f"Visualization triggered at batch_idx {batch_idx} (randomly chosen: {random_number})")
+                    print("Visualization triggered")
                     visualize_batch_comprehensive(images, masks, outputs, epoch, mode="hybrid", prefix="val")
 
                 
@@ -744,14 +744,14 @@ def train_model(data_path, batch_size=1, epochs=20, learning_rate=1e-3,
         print("No existing checkpoint found. Starting from epoch 0.")
     
     # Define loss criterion - use our new BraTS-specific loss
-    criterion = BraTSCombinedLoss(dice_weight=0.7, bce_weight=0.2, focal_weight=0.1,
-                                region_weights={'ET': 1.2, 'WT': 1.0, 'TC': 1.0})
+    criterion = BraTSCombinedLoss(dice_weight=0.75, bce_weight=0.15, focal_weight=0.1,
+                                region_weights={'ET': 1.5, 'WT': 1.0, 'TC': 1.2})
     
     # Define optimizer
     optimizer = optim.AdamW(
         model.encoder.parameters(),
         lr=learning_rate,
-        weight_decay=5e-4
+        weight_decay=1e-4
     )
     
     # Load optimizer state if resuming
@@ -786,9 +786,9 @@ def train_model(data_path, batch_size=1, epochs=20, learning_rate=1e-3,
         max_lr=learning_rate,
         steps_per_epoch=steps_per_epoch,
         epochs=epochs,
-        pct_start=0.3,
-        div_factor=25,
-        final_div_factor=1000
+        pct_start=0.4,
+        div_factor=20,
+        final_div_factor=500  
     )
     
     # Initialize history with all BraTS-specific metrics
