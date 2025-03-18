@@ -1200,13 +1200,11 @@ class AutoSAM2(nn.Module):
         
             
             # Generate point prompts
-            points, labels, _, _ = self.prompt_generator.generate_prompts(
+            points, labels, box, _ = self.prompt_generator.generate_prompts(
                 enhanced_features, slice_idx, h, w
             )
             
-            box = self.prompt_generator.generate_optimal_box(enhanced_features, slice_idx, h, w)
-
-            
+           
             # Set image in SAM2
             self.sam2.set_image(rgb_image)
             
@@ -1214,7 +1212,7 @@ class AutoSAM2(nn.Module):
             masks, scores, _ = self.sam2.predict(
                 point_coords=points,
                 point_labels=labels,
-                box=box,  # This will be None if no box was found
+                box=box,
                 multimask_output=True
             )
             
