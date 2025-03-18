@@ -2288,6 +2288,8 @@ def train_epoch(model, train_loader, optimizer, criterion, device, epoch, schedu
             if batch_idx % 40 == 0:
                 with torch.no_grad():
                     slice_indices = [38, 77, 124]
+                    unet_out, mid_features, sam_embeddings, metadata = model.unet3d(images, use_full_decoder=True)
+                    sam2_out = model.process_volume_with_3d_context(images, mid_features, metadata, device)
                     # נניח שכבר הפעלת את המודל וקיבלת unet_out, sam2_out, ground_truth (לדוגמה, masks)
                     model.visualize_slice_comparison(images, unet_out, sam2_out, masks, slice_indices)
 
