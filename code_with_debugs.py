@@ -1454,53 +1454,6 @@ class AutoSAM2(nn.Module):
         else:
             return "invalid_config"
 
-    def visualize_slice_comparison(self, input_vol, unet_output, sam2_output, ground_truth, slice_indices):
-        """
-        For each selected slice, compute the Dice score for UNet and SAM2 outputs separately,
-        comparing each to the ground truth. The Dice is computed per channel (channels 1-3)
-        and then averaged.
-        """
-        # Move tensors to CPU and detach them
-        input_vol = input_vol.detach().cpu()
-        unet_output = unet_output.detach().cpu()
-        sam2_output = sam2_output.detach().cpu()
-        ground_truth = ground_truth.detach().cpu()
-        
-        import numpy as np
-        b = 0  # Visualize the first sample in the batch
-        for idx in slice_indices:
-            print(f"Slice {idx}:")
-            dice_unet_channels = []
-            dice_sam2_channels = []
-            for ch in range(1, ground_truth.shape[1]):  # assume channels 1,2,3 represent tumor classes
-                gt_ch = ground_truth[b, ch, idx].numpy()
-                unet_ch = unet_output[b, ch, idx].numpy()
-                sam2_ch = sam2_output[b, ch, idx].numpy()
-                
-                # Convert to binary masks using threshold 0.5
-                gt_bin = (gt_ch > 0.5).astype(np.float32)
-                unet_bin = (unet_ch > 0.5).astype(np.float32)
-                sam2_bin = (sam2_ch > 0.5).astype(np.float32)
-                
-                # Compute Dice for UNet channel
-                intersection_unet = np.sum(gt_bin * unet_bin)
-                dice_unet = (2 * intersection_unet) / (np.sum(gt_bin) + np.sum(unet_bin) + 1e-5)
-                dice_unet_channels.append(dice_unet)
-                
-                # Compute Dice for SAM2 channel
-                intersection_sam2 = np.sum(gt_bin * sam2_bin)
-                dice_sam2 = (2 * intersection_sam2) / (np.sum(gt_bin) + np.sum(sam2_bin) + 1e-5)
-                dice_sam2_channels.append(dice_sam2)
-                
-                print(f"  Channel {ch} - UNet Dice: {dice_unet:.4f}, SAM2 Dice: {dice_sam2:.4f}")
-            
-            avg_dice_unet = np.mean(dice_unet_channels) if dice_unet_channels else 0.0
-            avg_dice_sam2 = np.mean(dice_sam2_channels) if dice_sam2_channels else 0.0
-            
-            print(f"  Average UNet Dice: {avg_dice_unet:.4f}")
-            print(f"  Average SAM2 Dice: {avg_dice_sam2:.4f}\n")
-
-
 
 
 print("=== AUTOSAM2 WITH FLEXIBLE ARCHITECTURE LOADED SUCCESSFULLY ===")
@@ -2281,15 +2234,6 @@ def train_epoch(model, train_loader, optimizer, criterion, device, epoch, schedu
                 'TC': f"{dice_metrics.get('TC_mean', 0.0):.1f}%",
                 'ET': f"{dice_metrics.get('ET_mean', 0.0):.1f}%"
             })
-            if batch_idx % 40 == 0:
-                with torch.no_grad():
-                    slice_indices = [38, 77, 124]
-                    # הפעל את UNet3D וקבל את כל הפלטים הנדרשים
-                    unet_out, mid_features, sam_embeddings, metadata = model.unet3d(images, use_full_decoder=True)
-                    # הפעל את SAM2 עם ההקשר התלת-ממדי, תוך שימוש ב־mid_features וב־metadata
-                    sam2_out = model.process_volume_with_3d_context(images, mid_features, metadata, device)
-                    # קריאה לפונקציה המראה השוואה טקסטואלית (לפי הקוד שהגדרנו)
-                    model.visualize_slice_comparison(images, unet_out, sam2_out, masks, slice_indices)
 
                 
             # Visualize first batch
