@@ -1211,7 +1211,7 @@ class AutoSAM2(nn.Module):
             )
             
             # Generate bounding box prompt
-            box = self.generate_optimal_box(enhanced_features, slice_idx, h, w)
+            box = self.prompt_generator.generate_optimal_box(enhanced_features, slice_idx, h, w)
             
             # Set image in SAM2
             self.sam2.set_image(rgb_image)
