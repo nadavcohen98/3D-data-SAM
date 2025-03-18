@@ -210,9 +210,6 @@ class FlexibleUNet3D(nn.Module):
         # Early decoder stages
         dec_out1 = self.dec1(x5, x4)
         dec_out2 = self.dec2(dec_out1, x3)
-
-        aux_out1 = self.aux_output1(dec_out1)
-        aux_out2 = self.aux_output2(dec_out2)
         
         # Generate SAM2 embeddings
         sam_embeddings = self.sam_projection(dec_out2)
@@ -248,7 +245,12 @@ class FlexibleUNet3D(nn.Module):
         # Apply sigmoid
         segmentation = torch.sigmoid(output)
         
-        return segmentation, dec_out2, sam_embeddings, metadata
+        if self.training:
+            aux_out1 = self.aux_output1(dec_out1)
+            aux_out2 = self.aux_output2(dec_out2)
+            return segmentation, dec_out2, sam_embeddings, {"dummy_metadata": None}, (aux_out1, aux_out2)
+        else:
+            return segmentation, dec_out2, sam_embeddings, {"dummy_metadata": None}
 
 
 class MultiPointPromptGenerator:
