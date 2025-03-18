@@ -1303,21 +1303,14 @@ class AutoSAM2(nn.Module):
                 # Store the result
                 sam2_results[center_idx] = result
                 
-                # Update the previous masks dict with this result
-                mask_np = result.detach().cpu().numpy()
-                print(f"DEBUG: Storing mask for slice {center_idx}, shape: {mask_np.shape}")
-                if len(mask_np.shape) >= 4:  # [1, C, H, W]
-                    previous_masks[center_idx] = mask_np[0, 1]  # Just class 1
-                    print(f"DEBUG: Stored as shape: {previous_masks[center_idx].shape}")
-                else:
-                    previous_masks[center_idx] = mask_np  # Keep as is
-                    print(f"DEBUG: Stored as original shape")
-                                
-                    # Limit memory usage by keeping only recent slices
-                    if len(previous_masks) > context_window*2:
-                        oldest_key = min(previous_masks.keys())
-                        if oldest_key != center_idx:
-                            del previous_masks[oldest_key]
+                # Store mask for future context (just class 1, flattened to 2D)
+                mask_np = result.detach().cpu().numpy()[0, 1]  # Take class 1 as representative
+                previous_masks[center_idx] = mask_np
+                
+                # Limit memory usage by keeping only recent slices
+                if len(previous_masks) > context_window*2:
+                    oldest_key = min(k for k in previous_masks.keys() if k != center_idx)
+                    del previous_masks[oldest_key]
         
         return sam2_results
     
@@ -1347,57 +1340,29 @@ class AutoSAM2(nn.Module):
             # Set image in SAM2
             self.sam2.set_image(rgb_image)
             
-            # Get context mask (average of previously processed neighbor slices)
+            # Get context mask from neighboring slices
             context_mask = None
-            neighbor_masks = []
             
-            for idx in context_indices:
-                if idx in previous_masks and idx != center_idx:
-                    neighbor_masks.append(previous_masks[idx])
+            # Process neighbor masks
+            if len(context_indices) > 1:
+                neighbor_masks = []
+                for idx in context_indices:
+                    if idx in previous_masks and idx != center_idx:
+                        neighbor_masks.append(previous_masks[idx])
+                
+                if neighbor_masks:
+                    # Create context mask by averaging neighbor masks
+                    avg_mask = np.stack(neighbor_masks).mean(axis=0) > 0.5
+                    # SAM2 requires mask to have shape [height, width]
+                    context_mask = avg_mask
             
-            if neighbor_masks:
-                print(f"DEBUG: Processing neighbor masks")
-                # Make sure masks are proper numpy arrays first
-                numpy_masks = []
-                for mask in neighbor_masks:
-                    if isinstance(mask, torch.Tensor):
-                        numpy_mask = mask.cpu().detach().numpy()
-                    else:
-                        numpy_mask = mask
-                    print(f"DEBUG: Numpy mask shape: {numpy_mask.shape}")
-                    numpy_masks.append(numpy_mask)
-                        # Check if masks have proper dimensions
-                if len(numpy_masks) > 0 and len(numpy_masks[0].shape) == 2:
-                    # If masks are 2D (H,W), stack and average them
-                    context_mask = np.stack(numpy_masks).mean(axis=0) > 0.5
-                    print(f"DEBUG: Context mask shape: {context_mask.shape}")
-                else:
-                    # Handle more complex cases
-                    print(f"DEBUG: Complex mask case, shapes: {[m.shape for m in numpy_masks]}")
-                    # Try to extract the right dimension
-                    try:
-                        # If masks are stored as multi-class, extract class 1
-                        if len(numpy_masks[0].shape) >= 3:
-                            context_mask = np.stack([m[1] if len(m.shape) == 3 else m for m in numpy_masks]).mean(axis=0) > 0.5
-                        else:
-                            context_mask = None
-                        if context_mask is not None:
-                            print(f"DEBUG: Final context mask shape: {context_mask.shape}")
-                    except Exception as e:
-                        print(f"DEBUG: Error creating context mask: {e}")
-                        context_mask = None
-
-            print(f"DEBUG: Found {len(neighbor_masks)} neighbor masks for slice {center_idx}")
-            if neighbor_masks:
-                print(f"DEBUG: First neighbor mask shape: {neighbor_masks[0].shape}")
-            
-            # Predict with context if available
+            # Predict with SAM2
             if context_mask is not None:
                 masks, scores, _ = self.sam2.predict(
                     point_coords=points,
                     point_labels=labels,
                     box=box,
-                    mask_input=context_mask,  # SAM2 expects a boolean numpy array
+                    mask_input=context_mask,
                     multimask_output=True
                 )
             else:
