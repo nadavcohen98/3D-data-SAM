@@ -1424,6 +1424,10 @@ class AutoSAM2(nn.Module):
         # Update timing metrics
         total_time = time.time() - start_time
         self.performance_metrics["total_time"].append(total_time)
+
+        self.last_unet_output = unet_output
+        self.last_sam2_slices = sam2_results
+        self.last_combined_output = final_output
         
         return final_output
     
@@ -1816,116 +1820,57 @@ def calculate_region_dice(pred, gt):
 
 def visualize_slice_comparison(model, images, masks, outputs, depth_dim_idx=2):
     """
-    Compare UNet3D, SAM2, and combined outputs to ground truth on specific slices.
+    הצג את הביצועים של UNet3D, SAM2 והמודל המשולב על פרוסות ספציפיות
     """
-    batch_idx = 0  # Use first batch item
-    slice_indices = [38, 77, 124]  # Fixed slice indices
+    batch_idx = 0
+    slice_indices = [38, 77, 124]
     
-    print("\n===== UNet3D vs SAM2 vs Combined Comparison =====")
-    
-    # Store original model configuration
-    original_config = {
-        'unet': model.enable_unet_decoder,
-        'sam2': model.enable_sam2
-    }
-    
-    # Get combined model dice scores (from current outputs)
-    combined_dice = {}
+    print("\n===== UNet3D vs SAM2 vs Combined =====")
     
     for slice_idx in slice_indices:
+        # וודא שהפרוסה בתחום
         if slice_idx >= masks.shape[depth_dim_idx + 1]:
             continue
-            
-        # Get current slice from combined output and mask
-        if depth_dim_idx == 0:
-            mask_slice = masks[batch_idx, :, slice_idx]
-            output_slice = outputs[batch_idx, :, slice_idx]
-        elif depth_dim_idx == 1:
-            mask_slice = masks[batch_idx, :, :, slice_idx]
-            output_slice = outputs[batch_idx, :, :, slice_idx]
-        else:  # depth_dim_idx == 2
-            mask_slice = masks[batch_idx, :, :, :, slice_idx]
-            output_slice = outputs[batch_idx, :, :, :, slice_idx]
-            
-        # Calculate dice for combined model
-        combined_dice[slice_idx] = calculate_region_dice(output_slice, mask_slice)
-    
-    # Try running UNet3D-only and SAM2-only if possible
-    unet_dice = {}
-    sam2_dice = {}
-    
-    try:
-        # Run UNet3D-only
-        model.set_mode(enable_unet_decoder=True, enable_sam2=False)
-        with torch.no_grad():
-            unet_output = model(images)
-            
-        # Calculate UNet3D dice for each slice
-        for slice_idx in slice_indices:
-            if slice_idx >= masks.shape[depth_dim_idx + 1]:
-                continue
-                
-            if depth_dim_idx == 0:
-                mask_slice = masks[batch_idx, :, slice_idx]
-                unet_slice = unet_output[batch_idx, :, slice_idx]
-            elif depth_dim_idx == 1:
-                mask_slice = masks[batch_idx, :, :, slice_idx]
-                unet_slice = unet_output[batch_idx, :, :, slice_idx]
-            else:  # depth_dim_idx == 2
-                mask_slice = masks[batch_idx, :, :, :, slice_idx]
-                unet_slice = unet_output[batch_idx, :, :, :, slice_idx]
-                
-            unet_dice[slice_idx] = calculate_region_dice(unet_slice, mask_slice)
-    except Exception as e:
-        print(f"Error calculating UNet3D dice: {e}")
         
-    try:
-        # Run SAM2-only
-        model.set_mode(enable_unet_decoder=False, enable_sam2=True)
-        with torch.no_grad():
-            sam2_output = model(images)
-            
-        # Calculate SAM2 dice for each slice
-        for slice_idx in slice_indices:
-            if slice_idx >= masks.shape[depth_dim_idx + 1]:
-                continue
-                
-            if depth_dim_idx == 0:
-                mask_slice = masks[batch_idx, :, slice_idx]
-                sam2_slice = sam2_output[batch_idx, :, slice_idx]
-            elif depth_dim_idx == 1:
-                mask_slice = masks[batch_idx, :, :, slice_idx]
-                sam2_slice = sam2_output[batch_idx, :, :, slice_idx]
-            else:  # depth_dim_idx == 2
-                mask_slice = masks[batch_idx, :, :, :, slice_idx]
-                sam2_slice = sam2_output[batch_idx, :, :, :, slice_idx]
-                
-            sam2_dice[slice_idx] = calculate_region_dice(sam2_slice, mask_slice)
-    except Exception as e:
-        print(f"Error calculating SAM2 dice: {e}")
-    
-    # Restore original model configuration
-    model.set_mode(enable_unet_decoder=original_config['unet'], enable_sam2=original_config['sam2'])
-    
-    # Print the results in a nice format
-    for slice_idx in slice_indices:
-        if slice_idx not in combined_dice:
-            continue
-            
         print(f"\nSlice {slice_idx}:")
-        if slice_idx in unet_dice:
-            print(f"  UNet3D:   WT={unet_dice[slice_idx]['WT']:.1f}%, TC={unet_dice[slice_idx]['TC']:.1f}%, ET={unet_dice[slice_idx]['ET']:.1f}%")
+        
+        # חלץ את המסכה לפרוסה זו
+        if depth_dim_idx == 0:
+            gt_slice = masks[batch_idx, :, slice_idx]
+        elif depth_dim_idx == 1:
+            gt_slice = masks[batch_idx, :, :, slice_idx]
         else:
-            print(f"  UNet3D:   N/A")
+            gt_slice = masks[batch_idx, :, :, :, slice_idx]
+        
+        # הצג UNet Dice אם יש
+        if hasattr(model, 'last_unet_output'):
+            # חלץ את הפרוסה מתוצאות UNet
+            if depth_dim_idx == 0:
+                unet_slice = model.last_unet_output[batch_idx, :, slice_idx]
+            elif depth_dim_idx == 1:
+                unet_slice = model.last_unet_output[batch_idx, :, :, slice_idx]
+            else:
+                unet_slice = model.last_unet_output[batch_idx, :, :, :, slice_idx]
             
-        if slice_idx in sam2_dice:
-            print(f"  SAM2:     WT={sam2_dice[slice_idx]['WT']:.1f}%, TC={sam2_dice[slice_idx]['TC']:.1f}%, ET={sam2_dice[slice_idx]['ET']:.1f}%")
+            unet_dice = calculate_region_dice(unet_slice, gt_slice)
+            print(f"  UNet3D: WT={unet_dice['WT']:.1f}%, TC={unet_dice['TC']:.1f}%, ET={unet_dice['ET']:.1f}%")
+        
+        # הצג SAM2 Dice אם קיים לפרוסה זו
+        if hasattr(model, 'last_sam2_slices') and slice_idx in model.last_sam2_slices:
+            sam2_slice = model.last_sam2_slices[slice_idx]
+            sam2_dice = calculate_region_dice(sam2_slice, gt_slice)
+            print(f"  SAM2:   WT={sam2_dice['WT']:.1f}%, TC={sam2_dice['TC']:.1f}%, ET={sam2_dice['ET']:.1f}%")
+        
+        # הצג Combined Dice
+        if depth_dim_idx == 0:
+            combined_slice = outputs[batch_idx, :, slice_idx]
+        elif depth_dim_idx == 1:
+            combined_slice = outputs[batch_idx, :, :, slice_idx]
         else:
-            print(f"  SAM2:     N/A")
-            
-        print(f"  Combined: WT={combined_dice[slice_idx]['WT']:.1f}%, TC={combined_dice[slice_idx]['TC']:.1f}%, ET={combined_dice[slice_idx]['ET']:.1f}%")
-    
-    print("===============================================")
+            combined_slice = outputs[batch_idx, :, :, :, slice_idx]
+        
+        combined_dice = calculate_region_dice(combined_slice, gt_slice)
+        print(f"  Combined: WT={combined_dice['WT']:.1f}%, TC={combined_dice['TC']:.1f}%, ET={combined_dice['ET']:.1f}%")
 
 def calculate_dice_score(y_pred, y_true):
     """
