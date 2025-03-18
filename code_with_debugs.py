@@ -763,6 +763,7 @@ class EnhancedPromptGenerator:
         # Return box as [x1, y1, x2, y2]
         return np.array([x1, y1, x2, y2])
     
+    
     def generate_prompts(self, probability_maps, slice_idx, height, width):
         """
         Generate optimized point prompts for SAM2 based on probability maps
