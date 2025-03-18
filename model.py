@@ -151,6 +151,10 @@ class FlexibleUNet3D(nn.Module):
         # Projection for SAM2 embeddings (from mid-decoder features)
         self.sam_projection = nn.Conv3d(base_channels * 2, 256, kernel_size=1)
 
+        self.aux_output1 = nn.Conv3d(base_channels * 4, n_classes, kernel_size=1)
+        self.aux_output2 = nn.Conv3d(base_channels * 2, n_classes, kernel_size=1)
+
+
         self.dropout = nn.Dropout3d(0.15) 
     
     def forward(self, x, use_full_decoder=True):
@@ -206,6 +210,9 @@ class FlexibleUNet3D(nn.Module):
         # Early decoder stages
         dec_out1 = self.dec1(x5, x4)
         dec_out2 = self.dec2(dec_out1, x3)
+
+        aux_out1 = self.aux_output1(dec_out1)
+        aux_out2 = self.aux_output2(dec_out2)
         
         # Generate SAM2 embeddings
         sam_embeddings = self.sam_projection(dec_out2)
