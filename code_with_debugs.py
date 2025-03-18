@@ -237,31 +237,32 @@ class MultiPointPromptGenerator:
     """Generates strategic point prompts for SAM2 based on probability maps"""
     def __init__(self, num_points=3):
         self.num_points = num_points
+        
     def _get_strategic_points(self, region_mask, num_points, prob_map):
-    """Get strategic points within a specific region"""
-    import numpy as np
-    from scipy.ndimage import distance_transform_edt
-    
-    points = []
-    
-    # Get distance transform (distance from boundary)
-    distance = distance_transform_edt(region_mask)
-    
-    # Weight by probability for finding confident points
-    weighted_map = distance * prob_map * region_mask
-    
-    # Get coordinates of high weighted values
-    flat_idx = np.argsort(weighted_map.flatten())[-num_points*2:]  # Get more candidates than needed
-    y_coords, x_coords = np.unravel_index(flat_idx, weighted_map.shape)
-    
-    # Select diverse points
-    selected_indices = self._select_diverse_points(x_coords, y_coords, num_points, 5)
-    
-    # Convert to point list
-    for idx in selected_indices:
-        points.append([int(x_coords[idx]), int(y_coords[idx])])
-    
-    return points
+        """Get strategic points within a specific region"""
+        import numpy as np
+        from scipy.ndimage import distance_transform_edt
+        
+        points = []
+        
+        # Get distance transform (distance from boundary)
+        distance = distance_transform_edt(region_mask)
+        
+        # Weight by probability for finding confident points
+        weighted_map = distance * prob_map * region_mask
+        
+        # Get coordinates of high weighted values
+        flat_idx = np.argsort(weighted_map.flatten())[-num_points*2:]  # Get more candidates than needed
+        y_coords, x_coords = np.unravel_index(flat_idx, weighted_map.shape)
+        
+        # Select diverse points
+        selected_indices = self._select_diverse_points(x_coords, y_coords, num_points, 5)
+        
+        # Convert to point list
+        for idx in selected_indices:
+            points.append([int(x_coords[idx]), int(y_coords[idx])])
+        
+        return points
 
     def _select_diverse_points(self, x_coords, y_coords, num_points, min_distance):
         """
