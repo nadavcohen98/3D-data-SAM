@@ -1454,47 +1454,41 @@ class AutoSAM2(nn.Module):
         else:
             return "invalid_config"
 
-    def print_slice_comparison(self, unet_output, sam2_slices, depth_dim_idx, selected_slices=[38, 77, 124]):
+    def visualize_slice_comparison(self, input_vol, model_output, ground_truth, slice_indices, save_dir="results"):
         """
-        Print textual comparison between UNet3D and SAM2 for selected slices.
-        For each slice in selected_slices that has a valid SAM2 mask,
-        it prints the tumor sizes, overlap, and Dice score.
+        Instead of plotting, print a textual comparison between model output and ground truth for selected slices.
         """
-        for slice_idx, mask in sam2_slices.items():
-            if mask is not None and slice_idx in selected_slices:
-                # Extract UNet slice according to depth dimension
-                if depth_dim_idx == 0:
-                    unet_slice = unet_output[:, :, slice_idx]
-                elif depth_dim_idx == 1:
-                    unet_slice = unet_output[:, :, :, slice_idx]
-                else:
-                    unet_slice = unet_output[:, :, :, :, slice_idx]
-                
-                # Compute binary tumor segmentation by summing channels 1-3
-                sam2_tumor = (mask[:, 1:].sum(dim=1) > 0).float()
-                unet_tumor = (unet_slice[:, 1:].sum(dim=1) > 0).float()
-                
-                sam2_pixels = torch.sum(sam2_tumor).item()
-                unet_pixels = torch.sum(unet_tumor).item()
-                overlap = torch.sum(sam2_tumor * unet_tumor).item()
-                dice = 2 * overlap / (sam2_pixels + unet_pixels + 1e-5)
-                
-                print(f"Slice {slice_idx}:")
-                print(f"  SAM2 tumor size: {sam2_pixels:.1f} pixels")
-                print(f"  UNet tumor size: {unet_pixels:.1f} pixels")
-                print(f"  Overlap: {overlap:.1f} pixels")
-                print(f"  Dice score: {dice:.4f}")
-                if dice > 0.7:
-                    print("  Interpretation: High agreement between SAM2 and UNet3D")
-                elif dice > 0.4:
-                    print("  Interpretation: Moderate agreement")
-                else:
-                    print("  Interpretation: Low agreement - the models see different things")
-                if sam2_pixels > unet_pixels:
-                    print(f"  SAM2 finds {(sam2_pixels / max(1, unet_pixels) - 1)*100:.1f}% more tumor than UNet3D")
-                elif unet_pixels > sam2_pixels:
-                    print(f"  UNet3D finds {(unet_pixels / max(1, sam2_pixels) - 1)*100:.1f}% more tumor than SAM2")
-                print()
+        # Move tensors to CPU
+        input_vol = input_vol.detach().cpu()
+        model_output = model_output.detach().cpu()
+        ground_truth = ground_truth.detach().cpu()
+        
+        b = 0  # use the first item in the batch
+        import numpy as np
+        for idx in slice_indices:
+            # Extract original slice (from channel 0)
+            original_slice = input_vol[b, 0, idx].numpy()
+            
+            # Ground truth for tumor channels (channels 1,2,3)
+            gt = ground_truth[b, 1:, idx].numpy()  # shape: [num_classes, H, W]
+            # Prediction for tumor channels
+            pred = model_output[b, 1:, idx].numpy()
+            
+            # Create binary masks by summing channels
+            gt_mask = (np.sum(gt, axis=0) > 0).astype(np.float32)
+            pred_mask = (np.sum(pred, axis=0) > 0).astype(np.float32)
+            
+            gt_pixels = np.sum(gt_mask)
+            pred_pixels = np.sum(pred_mask)
+            overlap = np.sum(gt_mask * pred_mask)
+            dice_score = (2 * overlap) / (gt_pixels + pred_pixels + 1e-5)
+            
+            print(f"Slice {idx}:")
+            print(f"  Ground truth tumor size: {gt_pixels:.1f} pixels")
+            print(f"  Prediction tumor size: {pred_pixels:.1f} pixels")
+            print(f"  Overlap: {overlap:.1f} pixels")
+            print(f"  Dice score: {dice_score:.4f}")
+            print()
 
 
 
@@ -2279,7 +2273,7 @@ def train_epoch(model, train_loader, optimizer, criterion, device, epoch, schedu
             if batch_idx % 40 == 0:
                 with torch.no_grad():
                     slice_indices = [38, 77, 124]
-                    model.print_slice_comparison(outputs, sam2_slices, metadata[slice_indices])
+                    model.visualize_slice_comparison(images, outputs, masks, slice_indices)
                 
             # Visualize first batch
             if batch_idx == 0 and epoch % 5 == 0:
