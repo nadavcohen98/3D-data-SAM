@@ -460,6 +460,8 @@ def validate(model, val_loader, criterion, device, epoch):
     
     # Progress bar
     pbar = tqdm(val_loader, desc=f"Epoch {epoch+1} Validation")
+
+    random_number = random.randint(1, 13)
     
     with torch.no_grad():
         for batch_idx, batch in enumerate(pbar):
@@ -511,8 +513,9 @@ def validate(model, val_loader, criterion, device, epoch):
                 })
                 
                 # Visualize first batch
-                if (batch_idx == 3 or batch_idx == 6 or batch_idx == 9 or batch_idx == 12):
-                    print(f"Generating visualization for epoch {epoch}, batch {batch_idx}")
+                
+                if (batch_idx == random_number):
+                    print(f"Visualization triggered at batch_idx {batch_idx} (randomly chosen: {random_number})")
                     visualize_batch_comprehensive(images, masks, outputs, epoch, mode="hybrid", prefix="val")
 
                 
