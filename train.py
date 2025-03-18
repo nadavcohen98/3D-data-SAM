@@ -2,6 +2,7 @@ import os
 import torch
 import torch.nn as nn
 import torch.optim as optim
+import torch.serialization
 import numpy as np
 import matplotlib.pyplot as plt
 from tqdm import tqdm
@@ -16,6 +17,8 @@ import torch.nn.functional as F
 from model import AutoSAM2
 from dataset import get_brats_dataloader
 from visualization import visualize_batch_comprehensive
+torch.serialization.add_safe_globals([np.core.multiarray.scalar])
+
 
 def calculate_dice_score(y_pred, y_true):
     """
