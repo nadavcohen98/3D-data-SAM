@@ -759,7 +759,7 @@ def train_model(data_path, batch_size=1, epochs=20, learning_rate=1e-3,
             print(f"Error loading optimizer state: {e}. Using fresh optimizer.")
     
     # Get data loaders
-    max_samples = 64 if test_run else None
+    max_samples = 16 if test_run else None
     
     train_loader = get_brats_dataloader(
         data_path, batch_size=batch_size, train=True,
