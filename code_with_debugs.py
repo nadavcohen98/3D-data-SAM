@@ -2390,7 +2390,7 @@ def train_epoch(model, train_loader, optimizer, criterion, device, epoch, schedu
                 'TC': f"{dice_metrics.get('TC_mean', 0.0):.1f}%",
                 'ET': f"{dice_metrics.get('ET_mean', 0.0):.1f}%"
             })
-
+            images, masks = preprocess_batch(batch, device=device)
             model_output = model(images) 
 
             if batch_idx % 40 == 0:
