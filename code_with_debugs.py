@@ -1313,11 +1313,11 @@ class AutoSAM2(nn.Module):
                     previous_masks[center_idx] = mask_np  # Keep as is
                     print(f"DEBUG: Stored as original shape")
                                 
-                                # Limit memory usage by keeping only recent slices
-                                if len(previous_masks) > context_window*2:
-                                    oldest_key = min(previous_masks.keys())
-                                    if oldest_key != center_idx:
-                                        del previous_masks[oldest_key]
+                    # Limit memory usage by keeping only recent slices
+                    if len(previous_masks) > context_window*2:
+                        oldest_key = min(previous_masks.keys())
+                        if oldest_key != center_idx:
+                            del previous_masks[oldest_key]
         
         return sam2_results
     
