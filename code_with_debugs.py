@@ -1814,11 +1814,12 @@ def calculate_region_dice(pred, gt):
     
     return {'WT': wt_dice.item(), 'TC': tc_dice.item(), 'ET': et_dice.item()}
 
-def visualize_slice_comparison(model, images, masks, outputs, slice_indices=[38, 77, 124], depth_dim_idx=2):
+def visualize_slice_comparison(model, images, masks, outputs, depth_dim_idx=2):
     """
-    Compare outputs to ground truth on specific slices using Dice scores.
+    Compare outputs to ground truth on specific slices (38, 77, 124) using Dice scores.
     """
     batch_idx = 0  # Use first batch item
+    slice_indices = [38, 77, 124]  # Fixed slice indices as requested
     
     print("\n===== Slice-by-Slice Comparison (Dice scores) =====")
     
@@ -1848,7 +1849,6 @@ def visualize_slice_comparison(model, images, masks, outputs, slice_indices=[38,
         # Format for better readability
         print(f"\nSlice {slice_idx}:")
         print(f"  Model output: WT={dice_scores['WT']:.1f}%, TC={dice_scores['TC']:.1f}%, ET={dice_scores['ET']:.1f}%")
-
 
 def calculate_dice_score(y_pred, y_true):
     """
