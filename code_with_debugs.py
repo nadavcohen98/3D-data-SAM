@@ -2291,6 +2291,7 @@ def train_epoch(model, train_loader, optimizer, criterion, device, epoch, schedu
                 'ET': f"{dice_metrics.get('ET_mean', 0.0):.1f}%"
             })
             if batch_idx % 40 == 0:
+                print("Visualization of sam2 vs unet3d:")
                 with torch.no_grad():
                     slice_indices = [38, 77, 124]
                     model.visualize_slice_comparison(images, outputs, masks, slice_indices)
