@@ -682,6 +682,86 @@ class EnhancedPromptGenerator:
             'masks_generated': 0,
             'multi_region_cases': 0
         }
+
+
+    def generate_optimal_box(self, probability_maps, slice_idx, height, width):
+        """
+        Generate an optimal bounding box for tumor segmentation based on probability maps
+        
+        Args:
+            probability_maps: UNet3D feature maps [B, C, H, W]
+            slice_idx: Current slice index
+            height, width: Target dimensions for the box
+            
+        Returns:
+            box: np.array with [x1, y1, x2, y2] coordinates or None
+        """
+        import numpy as np
+        import torch
+        from scipy.ndimage import zoom, label, binary_dilation
+        
+        # Extract tumor probability (combine tumor classes)
+        if probability_maps.shape[1] >= 4:
+            # Combine all tumor classes (1, 2, 3)
+            tumor_prob = torch.sigmoid(probability_maps[0, 1:4]).sum(dim=0).cpu().detach().numpy()
+        else:
+            # Fallback to first non-background channel
+            tumor_prob = torch.sigmoid(probability_maps[0, min(1, probability_maps.shape[1]-1)]).cpu().detach().numpy()
+        
+        # Resize if necessary
+        curr_h, curr_w = tumor_prob.shape
+        if curr_h != height or curr_w != width:
+            tumor_prob = zoom(tumor_prob, (height / curr_h, width / curr_w), order=1)
+        
+        # Create binary mask with reasonable threshold
+        binary_mask = tumor_prob > 0.3  # Lower threshold to capture more potential tumor
+        
+        # If no tumor detected, return None
+        if np.sum(binary_mask) < 10:
+            return None
+        
+        # Apply dilation to create more inclusive box
+        dilated_mask = binary_dilation(binary_mask, iterations=3)
+        
+        # Find all tumor regions
+        labeled_mask, num_regions = label(dilated_mask)
+        
+        # If multiple regions, handle them appropriately
+        if num_regions > 1:
+            # Calculate size of each region
+            region_sizes = [(i+1, np.sum(labeled_mask == (i+1))) for i in range(num_regions)]
+            region_sizes.sort(key=lambda x: x[1], reverse=True)
+            
+            # For now, focus on the largest region (could be enhanced to handle multiple regions)
+            largest_region_id = region_sizes[0][0]
+            region_mask = (labeled_mask == largest_region_id)
+            
+            # Find coordinates of the largest region
+            y_coords, x_coords = np.where(region_mask)
+        else:
+            # Single region case
+            y_coords, x_coords = np.where(dilated_mask)
+        
+        # If no coordinates found, return None
+        if len(y_coords) == 0:
+            return None
+        
+        # Get bounding box with padding
+        min_x, max_x = np.min(x_coords), np.max(x_coords)
+        min_y, max_y = np.min(y_coords), np.max(y_coords)
+        
+        # Add padding (15% on each side)
+        padding_x = max(5, int((max_x - min_x) * 0.15))
+        padding_y = max(5, int((max_y - min_y) * 0.15))
+        
+        # Ensure box stays within image boundaries
+        x1 = max(0, min_x - padding_x)
+        y1 = max(0, min_y - padding_y)
+        x2 = min(width - 1, max_x + padding_x)
+        y2 = min(height - 1, max_y + padding_y)
+        
+        # Return box as [x1, y1, x2, y2]
+        return np.array([x1, y1, x2, y2])
     
     def generate_prompts(self, probability_maps, slice_idx, height, width):
         """
@@ -927,82 +1007,7 @@ class EnhancedPromptGenerator:
         
         return points
     
-    def generate_optimal_box(self, probability_maps, slice_idx, height, width):
-        """
-        Generate an optimal bounding box for tumor segmentation based on probability maps
-        
-        Args:
-            probability_maps: UNet3D feature maps [B, C, H, W]
-            slice_idx: Current slice index
-            height, width: Target dimensions for the box
-            
-        Returns:
-            box: np.array with [x1, y1, x2, y2] coordinates or None
-        """
 
-        
-        # Extract tumor probability (combine tumor classes)
-        if probability_maps.shape[1] >= 4:
-            # Combine all tumor classes (1, 2, 3)
-            tumor_prob = torch.sigmoid(probability_maps[0, 1:4]).sum(dim=0).cpu().detach().numpy()
-        else:
-            # Fallback to first non-background channel
-            tumor_prob = torch.sigmoid(probability_maps[0, min(1, probability_maps.shape[1]-1)]).cpu().detach().numpy()
-        
-        # Resize if necessary
-        curr_h, curr_w = tumor_prob.shape
-        if curr_h != height or curr_w != width:
-            tumor_prob = zoom(tumor_prob, (height / curr_h, width / curr_w), order=1)
-        
-        # Create binary mask with reasonable threshold
-        binary_mask = tumor_prob > 0.3  # Lower threshold to capture more potential tumor
-        
-        # If no tumor detected, return None
-        if np.sum(binary_mask) < 10:
-            return None
-        
-        # Apply dilation to create more inclusive box
-        dilated_mask = binary_dilation(binary_mask, iterations=3)
-        
-        # Find all tumor regions
-        labeled_mask, num_regions = label(dilated_mask)
-        
-        # If multiple regions, handle them appropriately
-        if num_regions > 1:
-            # Calculate size of each region
-            region_sizes = [(i+1, np.sum(labeled_mask == (i+1))) for i in range(num_regions)]
-            region_sizes.sort(key=lambda x: x[1], reverse=True)
-            
-            # For now, focus on the largest region (could be enhanced to handle multiple regions)
-            largest_region_id = region_sizes[0][0]
-            region_mask = (labeled_mask == largest_region_id)
-            
-            # Find coordinates of the largest region
-            y_coords, x_coords = np.where(region_mask)
-        else:
-            # Single region case
-            y_coords, x_coords = np.where(dilated_mask)
-        
-        # If no coordinates found, return None
-        if len(y_coords) == 0:
-            return None
-        
-        # Get bounding box with padding
-        min_x, max_x = np.min(x_coords), np.max(x_coords)
-        min_y, max_y = np.min(y_coords), np.max(y_coords)
-        
-        # Add padding (15% on each side)
-        padding_x = max(5, int((max_x - min_x) * 0.15))
-        padding_y = max(5, int((max_y - min_y) * 0.15))
-        
-        # Ensure box stays within image boundaries
-        x1 = max(0, min_x - padding_x)
-        y1 = max(0, min_y - padding_y)
-        x2 = min(width - 1, max_x + padding_x)
-        y2 = min(height - 1, max_y + padding_y)
-        
-        # Return box as [x1, y1, x2, y2]
-        return np.array([x1, y1, x2, y2])
 
 
 # ======= Main AutoSAM2 model =======
