@@ -1200,7 +1200,7 @@ class AutoSAM2(nn.Module):
         
             
             # Generate point prompts
-            points, labels = self.prompt_generator.generate_prompts(
+            points, labels, _, _ = self.prompt_generator.generate_prompts(
                 enhanced_features, slice_idx, h, w
             )
             
