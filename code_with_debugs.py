@@ -804,7 +804,7 @@ class EnhancedPromptGenerator:
             background_points = self._get_negative_points(binary_mask, prob_map, self.num_negative_points)
             
             # --- BOUNDING BOX GENERATION ---
-            bounding_box = self._generate_optimal_box(binary_mask, prob_map)
+            bounding_box = self.generate_optimal_box(binary_mask, prob_map)
             self.prompt_stats['boxes_generated'] += 1
             
             # --- MASK PROMPT ---
