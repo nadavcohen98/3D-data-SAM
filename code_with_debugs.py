@@ -666,23 +666,17 @@ class UNet3DtoSAM2Bridge(nn.Module):
 
         
 class EnhancedPromptGenerator:
-    """
-    Advanced prompt generator for SAM2 that creates high-quality points, boxes, and masks
-    based on UNet3D's predictions and confidence levels.
-    """
     def __init__(self, 
-                 num_positive_points=5,  # More points for better coverage
-                 num_negative_points=3,  # Include more negative points to clarify boundaries
-                 edge_detection=True,    # Use edge detection for boundary points
-                 use_confidence=True,    # Use confidence scores for point placement
-                 use_mask_prompt=True):  # Use intermediate masks as prompts
+                 num_positive_points=7,  # Increased from 5 for better coverage
+                 num_negative_points=3,  
+                 edge_detection=True,    
+                 use_confidence=True,    
+                 use_mask_prompt=True):
         self.num_positive_points = num_positive_points
         self.num_negative_points = num_negative_points
         self.edge_detection = edge_detection
         self.use_confidence = use_confidence
         self.use_mask_prompt = use_mask_prompt
-        
-        # For tracking prompt quality statistics
         self.prompt_stats = {
             'boxes_generated': 0,
             'points_generated': 0,
@@ -690,23 +684,16 @@ class EnhancedPromptGenerator:
             'multi_region_cases': 0
         }
 
-
     def generate_optimal_box(self, binary_mask_or_probability_maps, prob_map_or_slice_idx=None, height=None, width=None):
-        """
-        Flexible method to generate optimal bounding box - works with both calling patterns
-        """    
         # Handle different parameter patterns
         if height is not None and width is not None:
-            # Called from process_slice_with_sam2 with (probability_maps, slice_idx, height, width)
             probability_maps = binary_mask_or_probability_maps
             slice_idx = prob_map_or_slice_idx
             
-            # Extract tumor probability (combine tumor classes)
+            # Extract tumor probability (weighted combination)
             if probability_maps.shape[1] >= 4:
-                # Combine all tumor classes (1, 2, 3)
                 tumor_prob = torch.sigmoid(probability_maps[0, 1:4]).sum(dim=0).cpu().detach().numpy()
             else:
-                # Fallback to first non-background channel
                 tumor_prob = torch.sigmoid(probability_maps[0, min(1, probability_maps.shape[1]-1)]).cpu().detach().numpy()
             
             # Resize if necessary
@@ -718,193 +705,107 @@ class EnhancedPromptGenerator:
             # Create binary mask
             binary_mask = tumor_prob > 0.3
             prob_map = tumor_prob
-            
         else:
-            # Called from generate_prompts with (binary_mask, prob_map)
             binary_mask = binary_mask_or_probability_maps
             prob_map = prob_map_or_slice_idx
             height, width = prob_map.shape
         
-        # Rest of your implementation
         # If no tumor detected, return None
         if np.sum(binary_mask) < 10:
             return None
         
-        # Apply dilation to create more inclusive box
+        # Apply dilation to create a more inclusive box
         dilated_mask = binary_dilation(binary_mask, iterations=3)
         
         # Find coordinates of tumor region
         y_coords, x_coords = np.where(dilated_mask)
-        
-        # If no coordinates found, return None
         if len(y_coords) == 0:
             return None
         
-        # Get bounding box with padding
         min_x, max_x = np.min(x_coords), np.max(x_coords)
         min_y, max_y = np.min(y_coords), np.max(y_coords)
         
-        # Add padding (15% on each side)
-        padding_x = max(5, int((max_x - min_x) * 0.15))
-        padding_y = max(5, int((max_y - min_y) * 0.15))
+        # Reduce padding factor from 15% to 10% for tighter bounding box
+        padding_x = max(5, int((max_x - min_x) * 0.10))
+        padding_y = max(5, int((max_y - min_y) * 0.10))
         
-        # Ensure box stays within image boundaries
         x1 = max(0, min_x - padding_x)
         y1 = max(0, min_y - padding_y)
         x2 = min(width - 1, max_x + padding_x)
         y2 = min(height - 1, max_y + padding_y)
         
-        # Return box as [x1, y1, x2, y2]
+        self.prompt_stats['boxes_generated'] += 1
         return np.array([x1, y1, x2, y2])
-    
     
     def generate_prompts(self, probability_maps, slice_idx, height, width):
         """
         Generate optimized point prompts for SAM2 based on probability maps
-        
-        Args:
-            probability_maps: UNet3D feature maps [B, C, H, W]
-            slice_idx: Current slice index (for diagnostic purposes)
-            height, width: Target dimensions for points
-            
-        Returns:
-            points: np.array of point coordinates
-            labels: np.array of point labels (1=foreground, 0=background)
-            box: Bounding box coordinates [x1, y1, x2, y2] or None
-            mask_prompt: Binary mask for prompting or None
         """
-        import numpy as np
-        import torch
-        import torch.nn.functional as F
-        from scipy.ndimage import zoom, binary_erosion, binary_dilation, label, distance_transform_edt
+        # Extract tumor probability with increased intensity multiplier
+        if probability_maps.shape[1] >= 4:
+            tumor_prob = (
+                0.3 * torch.sigmoid(probability_maps[0, 1]) +  
+                0.3 * torch.sigmoid(probability_maps[0, 2]) +  
+                0.4 * torch.sigmoid(probability_maps[0, 3])
+            ).cpu().detach().numpy() * 1.5  # Increase intensity by factor of 1.5
+        else:
+            tumor_prob = torch.sigmoid(probability_maps[0, min(1, probability_maps.shape[1]-1)]).cpu().detach().numpy() * 1.5
+
+        # Resize probability map to target dimensions if necessary
+        if tumor_prob.shape != (height, width):
+            from scipy.ndimage import zoom
+            tumor_prob = zoom(tumor_prob, (height / tumor_prob.shape[0], width / tumor_prob.shape[1]), order=1)
         
-        # Convert probability maps to numpy for processing
-        # Use class channels 1, 2, 3 (tumor classes) and sum them
-        prob_tensor = probability_maps[0, 1:].cpu().detach()
+        binary_mask = tumor_prob > 0.5
         
-        # Create a combined tumor probability map (confidence map)
-        prob_map = torch.sigmoid(prob_tensor).mean(dim=0).numpy()
-        
-        # Resize to target dimensions if necessary
-        if prob_map.shape != (height, width):
-            prob_map = zoom(prob_map, (height / prob_map.shape[0], width / prob_map.shape[1]), order=1)
-        
-        # Create binary mask from probability map
-        binary_mask = (prob_map > 0.5).astype(np.float32)
-        
-        # Initialize results
+        # Initialize lists for foreground and background points
         foreground_points = []
         background_points = []
-        bounding_box = None
-        mask_prompt = None
         
-        # Only proceed if mask contains potential tumor
+        # Process tumor regions and generate strategic positive points
         if np.sum(binary_mask) > 10:
-            # --- MULTI-REGION DETECTION ---
-            # Check if there are multiple disconnected tumor regions
             labeled_mask, num_regions = label(binary_mask)
-            
             if num_regions > 1:
-                self.prompt_stats['multi_region_cases'] += 1
-                
-                # Find the region sizes
                 region_sizes = [(i+1, np.sum(labeled_mask == (i+1))) for i in range(num_regions)]
                 region_sizes.sort(key=lambda x: x[1], reverse=True)
-                
-                # For each significant region, add points (up to our maximum)
-                points_per_region = min(2, self.num_positive_points // min(num_regions, 3))
-                regions_to_process = min(num_regions, 3)  # Process up to 3 regions
-                
-                for i in range(regions_to_process):
-                    region_id, size = region_sizes[i]
-                    if size > 20:  # Only consider regions of reasonable size
-                        region_mask = (labeled_mask == region_id)
-                        region_points = self._get_strategic_points(region_mask, points_per_region, prob_map)
-                        foreground_points.extend(region_points)
-            
-            # --- EDGE DETECTION FOR BOUNDARY POINTS ---
-            # --- EDGE DETECTION FOR BOUNDARY POINTS ---
-            if self.edge_detection:
-                # Create boundary mask (dilated - eroded)
-                eroded = binary_erosion(binary_mask, iterations=2)
-                dilated = binary_dilation(binary_mask, iterations=2)
-                
-                # Convert to boolean explicitly before bitwise operations
-                dilated_bool = np.bool_(dilated)
-                eroded_bool = np.bool_(eroded)
-                
-                # Now use bitwise NOT on boolean arrays
-                boundary = dilated_bool & ~eroded_bool
-                
-                # Find boundary points
-                boundary_y, boundary_x = np.where(boundary)
-                if len(boundary_y) > 0:
-                    # Select random points from boundary
-                    num_boundary_points = min(2, len(boundary_y))
-                    indices = np.random.choice(len(boundary_y), num_boundary_points, replace=False)
-                    for idx in indices:
-                        foreground_points.append([int(boundary_x[idx]), int(boundary_y[idx])])
-            
-            # --- CONFIDENCE-BASED INTERIOR POINTS ---
-            if self.use_confidence:
-                # Use distance transform to find points far from boundaries
-                distance = distance_transform_edt(binary_mask)
-                
-                # Find high-confidence regions (far from boundaries and high probability)
-                confidence = distance * prob_map * binary_mask
-                
-                # Get top confidence points
-                flat_idx = np.argsort(confidence.flatten())[-10:]  # Get top 10 candidates
-                high_conf_y, high_conf_x = np.unravel_index(flat_idx, confidence.shape)
-                
-                # Add high confidence points (if not already too many points)
-                remaining_points = self.num_positive_points - len(foreground_points)
-                for i in range(min(remaining_points, len(high_conf_y))):
-                    foreground_points.append([int(high_conf_x[i]), int(high_conf_y[i])])
-            
-            # --- STANDARD SAMPLING FOR REMAINING POINTS ---
-            # If we still need more points, add random ones from the tumor region
+                points_remaining = self.num_positive_points
+                for region_id, size in region_sizes[:3]:
+                    if size < 20:
+                        continue
+                    region_mask = (labeled_mask == region_id)
+                    region_points = self._get_strategic_points(region_mask, min(3, points_remaining), tumor_prob)
+                    foreground_points.extend(region_points)
+                    points_remaining -= len(region_points)
+                    if points_remaining <= 0:
+                        break
+
+            # If additional points needed, use confidence-based selection
             if len(foreground_points) < self.num_positive_points:
-                tumor_y, tumor_x = np.where(binary_mask > 0)
-                if len(tumor_y) > 0:
-                    # Select random remaining points
-                    remaining_points = self.num_positive_points - len(foreground_points)
-                    num_to_select = min(remaining_points, len(tumor_y))
-                    indices = np.random.choice(len(tumor_y), num_to_select, replace=False)
-                    for idx in indices:
-                        foreground_points.append([int(tumor_x[idx]), int(tumor_y[idx])])
+                from scipy.ndimage import distance_transform_edt
+                distance = distance_transform_edt(binary_mask)
+                confidence = distance * tumor_prob * binary_mask
+                flat_idx = np.argsort(confidence.flatten())[-10:]
+                high_conf_y, high_conf_x = np.unravel_index(flat_idx, confidence.shape)
+                selected_indices = self._select_diverse_points(high_conf_x, high_conf_y, 
+                                                                self.num_positive_points - len(foreground_points), 5)
+                for idx in selected_indices:
+                    foreground_points.append([int(high_conf_x[idx]), int(high_conf_y[idx])])
             
-            # --- NEGATIVE POINTS (BACKGROUND) ---
-            # Generate strategic negative points near the tumor boundary
-            background_points = self._get_negative_points(binary_mask, prob_map, self.num_negative_points)
-            
-            # --- BOUNDING BOX GENERATION ---
-            bounding_box = self.generate_optimal_box(binary_mask, prob_map)
-            self.prompt_stats['boxes_generated'] += 1
-            
-            # --- MASK PROMPT ---
-            if self.use_mask_prompt:
-                # Use the probability map as a soft mask prompt
-                # SAM2 can use this as additional guidance
-                mask_prompt = prob_map
-                self.prompt_stats['masks_generated'] += 1
+            # Generate background (negative) points
+            background_points = self._get_negative_points(binary_mask, tumor_prob, self.num_negative_points)
         
-        # If no tumor found, add default center point
         if not foreground_points:
             foreground_points.append([width//2, height//2])
-        
-        # If no background points, add corners
         if not background_points:
             background_points.append([width//4, height//4])
             background_points.append([width*3//4, height*3//4])
         
-        # Combine points and labels
         all_points = foreground_points + background_points
         all_labels = [1] * len(foreground_points) + [0] * len(background_points)
-        
         self.prompt_stats['points_generated'] += len(all_points)
         
-        return np.array(all_points), np.array(all_labels), bounding_box, mask_prompt
+        return np.array(all_points), np.array(all_labels), self.generate_optimal_box(binary_mask, tumor_prob), tumor_prob
+
     
     def _get_strategic_points(self, region_mask, num_points, prob_map):
         """Get strategic points within a specific region"""
