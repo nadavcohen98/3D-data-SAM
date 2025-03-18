@@ -633,8 +633,7 @@ class UNet3DtoSAM2Bridge(nn.Module):
         self.final_conv = nn.Conv2d(128, output_channels, kernel_size=1)
         self.final_norm = nn.GroupNorm(32, output_channels)
         # Learnable parameters for dynamic scaling of the output
-        self.importance = nn.Parameter(torch.tensor(0.5))
-        self.adaptive_scale = nn.Parameter(torch.tensor(1.0))
+        self.scale_factor = 1.5
 
     def forward(self, x):
         # Apply channel attention and weight the input accordingly
@@ -661,8 +660,7 @@ class UNet3DtoSAM2Bridge(nn.Module):
         out = self.final_norm(out)
 
         # Apply learnable scaling (importance) with adaptive scaling factor
-        scale_factor = torch.sigmoid(self.importance) * (1.0 + torch.tanh(self.adaptive_scale))
-        out = out * scale_factor
+        out = out * self.scale_factor
 
         return out
 
