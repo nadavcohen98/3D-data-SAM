@@ -1313,8 +1313,10 @@ class AutoSAM2(nn.Module):
                     del previous_masks[oldest_key]
         
         return sam2_results
+
+    
     def _process_slice_with_context(self, input_vol, context_indices, center_idx, 
-                                   features, depth_dim_idx, previous_masks, device):
+                                  features, depth_dim_idx, previous_masks, device):
         """Process a slice with context from neighboring slices"""
         try:
             # Extract and process the center slice (same as before)
@@ -1330,49 +1332,13 @@ class AutoSAM2(nn.Module):
             # Set image in SAM2
             self.sam2.set_image(rgb_image)
             
-            # Try different context mask formats
-            mask_input = None
-            if len(context_indices) > 1:
-                neighbor_masks = []
-                for idx in context_indices:
-                    if idx in previous_masks and idx != center_idx:
-                        neighbor_masks.append(previous_masks[idx])
-                
-                if neighbor_masks:
-                    # Try a different format: create a binary mask as numpy array
-                    try:
-                        avg_mask = np.stack(neighbor_masks).mean(axis=0) > 0.5
-                        # Format as expected by SAM2: shape should be (H, W)
-                        mask_input = avg_mask
-                    except Exception as e:
-                        logger.warning(f"Error creating context mask: {e}, using points only")
-                        mask_input = None
-            
-            # Call SAM2 with or without mask
-            if mask_input is not None:
-                try:
-                    masks, scores, _ = self.sam2.predict(
-                        point_coords=points,
-                        point_labels=labels,
-                        box=box,
-                        mask_input=mask_input,
-                        multimask_output=True
-                    )
-                except Exception as e:
-                    logger.warning(f"Error with mask_input: {e}, falling back to points only")
-                    masks, scores, _ = self.sam2.predict(
-                        point_coords=points,
-                        point_labels=labels,
-                        box=box,
-                        multimask_output=True
-                    )
-            else:
-                masks, scores, _ = self.sam2.predict(
-                    point_coords=points,
-                    point_labels=labels,
-                    box=box,
-                    multimask_output=True
-                )
+            # Just use points and box without mask_input for now
+            masks, scores, _ = self.sam2.predict(
+                point_coords=points,
+                point_labels=labels,
+                box=box,
+                multimask_output=True
+            )
             
             # Process results (same as before)
             if len(masks) > 0:
