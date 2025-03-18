@@ -1455,9 +1455,6 @@ class AutoSAM2(nn.Module):
             return "invalid_config"
 
 
-
-
-
 print("=== AUTOSAM2 WITH FLEXIBLE ARCHITECTURE LOADED SUCCESSFULLY ===")
 
 
@@ -2301,13 +2298,9 @@ def train_epoch(model, train_loader, optimizer, criterion, device, epoch, schedu
                 'ET': f"{dice_metrics.get('ET_mean', 0.0):.1f}%"
             })
 
-            if batch_idx % 40 == 0:
-                visualize_slice_comparison(model, images, masks, outputs, depth_dim_idx=2) 
-
-                
             # Visualize first batch
-            if batch_idx == 0 and epoch % 5 == 0:
-                visualize_batch(images, masks, outputs, epoch, "train")
+            if batch_idx % 40 == 0:
+                visualize_slice_comparison(model, images, masks, outputs, depth_dim_idx=2)
             
             # Update total loss
             total_loss += loss.item()
