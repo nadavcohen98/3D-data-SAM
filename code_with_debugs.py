@@ -705,7 +705,7 @@ class EnhancedPromptGenerator:
                 tumor_prob = zoom(tumor_prob, (height / curr_h, width / curr_w), order=1)
             
             # Create binary mask
-            binary_mask = tumor_prob > 0.4
+            binary_mask = tumor_prob > 0.3
             prob_map = tumor_prob
         else:
             binary_mask = binary_mask_or_probability_maps
@@ -3011,7 +3011,7 @@ def main():
                         help='Reset training from scratch, ignoring checkpoints')
     parser.add_argument('--no_mixed_precision', action='store_true',
                         help='Disable mixed precision training')
-    parser.add_argument('--memory_limit', type=float, default=0.9,
+    parser.add_argument('--memory_limit', type=float, default=0.95,
                         help='Memory limit for GPU (0.0-1.0)')
     
     args = parser.parse_args()
