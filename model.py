@@ -151,7 +151,7 @@ class FlexibleUNet3D(nn.Module):
         self.output_conv = nn.Conv3d(base_channels, n_classes, kernel_size=1)
         
         # Projection for SAM2 embeddings (from mid-decoder features)
-        self.sam_projection = nn.Conv3d(base_channels * 2, 256, kernel_size=1)
+        self.sam_projection = nn.Conv3d(base_channels * 4, 256, kernel_size=1)
 
         self.dropout = nn.Dropout3d(0.15) 
     
