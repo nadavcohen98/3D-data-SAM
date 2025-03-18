@@ -1223,15 +1223,7 @@ class AutoSAM2(nn.Module):
             # DEBUG: Print the actual method signature to compare
             print(f"DEBUG: Available methods: {dir(self.prompt_generator)}")
             
-            # Try/except to debug the generate_optimal_box call
-            try:
-                # Generate bounding box prompt - THIS IS WHERE THE ERROR HAPPENS
-                box = self.prompt_generator.generate_optimal_box(enhanced_features, slice_idx, h, w)
-                print(f"DEBUG: Box generation succeeded: {box}")
-            except Exception as e:
-                print(f"DEBUG: Box generation failed with error: {e}")
-                # Fallback to None for now so we can continue
-                box = None
+            box = None 
             
             # Set image in SAM2
             self.sam2.set_image(rgb_image)
