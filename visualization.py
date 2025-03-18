@@ -1,4 +1,7 @@
+# Standard library imports
 import os
+
+# External libraries
 import numpy as np
 import matplotlib.pyplot as plt
 import torch
@@ -6,6 +9,7 @@ import torch.nn.functional as F
 from matplotlib.colors import LinearSegmentedColormap
 import matplotlib.gridspec as gridspec
 from mpl_toolkits.axes_grid1 import make_axes_locatable
+from scipy.ndimage import binary_dilation, binary_erosion
 
 def create_custom_colormaps():
     """Create custom colormaps for BraTS segmentation visualization"""
