@@ -1211,18 +1211,28 @@ class AutoSAM2(nn.Module):
             # Process through bridge network to get enhanced features
             enhanced_features = self.unet_sam_bridge(slice_features)
             
+            # DEBUG PRINTS
+            print(f"DEBUG: Slice {slice_idx}, image dims: {h}x{w}")
+            print(f"DEBUG: Enhanced features shape: {enhanced_features.shape}")
+            
             # Generate point prompts
             points, labels = self.prompt_generator.generate_prompts(
                 enhanced_features, slice_idx, h, w
             )
             
-            # Generate bounding box prompt
+            # DEBUG: Print the actual method signature to compare
+            print(f"DEBUG: Available methods: {dir(self.prompt_generator)}")
+            
+            # Try/except to debug the generate_optimal_box call
             try:
-                points, labels, box, _ = self.prompt_generator.generate_prompts(enhanced_features, slice_idx, h, w)
-            except:
+                # Generate bounding box prompt - THIS IS WHERE THE ERROR HAPPENS
+                box = self.prompt_generator.generate_optimal_box(enhanced_features, slice_idx, h, w)
+                print(f"DEBUG: Box generation succeeded: {box}")
+            except Exception as e:
+                print(f"DEBUG: Box generation failed with error: {e}")
+                # Fallback to None for now so we can continue
                 box = None
-
-                        
+            
             # Set image in SAM2
             self.sam2.set_image(rgb_image)
             
