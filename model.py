@@ -231,10 +231,10 @@ class FlexibleUNet3D(nn.Module):
             return None, dec_out2, sam_embeddings, metadata
         
         # Late decoder stages
-        dec_out3 = self.dec4(dec_out2, x2)
+        dec_out3 = self.dec3(dec_out2, x2)
         dec_out3 = self.dropout(dec_out3)
         
-        dec_out4 = self.dec5(dec_out3, x1)
+        dec_out4 = self.dec4(dec_out3, x1)
 
         # Final convolution
         output = self.output_conv(dec_out4)
