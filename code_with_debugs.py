@@ -8,7 +8,6 @@ import gc
 import logging
 import os
 from collections import defaultdict
-from scipy.ndimage import binary_dilation
 from scipy.ndimage import zoom, binary_erosion, binary_dilation, label, distance_transform_edt
 
 # Configure logging
@@ -928,35 +927,82 @@ class EnhancedPromptGenerator:
         
         return points
     
-    def _generate_optimal_box(self, binary_mask, prob_map):
-        """Generate an optimal bounding box for the tumor"""
-        import numpy as np
+    def generate_optimal_box(self, probability_maps, slice_idx, height, width):
+        """
+        Generate an optimal bounding box for tumor segmentation based on probability maps
         
-        # Find coordinates of tumor
-        y_coords, x_coords = np.where(binary_mask > 0)
+        Args:
+            probability_maps: UNet3D feature maps [B, C, H, W]
+            slice_idx: Current slice index
+            height, width: Target dimensions for the box
+            
+        Returns:
+            box: np.array with [x1, y1, x2, y2] coordinates or None
+        """
+
         
+        # Extract tumor probability (combine tumor classes)
+        if probability_maps.shape[1] >= 4:
+            # Combine all tumor classes (1, 2, 3)
+            tumor_prob = torch.sigmoid(probability_maps[0, 1:4]).sum(dim=0).cpu().detach().numpy()
+        else:
+            # Fallback to first non-background channel
+            tumor_prob = torch.sigmoid(probability_maps[0, min(1, probability_maps.shape[1]-1)]).cpu().detach().numpy()
+        
+        # Resize if necessary
+        curr_h, curr_w = tumor_prob.shape
+        if curr_h != height or curr_w != width:
+            tumor_prob = zoom(tumor_prob, (height / curr_h, width / curr_w), order=1)
+        
+        # Create binary mask with reasonable threshold
+        binary_mask = tumor_prob > 0.3  # Lower threshold to capture more potential tumor
+        
+        # If no tumor detected, return None
+        if np.sum(binary_mask) < 10:
+            return None
+        
+        # Apply dilation to create more inclusive box
+        dilated_mask = binary_dilation(binary_mask, iterations=3)
+        
+        # Find all tumor regions
+        labeled_mask, num_regions = label(dilated_mask)
+        
+        # If multiple regions, handle them appropriately
+        if num_regions > 1:
+            # Calculate size of each region
+            region_sizes = [(i+1, np.sum(labeled_mask == (i+1))) for i in range(num_regions)]
+            region_sizes.sort(key=lambda x: x[1], reverse=True)
+            
+            # For now, focus on the largest region (could be enhanced to handle multiple regions)
+            largest_region_id = region_sizes[0][0]
+            region_mask = (labeled_mask == largest_region_id)
+            
+            # Find coordinates of the largest region
+            y_coords, x_coords = np.where(region_mask)
+        else:
+            # Single region case
+            y_coords, x_coords = np.where(dilated_mask)
+        
+        # If no coordinates found, return None
         if len(y_coords) == 0:
             return None
         
-        # Get basic bounding box
-        x1, x2 = np.min(x_coords), np.max(x_coords)
-        y1, y2 = np.min(y_coords), np.max(y_coords)
+        # Get bounding box with padding
+        min_x, max_x = np.min(x_coords), np.max(x_coords)
+        min_y, max_y = np.min(y_coords), np.max(y_coords)
         
-        # Add padding (10% on each side, but ensure it doesn't go out of bounds)
-        height, width = binary_mask.shape
-        padding_x = max(5, int((x2 - x1) * 0.1))
-        padding_y = max(5, int((y2 - y1) * 0.1))
+        # Add padding (15% on each side)
+        padding_x = max(5, int((max_x - min_x) * 0.15))
+        padding_y = max(5, int((max_y - min_y) * 0.15))
         
-        x1 = max(0, x1 - padding_x)
-        y1 = max(0, y1 - padding_y)
-        x2 = min(width - 1, x2 + padding_x)
-        y2 = min(height - 1, y2 + padding_y)
+        # Ensure box stays within image boundaries
+        x1 = max(0, min_x - padding_x)
+        y1 = max(0, min_y - padding_y)
+        x2 = min(width - 1, max_x + padding_x)
+        y2 = min(height - 1, max_y + padding_y)
         
+        # Return box as [x1, y1, x2, y2]
         return np.array([x1, y1, x2, y2])
-    
-    def get_stats(self):
-        """Return statistics about the prompts generated"""
-        return self.prompt_stats
 
 
 # ======= Main AutoSAM2 model =======
@@ -1129,10 +1175,7 @@ class AutoSAM2(nn.Module):
         return img_rgb
     
     def process_slice_with_sam2(self, input_vol, slice_idx, slice_features, depth_dim_idx, device):
-        """
-        Process a single slice with SAM2 using enhanced prompts for better accuracy.
-        Includes advanced point selection, mask prompts, and optimized bounding boxes.
-        """
+        """Process a single slice with SAM2 using both point and box prompts"""
         if not self.has_sam2:
             logger.warning(f"SAM2 not available for slice {slice_idx}")
             return None
@@ -1162,53 +1205,29 @@ class AutoSAM2(nn.Module):
             # Process through bridge network to get enhanced features
             enhanced_features = self.unet_sam_bridge(slice_features)
             
-            # Track enhancement success
-            if not hasattr(self, 'slice_processing_stats'):
-                self.slice_processing_stats = {
-                    'total_processed': 0,
-                    'successful_sam2': 0,
-                    'prompt_points_avg': 0,
-                    'multi_mask_wins': 0,
-                }
-            
-            self.slice_processing_stats['total_processed'] += 1
-            
-            # Generate enhanced prompts using our advanced generator
-            points, labels, box, mask_prompt = self.prompt_generator.generate_prompts(
+            # Generate point prompts
+            points, labels = self.prompt_generator.generate_prompts(
                 enhanced_features, slice_idx, h, w
             )
             
-            # Update prompt statistics
-            if points is not None:
-                self.slice_processing_stats['prompt_points_avg'] += (
-                    len(points) - self.slice_processing_stats['prompt_points_avg']
-                ) / self.slice_processing_stats['total_processed']
-            
-            # Optional: Enhance contrast for better image clarity
-            p1, p99 = np.percentile(rgb_image, (1, 99))
-            if p99 > p1:
-                rgb_image = np.clip((rgb_image - p1) / (p99 - p1), 0, 1)
+            # Generate bounding box prompt
+            box = self.generate_optimal_box(enhanced_features, slice_idx, h, w)
             
             # Set image in SAM2
             self.sam2.set_image(rgb_image)
             
-            # Call SAM2 with multiple prompt types for best results
-            # Note: SAM2 API allows multiple prompt types to be used together
+            # Call SAM2 with both point and box prompts (if box exists)
             masks, scores, _ = self.sam2.predict(
                 point_coords=points,
                 point_labels=labels,
-                box=box,
-                multimask_output=True  # Get multiple masks and select best
+                box=box,  # This will be None if no box was found
+                multimask_output=True
             )
             
             # Select best mask based on score
             if len(masks) > 0:
                 best_idx = scores.argmax()
                 best_mask = masks[best_idx]
-                
-                # Track when multi-mask output helps
-                if len(masks) > 1 and best_idx > 0:
-                    self.slice_processing_stats['multi_mask_wins'] += 1
                 
                 # Convert to tensor and format
                 mask_tensor = torch.from_numpy(best_mask).float().to(device)
@@ -1221,21 +1240,6 @@ class AutoSAM2(nn.Module):
                 # Fill tumor classes (1,2,3)
                 for c in range(1, self.num_classes):
                     multi_class_mask[:, c] = mask_tensor[:, 0]
-                
-                # Update metrics
-                self.performance_metrics["sam2_slices_processed"] += 1
-                self.slice_processing_stats['successful_sam2'] += 1
-                
-                # Print occasional statistics about prompt effectiveness
-                if self.slice_processing_stats['total_processed'] % 100 == 0:
-                    success_rate = (self.slice_processing_stats['successful_sam2'] / 
-                                   self.slice_processing_stats['total_processed'] * 100)
-                    multi_mask_pct = (self.slice_processing_stats['multi_mask_wins'] / 
-                                     max(1, self.slice_processing_stats['successful_sam2']) * 100)
-                    
-                    print(f"SAM2 processing stats: {success_rate:.1f}% success rate, "
-                          f"avg {self.slice_processing_stats['prompt_points_avg']:.1f} points per slice, "
-                          f"multi-mask helped in {multi_mask_pct:.1f}% of cases")
                 
                 return multi_class_mask
             else:
