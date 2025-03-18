@@ -241,8 +241,7 @@ class MultiPointPromptGenerator:
         
     def _get_strategic_points(self, region_mask, num_points, prob_map):
         """Get strategic points within a specific region"""
-        import numpy as np
-        from scipy.ndimage import distance_transform_edt
+
         
         points = []
         
@@ -665,6 +664,10 @@ class UNet3DtoSAM2Bridge(nn.Module):
         return out
 
         
+import numpy as np
+import torch
+from scipy.ndimage import zoom, binary_dilation, distance_transform_edt, label
+
 class EnhancedPromptGenerator:
     def __init__(self, 
                  num_positive_points=7,  # Increased from 5 for better coverage
@@ -699,7 +702,6 @@ class EnhancedPromptGenerator:
             # Resize if necessary
             curr_h, curr_w = tumor_prob.shape
             if curr_h != height or curr_w != width:
-                from scipy.ndimage import zoom
                 tumor_prob = zoom(tumor_prob, (height / curr_h, width / curr_w), order=1)
             
             # Create binary mask
@@ -739,7 +741,12 @@ class EnhancedPromptGenerator:
     
     def generate_prompts(self, probability_maps, slice_idx, height, width):
         """
-        Generate optimized point prompts for SAM2 based on probability maps
+        Generate optimized point prompts for SAM2 based on probability maps.
+        Returns:
+            - all_points: numpy array of point coordinates.
+            - all_labels: numpy array of corresponding labels (1=foreground, 0=background).
+            - bounding_box: optimal bounding box computed from the probability map.
+            - tumor_prob: the processed tumor probability map.
         """
         # Extract tumor probability with increased intensity multiplier
         if probability_maps.shape[1] >= 4:
@@ -753,7 +760,6 @@ class EnhancedPromptGenerator:
 
         # Resize probability map to target dimensions if necessary
         if tumor_prob.shape != (height, width):
-            from scipy.ndimage import zoom
             tumor_prob = zoom(tumor_prob, (height / tumor_prob.shape[0], width / tumor_prob.shape[1]), order=1)
         
         binary_mask = tumor_prob > 0.5
@@ -781,7 +787,6 @@ class EnhancedPromptGenerator:
 
             # If additional points needed, use confidence-based selection
             if len(foreground_points) < self.num_positive_points:
-                from scipy.ndimage import distance_transform_edt
                 distance = distance_transform_edt(binary_mask)
                 confidence = distance * tumor_prob * binary_mask
                 flat_idx = np.argsort(confidence.flatten())[-10:]
@@ -795,102 +800,94 @@ class EnhancedPromptGenerator:
             background_points = self._get_negative_points(binary_mask, tumor_prob, self.num_negative_points)
         
         if not foreground_points:
-            foreground_points.append([width//2, height//2])
+            foreground_points.append([width // 2, height // 2])
         if not background_points:
-            background_points.append([width//4, height//4])
-            background_points.append([width*3//4, height*3//4])
+            background_points.append([width // 4, height // 4])
+            background_points.append([width * 3 // 4, height * 3 // 4])
         
         all_points = foreground_points + background_points
         all_labels = [1] * len(foreground_points) + [0] * len(background_points)
         self.prompt_stats['points_generated'] += len(all_points)
         
-        return np.array(all_points), np.array(all_labels), self.generate_optimal_box(binary_mask, tumor_prob), tumor_prob
+        bounding_box = self.generate_optimal_box(binary_mask, tumor_prob)
+        return np.array(all_points), np.array(all_labels), bounding_box, tumor_prob
 
-    
     def _get_strategic_points(self, region_mask, num_points, prob_map):
-        """Get strategic points within a specific region"""
-        import numpy as np
-        from scipy.ndimage import distance_transform_edt
-        
+        """Get strategic points within a specific region using distance transform and probability weighting."""
         points = []
-        
-        # Get distance transform (distance from boundary)
-        distance = distance_transform_edt(region_mask)
-        
-        # Weight by probability
-        weighted_map = distance * prob_map * region_mask
-        
-        # Get coordinates of high weighted values
-        flat_idx = np.argsort(weighted_map.flatten())[-num_points*2:]  # Get more candidates than needed
+        distance_map = distance_transform_edt(region_mask)
+        weighted_map = distance_map * prob_map * region_mask
+        flat_idx = np.argsort(weighted_map.flatten())[-num_points * 2:]  # Get more candidates
         y_coords, x_coords = np.unravel_index(flat_idx, weighted_map.shape)
         
-        # Ensure points are spread out by selecting a subset
         if len(y_coords) > 0:
-            # Start with highest value point
-            selected_indices = [len(y_coords) - 1]
-            
-            # Greedily add points that are farthest from already selected points
+            selected_indices = [len(y_coords) - 1]  # Start with the highest value point
             for _ in range(min(num_points - 1, len(y_coords) - 1)):
                 remaining_indices = [i for i in range(len(y_coords)) if i not in selected_indices]
                 if not remaining_indices:
                     break
-                    
-                # Find point farthest from already selected points
                 max_min_dist = -1
                 best_idx = -1
-                
-                for idx in remaining_indices:
+                for i in remaining_indices:
                     min_dist = float('inf')
-                    for sel_idx in selected_indices:
-                        dist = (x_coords[idx] - x_coords[sel_idx])**2 + (y_coords[idx] - y_coords[sel_idx])**2
+                    for sel in selected_indices:
+                        dist = (x_coords[i] - x_coords[sel]) ** 2 + (y_coords[i] - y_coords[sel]) ** 2
                         min_dist = min(min_dist, dist)
-                    
                     if min_dist > max_min_dist:
                         max_min_dist = min_dist
-                        best_idx = idx
-                
+                        best_idx = i
                 if best_idx != -1:
                     selected_indices.append(best_idx)
-            
-            # Convert to point list
             for idx in selected_indices:
                 points.append([int(x_coords[idx]), int(y_coords[idx])])
-        
         return points
-    
+
+    def _select_diverse_points(self, x_coords, y_coords, num_points, min_distance):
+        """
+        Select a diverse set of points ensuring that each selected point is at least
+        min_distance away from the others.
+        """
+        if len(x_coords) <= num_points:
+            return list(range(len(x_coords)))
+        
+        selected_indices = [len(x_coords) - 1]  # Start with the highest confidence point
+        
+        while len(selected_indices) < num_points:
+            max_min_dist = -1
+            best_idx = None
+            for i in range(len(x_coords)):
+                if i in selected_indices:
+                    continue
+                # Calculate minimum distance from i to already selected points
+                dists = [((x_coords[i] - x_coords[j])**2 + (y_coords[i] - y_coords[j])**2) for j in selected_indices]
+                min_dist = min(dists)
+                if min_dist > max_min_dist:
+                    max_min_dist = min_dist
+                    best_idx = i
+            if best_idx is not None and max_min_dist >= min_distance**2:
+                selected_indices.append(best_idx)
+            else:
+                break
+        return selected_indices
+
     def _get_negative_points(self, binary_mask, prob_map, num_points):
-        """Generate strategic negative points"""
-        import numpy as np
-        from scipy.ndimage import binary_dilation
-        
-        # Dilate the mask to find nearby background
+        """Generate strategic negative points near the tumor boundary."""
         dilated = binary_dilation(binary_mask, iterations=3)
-        
-        # Convert to boolean explicitly before using bitwise NOT
         dilated_bool = np.bool_(dilated)
         binary_mask_bool = np.bool_(binary_mask)
-        
-        # Now use bitwise NOT on boolean arrays
         near_boundary = dilated_bool & ~binary_mask_bool
-        
-        # Find regions with low probability that are near boundary
         background_regions = (prob_map < 0.3) & near_boundary
         
         points = []
         if np.sum(background_regions) > 0:
-            # Get coordinates of background regions
             bg_y, bg_x = np.where(background_regions)
-            
-            # Select points
             num_to_select = min(num_points, len(bg_y))
             if num_to_select > 0:
                 indices = np.random.choice(len(bg_y), num_to_select, replace=False)
                 for idx in indices:
                     points.append([int(bg_x[idx]), int(bg_y[idx])])
         
-        # If not enough points, add some far from tumor
         if len(points) < num_points:
-            # Find regions far from tumor - use boolean type explicitly
             far_bg_mask = ~dilated_bool
             if np.sum(far_bg_mask) > 0:
                 far_y, far_x = np.where(far_bg_mask)
@@ -900,8 +897,8 @@ class EnhancedPromptGenerator:
                     indices = np.random.choice(len(far_y), num_to_select, replace=False)
                     for idx in indices:
                         points.append([int(far_x[idx]), int(far_y[idx])])
-        
         return points
+
     
 
 
