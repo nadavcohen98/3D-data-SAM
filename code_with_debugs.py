@@ -2284,9 +2284,13 @@ def train_epoch(model, train_loader, optimizer, criterion, device, epoch, schedu
             if batch_idx % 40 == 0:
                 with torch.no_grad():
                     slice_indices = [38, 77, 124]
-                    unet_out = model.unet3d(images, use_full_decoder=True)[0]
+                    # הפעל את UNet3D וקבל את כל הפלטים הנדרשים
+                    unet_out, mid_features, sam_embeddings, metadata = model.unet3d(images, use_full_decoder=True)
+                    # הפעל את SAM2 עם ההקשר התלת-ממדי, תוך שימוש ב־mid_features וב־metadata
                     sam2_out = model.process_volume_with_3d_context(images, mid_features, metadata, device)
+                    # קריאה לפונקציה המראה השוואה טקסטואלית (לפי הקוד שהגדרנו)
                     model.visualize_slice_comparison(images, unet_out, sam2_out, masks, slice_indices)
+
                 
             # Visualize first batch
             if batch_idx == 0 and epoch % 5 == 0:
