@@ -1816,44 +1816,114 @@ def calculate_region_dice(pred, gt):
 
 def visualize_slice_comparison(model, images, masks, outputs, depth_dim_idx=2):
     """
-    Compare model outputs to ground truth on specific slices.
+    Compare UNet3D, SAM2, and combined outputs to ground truth on specific slices.
     """
     batch_idx = 0  # Use first batch item
     slice_indices = [38, 77, 124]  # Fixed slice indices
     
-    print("\n===== Slice-by-Slice Comparison (Dice scores) =====")
+    print("\n===== UNet3D vs SAM2 vs Combined Comparison =====")
+    
+    # Store original model configuration
+    original_config = {
+        'unet': model.enable_unet_decoder,
+        'sam2': model.enable_sam2
+    }
+    
+    # Get combined model dice scores (from current outputs)
+    combined_dice = {}
     
     for slice_idx in slice_indices:
-        # First check if the slice is within bounds
-        if depth_dim_idx >= len(images.shape) - 1 or slice_idx >= images.shape[depth_dim_idx + 1]:
-            print(f"Slice {slice_idx} is out of bounds for dimension {depth_dim_idx}")
+        if slice_idx >= masks.shape[depth_dim_idx + 1]:
             continue
-        
-        try:
-            # Extract slices safely - preserve all dimensions by using select instead of squeeze
+            
+        # Get current slice from combined output and mask
+        if depth_dim_idx == 0:
+            mask_slice = masks[batch_idx, :, slice_idx]
+            output_slice = outputs[batch_idx, :, slice_idx]
+        elif depth_dim_idx == 1:
+            mask_slice = masks[batch_idx, :, :, slice_idx]
+            output_slice = outputs[batch_idx, :, :, slice_idx]
+        else:  # depth_dim_idx == 2
+            mask_slice = masks[batch_idx, :, :, :, slice_idx]
+            output_slice = outputs[batch_idx, :, :, :, slice_idx]
+            
+        # Calculate dice for combined model
+        combined_dice[slice_idx] = calculate_region_dice(output_slice, mask_slice)
+    
+    # Try running UNet3D-only and SAM2-only if possible
+    unet_dice = {}
+    sam2_dice = {}
+    
+    try:
+        # Run UNet3D-only
+        model.set_mode(enable_unet_decoder=True, enable_sam2=False)
+        with torch.no_grad():
+            unet_output = model(images)
+            
+        # Calculate UNet3D dice for each slice
+        for slice_idx in slice_indices:
+            if slice_idx >= masks.shape[depth_dim_idx + 1]:
+                continue
+                
             if depth_dim_idx == 0:
-                mask_slice = masks[batch_idx:batch_idx+1, :, slice_idx:slice_idx+1]
-                output_slice = outputs[batch_idx:batch_idx+1, :, slice_idx:slice_idx+1]
+                mask_slice = masks[batch_idx, :, slice_idx]
+                unet_slice = unet_output[batch_idx, :, slice_idx]
             elif depth_dim_idx == 1:
-                mask_slice = masks[batch_idx:batch_idx+1, :, :, slice_idx:slice_idx+1]
-                output_slice = outputs[batch_idx:batch_idx+1, :, :, slice_idx:slice_idx+1]
+                mask_slice = masks[batch_idx, :, :, slice_idx]
+                unet_slice = unet_output[batch_idx, :, :, slice_idx]
             else:  # depth_dim_idx == 2
-                mask_slice = masks[batch_idx:batch_idx+1, :, :, :, slice_idx:slice_idx+1]
-                output_slice = outputs[batch_idx:batch_idx+1, :, :, :, slice_idx:slice_idx+1]
+                mask_slice = masks[batch_idx, :, :, :, slice_idx]
+                unet_slice = unet_output[batch_idx, :, :, :, slice_idx]
+                
+            unet_dice[slice_idx] = calculate_region_dice(unet_slice, mask_slice)
+    except Exception as e:
+        print(f"Error calculating UNet3D dice: {e}")
+        
+    try:
+        # Run SAM2-only
+        model.set_mode(enable_unet_decoder=False, enable_sam2=True)
+        with torch.no_grad():
+            sam2_output = model(images)
             
-            # Convert to 2D safely without losing dimensions
-            mask_2d = torch.select(mask_slice, depth_dim_idx+1, 0)  # Select rather than squeeze
-            output_2d = torch.select(output_slice, depth_dim_idx+1, 0)
+        # Calculate SAM2 dice for each slice
+        for slice_idx in slice_indices:
+            if slice_idx >= masks.shape[depth_dim_idx + 1]:
+                continue
+                
+            if depth_dim_idx == 0:
+                mask_slice = masks[batch_idx, :, slice_idx]
+                sam2_slice = sam2_output[batch_idx, :, slice_idx]
+            elif depth_dim_idx == 1:
+                mask_slice = masks[batch_idx, :, :, slice_idx]
+                sam2_slice = sam2_output[batch_idx, :, :, slice_idx]
+            else:  # depth_dim_idx == 2
+                mask_slice = masks[batch_idx, :, :, :, slice_idx]
+                sam2_slice = sam2_output[batch_idx, :, :, :, slice_idx]
+                
+            sam2_dice[slice_idx] = calculate_region_dice(sam2_slice, mask_slice)
+    except Exception as e:
+        print(f"Error calculating SAM2 dice: {e}")
+    
+    # Restore original model configuration
+    model.set_mode(enable_unet_decoder=original_config['unet'], enable_sam2=original_config['sam2'])
+    
+    # Print the results in a nice format
+    for slice_idx in slice_indices:
+        if slice_idx not in combined_dice:
+            continue
             
-            # Calculate Dice scores
-            dice_scores = calculate_region_dice(output_2d, mask_2d)
+        print(f"\nSlice {slice_idx}:")
+        if slice_idx in unet_dice:
+            print(f"  UNet3D:   WT={unet_dice[slice_idx]['WT']:.1f}%, TC={unet_dice[slice_idx]['TC']:.1f}%, ET={unet_dice[slice_idx]['ET']:.1f}%")
+        else:
+            print(f"  UNet3D:   N/A")
             
-            # Print results
-            print(f"\nSlice {slice_idx}:")
-            print(f"  Model output: WT={dice_scores['WT']:.1f}%, TC={dice_scores['TC']:.1f}%, ET={dice_scores['ET']:.1f}%")
+        if slice_idx in sam2_dice:
+            print(f"  SAM2:     WT={sam2_dice[slice_idx]['WT']:.1f}%, TC={sam2_dice[slice_idx]['TC']:.1f}%, ET={sam2_dice[slice_idx]['ET']:.1f}%")
+        else:
+            print(f"  SAM2:     N/A")
             
-        except Exception as e:
-            print(f"Error processing slice {slice_idx}: {str(e)}")
+        print(f"  Combined: WT={combined_dice[slice_idx]['WT']:.1f}%, TC={combined_dice[slice_idx]['TC']:.1f}%, ET={combined_dice[slice_idx]['ET']:.1f}%")
     
     print("===============================================")
 
