@@ -135,15 +135,17 @@ class FlexibleUNet3D(nn.Module):
         self.enc2 = EncoderBlock3D(base_channels * 2, base_channels * 4)
         self.enc3 = EncoderBlock3D(base_channels * 4, base_channels * 8)
         self.enc4 = EncoderBlock3D(base_channels * 8, base_channels * 8)  # Keep channel count at 128
+        self.enc5 = EncoderBlock3D(base_channels * 8, base_channels * 16)
         
         # Decoder pathway with skip connections
         # Early decoder stages (to reach 64x64 resolution)
-        self.dec1 = DecoderBlock3D(base_channels * 16, base_channels * 4, trilinear=trilinear)  # 8 + 8 = 16
-        self.dec2 = DecoderBlock3D(base_channels * 8, base_channels * 2, trilinear=trilinear)   # 4 + 4 = 8
+        self.dec1 = DecoderBlock3D(base_channels * 24, base_channels * 8, trilinear=trilinear)  # 16 + 8 = 24
+        self.dec2 = DecoderBlock3D(base_channels * 16, base_channels * 4, trilinear=trilinear)  # 8 + 8 = 16
+        self.dec3 = DecoderBlock3D(base_channels * 8, base_channels * 2, trilinear=trilinear)   # 4 + 4 = 8
         
         # Late decoder stages (after 64x64 resolution)
-        self.dec3 = DecoderBlock3D(base_channels * 4, base_channels, trilinear=trilinear)       # 2 + 2 = 4
-        self.dec4 = DecoderBlock3D(base_channels * 2, base_channels, trilinear=trilinear)       # 1 + 1 = 2
+        self.dec4 = DecoderBlock3D(base_channels * 4, base_channels, trilinear=trilinear)       # 2 + 2 = 4
+        self.dec5 = DecoderBlock3D(base_channels * 2, base_channels, trilinear=trilinear)       # 1 + 1 = 2
         
         # Final output layer
         self.output_conv = nn.Conv3d(base_channels, n_classes, kernel_size=1)
@@ -202,10 +204,17 @@ class FlexibleUNet3D(nn.Module):
         x3 = self.enc2(x2)
         x4 = self.enc3(x3)
         x5 = self.enc4(x4)
+        x6 = self.enc5(x5)
         
         # Early decoder stages
-        dec_out1 = self.dec1(x5, x4)
-        dec_out2 = self.dec2(dec_out1, x3)
+        dec_out1 = self.dec1(x6, x5)
+        dec_out1 = self.dropout(dec_out1)
+        
+        dec_out2 = self.dec2(x5, x4)
+        dec_out2 = self.dropout(dec_out2)
+        
+        dec_out3 = self.dec3(dec_out2, x3)
+        dec_out3 = self.dropout(dec_out3)
         
         # Generate SAM2 embeddings
         sam_embeddings = self.sam_projection(dec_out2)
@@ -227,21 +236,18 @@ class FlexibleUNet3D(nn.Module):
             return None, dec_out2, sam_embeddings, metadata
         
         # Late decoder stages
-        dec_out3 = self.dec3(dec_out2, x2)
-        dec_out4 = self.dec4(dec_out3, x1)
-
-        dec_out1 = self.dec1(x5, x4)
-        dec_out1 = self.dropout(dec_out1)
-        dec_out2 = self.dec2(dec_out1, x3)
-        dec_out2 = self.dropout(dec_out2)
+        dec_out4 = self.dec4(dec_out3, x2)
+        dec_out4 = self.dropout(dec_out4)
         
+        dec_out5 = self.dec5(dec_out4, x1)
+
         # Final convolution
-        output = self.output_conv(dec_out4)
+        output = self.output_conv(dec_out5)
         
         # Apply sigmoid
         segmentation = torch.sigmoid(output)
         
-        return segmentation, dec_out2, sam_embeddings, metadata
+        return segmentation, dec_out3, sam_embeddings, metadata
 
 
 class MultiPointPromptGenerator:
