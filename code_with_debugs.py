@@ -1197,18 +1197,12 @@ class AutoSAM2(nn.Module):
             
             # Process through bridge network to get enhanced features
             enhanced_features = self.unet_sam_bridge(slice_features)
-            
-            # DEBUG PRINTS
-            print(f"DEBUG: Slice {slice_idx}, image dims: {h}x{w}")
-            print(f"DEBUG: Enhanced features shape: {enhanced_features.shape}")
+        
             
             # Generate point prompts
             points, labels = self.prompt_generator.generate_prompts(
                 enhanced_features, slice_idx, h, w
             )
-            
-            # DEBUG: Print the actual method signature to compare
-            print(f"DEBUG: Available methods: {dir(self.prompt_generator)}")
             
             box = self.prompt_generator.generate_optimal_box(enhanced_features, slice_idx, h, w)
 
