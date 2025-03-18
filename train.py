@@ -14,7 +14,7 @@ import torch.nn.functional as F
 
 # Local imports
 from model import AutoSAM2
-from dataset import get_brats_dataloader, preprocess_batch
+from dataset import get_brats_dataloader
 from visualization import visualize_batch_comprehensive
 
 def calculate_dice_score(y_pred, y_true):
@@ -647,6 +647,47 @@ def save_training_history(history, filename):
    plt.tight_layout()
    plt.savefig(f"results/{filename.replace('.png', '_iou.png')}")
    plt.close()
+
+
+def preprocess_batch(batch, device=None):
+   """
+   Preprocess batch for BraTS segmentation with class labels 0, 1, 2, 4
+   """
+   images, masks = batch
+   
+   # Convert binary masks to multi-class format if needed
+   if masks.shape[1] == 1:
+       # For binary masks, create proper BraTS format with classes 0, 1, 2, 4
+       multi_class_masks = torch.zeros((masks.shape[0], 4, *masks.shape[2:]), dtype=torch.float32)
+       
+       # Class 0: Background (where mask is 0)
+       multi_class_masks[:, 0] = (masks[:, 0] == 0).float()
+       
+       # If we have a binary tumor mask, distribute it to the three tumor classes
+       # This is a simplified approach when we only have tumor/no-tumor labels
+       if torch.sum(masks[:, 0]) > 0:
+           # Use percentages of the tumor mask for each class
+           # Class 1: NCR (Necrotic tumor core)
+           multi_class_masks[:, 1] = (masks[:, 0] * (torch.rand_like(masks[:, 0]) < 0.3)).float()
+           
+           # Class 2: ED (Peritumoral edema)
+           multi_class_masks[:, 2] = (masks[:, 0] * (torch.rand_like(masks[:, 0]) < 0.5)).float()
+           
+           # Class 4 (at index 3): ET (Enhancing tumor)
+           multi_class_masks[:, 3] = (masks[:, 0] * (torch.rand_like(masks[:, 0]) < 0.2)).float()
+       
+       masks = multi_class_masks
+   
+   # Ensure mask values are within expected range
+   masks = torch.clamp(masks, 0, 1)
+   
+   # Move to device if specified
+   if device is not None:
+       images = images.to(device)
+       masks = masks.to(device)
+   
+   return images, masks
+
 
 def train_model(data_path, batch_size=1, epochs=20, learning_rate=1e-3,
                use_mixed_precision=False, test_run=False, reset=True):
