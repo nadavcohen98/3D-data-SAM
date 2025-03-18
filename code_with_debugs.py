@@ -1340,39 +1340,13 @@ class AutoSAM2(nn.Module):
             # Set image in SAM2
             self.sam2.set_image(rgb_image)
             
-            # Get context mask from neighboring slices
-            context_mask = None
-            
-            # Process neighbor masks
-            if len(context_indices) > 1:
-                neighbor_masks = []
-                for idx in context_indices:
-                    if idx in previous_masks and idx != center_idx:
-                        neighbor_masks.append(previous_masks[idx])
-                
-                if neighbor_masks:
-                    # Create context mask by averaging neighbor masks
-                    avg_mask = np.stack(neighbor_masks).mean(axis=0) > 0.5
-                    # SAM2 requires mask to have shape [height, width]
-                    context_mask = avg_mask
-            
-            # Predict with SAM2
-            if context_mask is not None:
-                masks, scores, _ = self.sam2.predict(
-                    point_coords=points,
-                    point_labels=labels,
-                    box=box,
-                    mask_input=context_mask,
-                    multimask_output=True
-                )
-            else:
-                # No context available
-                masks, scores, _ = self.sam2.predict(
-                    point_coords=points,
-                    point_labels=labels,
-                    box=box,
-                    multimask_output=True
-                )
+            # Try a simpler approach - just pass point and box prompts without mask input
+            masks, scores, _ = self.sam2.predict(
+                point_coords=points,
+                point_labels=labels,
+                box=box,
+                multimask_output=True
+            )
             
             # Process results
             if len(masks) > 0:
