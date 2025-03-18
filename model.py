@@ -151,10 +151,6 @@ class FlexibleUNet3D(nn.Module):
         # Projection for SAM2 embeddings (from mid-decoder features)
         self.sam_projection = nn.Conv3d(base_channels * 2, 256, kernel_size=1)
 
-        self.aux_output1 = nn.Conv3d(base_channels * 4, n_classes, kernel_size=1)
-        self.aux_output2 = nn.Conv3d(base_channels * 2, n_classes, kernel_size=1)
-
-
         self.dropout = nn.Dropout3d(0.15) 
     
     def forward(self, x, use_full_decoder=True):
@@ -245,12 +241,7 @@ class FlexibleUNet3D(nn.Module):
         # Apply sigmoid
         segmentation = torch.sigmoid(output)
         
-        if self.training:
-            aux_out1 = self.aux_output1(dec_out1)
-            aux_out2 = self.aux_output2(dec_out2)
-            return segmentation, dec_out2, sam_embeddings, {"dummy_metadata": None}, (aux_out1, aux_out2)
-        else:
-            return segmentation, dec_out2, sam_embeddings, {"dummy_metadata": None}
+        return segmentation, dec_out2, sam_embeddings, metadata
 
 
 class MultiPointPromptGenerator:
