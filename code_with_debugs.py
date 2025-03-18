@@ -1274,21 +1274,26 @@ class AutoSAM2(nn.Module):
         return slice_data
     
     def combine_results_adaptively(self, unet_output, sam2_slices, depth_dim_idx, blend_weight=0.7):
-        """Combine UNet output with SAM2 results without printing detailed comparisons."""
+        """
+        Combine UNet output with SAM2 results.
+        For each slice, if SAM2 produced a valid mask, blend it with UNet output using the blend_weight.
+        Otherwise, leave the UNet output unchanged.
+        """
         combined = unet_output.clone()
-        
         for slice_idx, mask in sam2_slices.items():
             if mask is not None:
                 if depth_dim_idx == 0:
                     unet_slice = combined[:, :, slice_idx]
-                    combined[:, :, slice_idx] = blend_weight * unet_slice + (1 - blend_weight) * mask
+                    blended = blend_weight * unet_slice + (1 - blend_weight) * mask
+                    combined[:, :, slice_idx] = blended
                 elif depth_dim_idx == 1:
                     unet_slice = combined[:, :, :, slice_idx]
-                    combined[:, :, :, slice_idx] = blend_weight * unet_slice + (1 - blend_weight) * mask
-                else:  # depth_dim_idx == 2
+                    blended = blend_weight * unet_slice + (1 - blend_weight) * mask
+                    combined[:, :, :, slice_idx] = blended
+                else:
                     unet_slice = combined[:, :, :, :, slice_idx]
-                    combined[:, :, :, :, slice_idx] = blend_weight * unet_slice + (1 - blend_weight) * mask
-    
+                    blended = blend_weight * unet_slice + (1 - blend_weight) * mask
+                    combined[:, :, :, :, slice_idx] = blended
         return combined
 
     
