@@ -741,7 +741,7 @@ def train_model(data_path, batch_size=1, epochs=20, learning_rate=1e-3,
     
     # Define loss criterion - use our new BraTS-specific loss
     criterion = BraTSCombinedLoss(dice_weight=0.75, bce_weight=0.15, focal_weight=0.1,
-                                region_weights={'ET': 1.5, 'WT': 1.0, 'TC': 1.2})
+                                region_weights={'ET': 1.6, 'WT': 1.0, 'TC': 1.3})
     
     # Define optimizer
     optimizer = optim.AdamW(
