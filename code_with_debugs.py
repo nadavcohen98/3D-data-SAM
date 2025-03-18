@@ -2393,7 +2393,7 @@ def train_epoch(model, train_loader, optimizer, criterion, device, epoch, schedu
 
             if batch_idx % 40 == 0:
                 slice_indices = [38, 77, 124]
-                model.visualize_slice_comparison(input_vol, model_output, ground_truth, slice_indices)
+                model.visualize_slice_comparison(images, model_output, ground_truth, slice_indices)
                 
             # Visualize first batch
             if batch_idx == 0 and epoch % 5 == 0:
