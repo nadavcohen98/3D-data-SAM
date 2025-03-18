@@ -603,14 +603,9 @@ class MRItoRGBMapper(nn.Module):
         return enhanced_rgb
 
 class UNet3DtoSAM2Bridge(nn.Module):
-    """
-    Enhanced bridge that transforms UNet3D features to SAM2-compatible prompts
-    with dynamic channel attention and better adaptation capabilities.
-    """
     def __init__(self, input_channels=32, output_channels=256):
-        super().__init__()
-        
-        # Channel attention mechanism to focus on relevant features
+        super(UNet3DtoSAM2Bridge, self).__init__()
+        # Channel Attention module to emphasize important feature channels
         self.channel_attention = nn.Sequential(
             nn.AdaptiveAvgPool2d(1),
             nn.Conv2d(input_channels, input_channels // 4, kernel_size=1),
@@ -618,82 +613,57 @@ class UNet3DtoSAM2Bridge(nn.Module):
             nn.Conv2d(input_channels // 4, input_channels, kernel_size=1),
             nn.Sigmoid()
         )
-        
-        # Spatial attention to focus on important regions
+        # Spatial Attention module to focus on relevant regions
         self.spatial_attention = nn.Sequential(
             nn.Conv2d(input_channels, 1, kernel_size=7, padding=3),
             nn.BatchNorm2d(1),
             nn.Sigmoid()
         )
-        
-        # Main transformation path
-        self.transformer = nn.Sequential(
-            # Initial feature processing with residual connection
-            nn.Conv2d(input_channels, 128, kernel_size=3, padding=1),
-            nn.GroupNorm(16, 128),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(128, 128, kernel_size=3, padding=1),
-            nn.GroupNorm(16, 128),
-            nn.ReLU(inplace=True),
-            
-            # SAM2-specific formatting
-            nn.Conv2d(128, output_channels, kernel_size=1),
-            nn.GroupNorm(32, output_channels)
-        )
-        
-        # Learnable importance weighting with adaptive scaling
+        # Shortcut branch to match dimensions for residual connection
+        self.shortcut = nn.Conv2d(input_channels, 128, kernel_size=1)
+        # Transformer branch: two convolutional layers with GroupNorm and ReLU
+        self.conv1 = nn.Conv2d(input_channels, 128, kernel_size=3, padding=1)
+        self.norm1 = nn.GroupNorm(16, 128)
+        self.conv2 = nn.Conv2d(128, 128, kernel_size=3, padding=1)
+        self.norm2 = nn.GroupNorm(16, 128)
+        self.relu = nn.ReLU(inplace=True)
+        # Final layer to convert features to SAM2 expected dimensions
+        self.final_conv = nn.Conv2d(128, output_channels, kernel_size=1)
+        self.final_norm = nn.GroupNorm(32, output_channels)
+        # Learnable parameters for dynamic scaling of the output
         self.importance = nn.Parameter(torch.tensor(0.5))
         self.adaptive_scale = nn.Parameter(torch.tensor(1.0))
-        
-        # Statistics tracking with proper PyTorch buffers
-        self.register_buffer('running_mean', torch.zeros(1))
-        self.register_buffer('update_count', torch.zeros(1))
-        
-        # Initialize with better scaling
-        nn.init.xavier_normal_(self.transformer[0].weight)
-        nn.init.xavier_normal_(self.transformer[3].weight)
-        nn.init.xavier_normal_(self.transformer[6].weight)
-    
+
     def forward(self, x):
-        # Apply channel attention to focus on important features
-        channel_weights = self.channel_attention(x)
-        x_channel = x * channel_weights
+        # Apply channel attention and weight the input accordingly
+        att_channels = self.channel_attention(x)
+        x_ca = x * att_channels
+
+        # Apply spatial attention on the channel-attended features
+        att_spatial = self.spatial_attention(x_ca)
+        x_sa = x_ca * att_spatial
+
+        # Transformer branch: process features through two convolution layers
+        out = self.conv1(x_sa)
+        out = self.norm1(out)
+        out = self.relu(out)
+        out = self.conv2(out)
+        out = self.norm2(out)
         
-        # Apply spatial attention to focus on relevant regions
-        spatial_weights = self.spatial_attention(x_channel)
-        x_attended = x_channel * spatial_weights
-        
-        # Residual connection - add original features
-        x_combined = x_attended + x
-        
-        # Transform attended features
-        transformed = self.transformer(x_combined)
-        
-        # Calculate dynamic importance factor
-        importance_factor = torch.sigmoid(self.importance) * (1.0 + torch.tanh(self.adaptive_scale))
-        
-        # Apply importance weighting
-        output = transformed * importance_factor
-        
-        # Track statistics during training
-        if self.training:
-            with torch.no_grad():
-                curr_mean = output.mean().item()
-                self.update_count += 1
-                self.running_mean = self.running_mean * 0.9 + curr_mean * 0.1
-                
-                # Log every 2000 batches or when importance changes significantly
-                if self.update_count % 2000 == 0:
-                    imp_val = torch.sigmoid(self.importance).item()
-                    scale_val = torch.tanh(self.adaptive_scale).item()
-                    
-                    print(f"Bridge Stats - Input mean: {x.mean().item():.4f}, "
-                          f"Output mean: {curr_mean:.4f}, "
-                          f"Running mean: {self.running_mean.item():.4f}, "
-                          f"Importance: {imp_val:.4f}, "
-                          f"Scale: {1.0 + scale_val:.4f}")
-        
-        return output
+        # Compute shortcut projection for residual connection
+        shortcut = self.shortcut(x_sa)
+        out = self.relu(out + shortcut)
+
+        # Final transformation to match SAM2 input dimensions
+        out = self.final_conv(out)
+        out = self.final_norm(out)
+
+        # Apply learnable scaling (importance) with adaptive scaling factor
+        scale_factor = torch.sigmoid(self.importance) * (1.0 + torch.tanh(self.adaptive_scale))
+        out = out * scale_factor
+
+        return out
+
         
 class EnhancedPromptGenerator:
     """
