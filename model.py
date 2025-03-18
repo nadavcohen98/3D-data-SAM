@@ -237,7 +237,7 @@ class FlexibleUNet3D(nn.Module):
         dec_out4 = self.dec5(dec_out3, x1)
 
         # Final convolution
-        output = self.output_conv(dec_out5)
+        output = self.output_conv(dec_out4)
         
         # Apply sigmoid
         segmentation = torch.sigmoid(output)
