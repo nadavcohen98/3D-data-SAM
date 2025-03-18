@@ -1417,38 +1417,6 @@ class AutoSAM2(nn.Module):
                 # Compute Dice score between models
                 models_dice = 2 * models_overlap / (sam2_pixels + unet_pixels) if (sam2_pixels + unet_pixels) > 0 else 0
                 
-                # Save detailed comparison for a few slices when triggered
-                if save_detailed and (
-                len(self.slice_comparison['detailed_slices']) < 10 and  # Allow more slices
-                (slice_idx % 15 == 0)):  # Sample every 15th slice
-                    self.slice_comparison['detailed_slices'].append({
-                        'slice_idx': slice_idx,
-                        'sam2_tumor_pixels': sam2_pixels,
-                        'unet_tumor_pixels': unet_pixels,
-                        'models_dice': models_dice
-                    })
-                    
-                    # Print this slice's comparison
-                    print(f"Slice {slice_idx}:")
-                    print(f"  SAM2 tumor size: {sam2_pixels} pixels")
-                    print(f"  UNet tumor size: {unet_pixels} pixels")
-                    print(f"  Overlap: {models_overlap} pixels")
-                    print(f"  Dice score: {models_dice:.4f}")
-                    
-                    # Add interpretation
-                    if models_dice > 0.7:
-                        print("  Interpretation: High agreement between SAM2 and UNet3D")
-                    elif models_dice > 0.4:
-                        print("  Interpretation: Moderate agreement")
-                    else:
-                        print("  Interpretation: Low agreement - the models see different things")
-                    
-                    # Print which is larger
-                    if sam2_pixels > unet_pixels:
-                        print(f"  SAM2 finds {(sam2_pixels/unet_pixels - 1)*100:.1f}% more tumor than UNet3D")
-                    elif unet_pixels > sam2_pixels:
-                        print(f"  UNet3D finds {(unet_pixels/sam2_pixels - 1)*100:.1f}% more tumor than SAM2")
-                    print()
                 
                 # Apply blending
                 if depth_dim_idx == 0:
