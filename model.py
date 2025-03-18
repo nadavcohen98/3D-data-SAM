@@ -1,16 +1,17 @@
+# Standard library imports
+import os
+import time
+import gc
+import logging
+from collections import defaultdict
+
+# External libraries
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
-import time
-import gc
-import logging
-import os
-from collections import defaultdict
-from scipy.ndimage import zoom, binary_erosion, binary_dilation, label, distance_transform_edt
 import matplotlib.pyplot as plt
-
-plt.ion()  # enable interactive mode
+from scipy.ndimage import zoom, binary_erosion, binary_dilation, label, distance_transform_edt
 
 # Configure logging
 logging.basicConfig(
