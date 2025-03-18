@@ -670,7 +670,7 @@ from scipy.ndimage import zoom, binary_dilation, distance_transform_edt, label
 
 class EnhancedPromptGenerator:
     def __init__(self, 
-                 num_positive_points=7,  # Increased from 5 for better coverage
+                 num_positive_points=10,  # Increased from 5 for better coverage
                  num_negative_points=3,  
                  edge_detection=True,    
                  use_confidence=True,    
@@ -705,7 +705,7 @@ class EnhancedPromptGenerator:
                 tumor_prob = zoom(tumor_prob, (height / curr_h, width / curr_w), order=1)
             
             # Create binary mask
-            binary_mask = tumor_prob > 0.3
+            binary_mask = tumor_prob > 0.4
             prob_map = tumor_prob
         else:
             binary_mask = binary_mask_or_probability_maps
@@ -754,7 +754,7 @@ class EnhancedPromptGenerator:
                 0.3 * torch.sigmoid(probability_maps[0, 1]) +  
                 0.3 * torch.sigmoid(probability_maps[0, 2]) +  
                 0.4 * torch.sigmoid(probability_maps[0, 3])
-            ).cpu().detach().numpy() * 1.5  # Increase intensity by factor of 1.5
+            ).cpu().detach().numpy() * 2  # Increase intensity by factor of 2
         else:
             tumor_prob = torch.sigmoid(probability_maps[0, min(1, probability_maps.shape[1]-1)]).cpu().detach().numpy() * 1.5
 
@@ -762,7 +762,7 @@ class EnhancedPromptGenerator:
         if tumor_prob.shape != (height, width):
             tumor_prob = zoom(tumor_prob, (height / tumor_prob.shape[0], width / tumor_prob.shape[1]), order=1)
         
-        binary_mask = tumor_prob > 0.5
+        binary_mask = tumor_prob > 0.6
         
         # Initialize lists for foreground and background points
         foreground_points = []
