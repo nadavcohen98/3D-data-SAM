@@ -1277,7 +1277,6 @@ class AutoSAM2(nn.Module):
         """Combine UNet output with SAM2 results without printing detailed comparisons."""
         combined = unet_output.clone()
         
-        # Iterate over slices with available SAM2 output and blend them
         for slice_idx, mask in sam2_slices.items():
             if mask is not None:
                 if depth_dim_idx == 0:
@@ -1289,7 +1288,7 @@ class AutoSAM2(nn.Module):
                 else:  # depth_dim_idx == 2
                     unet_slice = combined[:, :, :, :, slice_idx]
                     combined[:, :, :, :, slice_idx] = blend_weight * unet_slice + (1 - blend_weight) * mask
-                    
+    
         return combined
 
     
@@ -1451,20 +1450,17 @@ class AutoSAM2(nn.Module):
             return "invalid_config"
 
     def visualize_slice_comparison(self, input_vol, model_output, ground_truth, slice_indices, save_dir="results"):
-        # Move tensors to CPU to free GPU memory
         input_vol = input_vol.detach().cpu()
         model_output = model_output.detach().cpu()
         ground_truth = ground_truth.detach().cpu()
         
-
-        os.makedirs(save_dir, exist_ok=True)
-        
+        import matplotlib.pyplot as plt
+        import numpy as np
+    
         b = 0  # visualize the first item in the batch
         for idx in slice_indices:
-            # Extract the original slice from channel 0
             original_slice = input_vol[b, 0, idx].numpy()
-            
-            # Ground truth: take channels 1,2,3 and create an RGB composite
+    
             gt = ground_truth[b, 1:, idx].numpy()  # shape: [num_classes, H, W]
             gt_rgb = np.zeros((gt.shape[1], gt.shape[2], 3))
             if gt.shape[0] >= 1:
@@ -1473,8 +1469,7 @@ class AutoSAM2(nn.Module):
                 gt_rgb[:, :, 1] = (gt[1] > 0.5).astype(np.float32)  # Green for class 2
             if gt.shape[0] >= 3:
                 gt_rgb[:, :, 0] = (gt[2] > 0.5).astype(np.float32)  # Red for class 3
-            
-            # Model prediction: take channels 1,2,3 similarly
+    
             pred = model_output[b, 1:, idx].numpy()
             pred_rgb = np.zeros((pred.shape[1], pred.shape[2], 3))
             if pred.shape[0] >= 1:
@@ -1483,14 +1478,12 @@ class AutoSAM2(nn.Module):
                 pred_rgb[:, :, 1] = (pred[1] > 0.5).astype(np.float32)
             if pred.shape[0] >= 3:
                 pred_rgb[:, :, 0] = (pred[2] > 0.5).astype(np.float32)
-            
-            # Compute Dice score between prediction and ground truth (for tumor region)
+    
             gt_tumor = (np.sum(gt, axis=0) > 0).astype(np.float32)
             pred_tumor = (np.sum(pred, axis=0) > 0).astype(np.float32)
             intersection = np.sum(gt_tumor * pred_tumor)
             dice_score = (2 * intersection) / (np.sum(gt_tumor) + np.sum(pred_tumor) + 1e-5)
-            
-            # Plot original, ground truth, and prediction side by side
+    
             fig, axes = plt.subplots(1, 3, figsize=(12, 4))
             axes[0].imshow(original_slice, cmap='gray')
             axes[0].set_title(f"Original Slice {idx}")
@@ -1508,7 +1501,7 @@ class AutoSAM2(nn.Module):
             
             plt.suptitle(f"Slice {idx} Comparison - Dice: {dice_score:.2f}", fontsize=14)
             plt.tight_layout()
-            plt.savefig(os.path.join(save_dir, f"slice_{idx}_comparison.png"))
+            plt.show()
             plt.close()
 
 
