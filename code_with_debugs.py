@@ -9,6 +9,7 @@ import logging
 import os
 from collections import defaultdict
 from scipy.ndimage import zoom, binary_erosion, binary_dilation, label, distance_transform_edt
+import matplotlib.pyplot as plt
 
 # Configure logging
 logging.basicConfig(
@@ -662,11 +663,6 @@ class UNet3DtoSAM2Bridge(nn.Module):
         out = out * scale_factor
 
         return out
-
-        
-import numpy as np
-import torch
-from scipy.ndimage import zoom, binary_dilation, distance_transform_edt, label
 
 class EnhancedPromptGenerator:
     def __init__(self, 
@@ -1460,9 +1456,7 @@ class AutoSAM2(nn.Module):
         model_output = model_output.detach().cpu()
         ground_truth = ground_truth.detach().cpu()
         
-        import matplotlib.pyplot as plt
-        import numpy as np
-        import os
+
         os.makedirs(save_dir, exist_ok=True)
         
         b = 0  # visualize the first item in the batch
