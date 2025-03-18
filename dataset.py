@@ -1,13 +1,14 @@
+# Standard library imports
 import os
+import random
+
+# External libraries
 import torch
 import numpy as np
 import nibabel as nib
 from torch.utils.data import Dataset, DataLoader
 import torch.nn.functional as F
-import random
 from tqdm import tqdm
-import argparse
-import torch
 
 def preprocess_brats_data(data, normalize=True, clip_percentile=True):
     """
