@@ -1313,10 +1313,6 @@ class AutoSAM2(nn.Module):
         
         self.slice_comparison['batch_count'] += 1
         
-        # For detailed comparison every 20 batches
-        save_detailed = (self.slice_comparison['batch_count'] % 40 == 0)
-        if save_detailed:
-            print("\n===== Detailed SAM2 vs UNet3D Comparison =====")
         
         # Replace or blend slices with SAM2 results
         for slice_idx, mask in sam2_slices.items():
@@ -1789,88 +1785,6 @@ import torch.serialization
 
 torch.serialization.add_safe_globals([np.core.multiarray.scalar])
 
-def calculate_region_dice(pred, gt):
-    """Calculate Dice scores for BraTS tumor regions."""
-    # Apply sigmoid to logits if needed
-    if torch.min(pred) < 0 or torch.max(pred) > 1:
-        pred = torch.sigmoid(pred)
-    
-    # Apply threshold
-    pred_bin = (pred > 0.5).float()
-    
-    # Calculate WT (Whole Tumor) Dice - Classes 1+2+4 (indices 1,2,3)
-    pred_wt = (pred_bin[:, 1:4].sum(dim=1) > 0).float()
-    gt_wt = (gt[:, 1:4].sum(dim=1) > 0).float()
-    
-    wt_dice = 2.0 * (pred_wt * gt_wt).sum() / (pred_wt.sum() + gt_wt.sum() + 1e-5) * 100
-    
-    # Calculate TC (Tumor Core) Dice - Classes 1+4 (indices 1,3)
-    pred_tc = ((pred_bin[:, 1] + pred_bin[:, 3]) > 0).float()
-    gt_tc = ((gt[:, 1] + gt[:, 3]) > 0).float()
-    
-    tc_dice = 2.0 * (pred_tc * gt_tc).sum() / (pred_tc.sum() + gt_tc.sum() + 1e-5) * 100
-    
-    # Calculate ET (Enhancing Tumor) Dice - Class 4 (index 3)
-    pred_et = pred_bin[:, 3]
-    gt_et = gt[:, 3]
-    
-    et_dice = 2.0 * (pred_et * gt_et).sum() / (pred_et.sum() + gt_et.sum() + 1e-5) * 100
-    
-    return {'WT': wt_dice.item(), 'TC': tc_dice.item(), 'ET': et_dice.item()}
-
-def visualize_slice_comparison(model, images, masks, outputs, depth_dim_idx=2):
-    """
-    הצג את הביצועים של UNet3D, SAM2 והמודל המשולב על פרוסות ספציפיות
-    """
-    batch_idx = 0
-    slice_indices = [38, 77, 124]
-    
-    print("\n===== UNet3D vs SAM2 vs Combined =====")
-    
-    for slice_idx in slice_indices:
-        # וודא שהפרוסה בתחום
-        if slice_idx >= masks.shape[depth_dim_idx + 1]:
-            continue
-        
-        print(f"\nSlice {slice_idx}:")
-        
-        # חלץ את המסכה לפרוסה זו
-        if depth_dim_idx == 0:
-            gt_slice = masks[batch_idx, :, slice_idx]
-        elif depth_dim_idx == 1:
-            gt_slice = masks[batch_idx, :, :, slice_idx]
-        else:
-            gt_slice = masks[batch_idx, :, :, :, slice_idx]
-        
-        # הצג UNet Dice אם יש
-        if hasattr(model, 'last_unet_output'):
-            # חלץ את הפרוסה מתוצאות UNet
-            if depth_dim_idx == 0:
-                unet_slice = model.last_unet_output[batch_idx, :, slice_idx]
-            elif depth_dim_idx == 1:
-                unet_slice = model.last_unet_output[batch_idx, :, :, slice_idx]
-            else:
-                unet_slice = model.last_unet_output[batch_idx, :, :, :, slice_idx]
-            
-            unet_dice = calculate_region_dice(unet_slice, gt_slice)
-            print(f"  UNet3D: WT={unet_dice['WT']:.1f}%, TC={unet_dice['TC']:.1f}%, ET={unet_dice['ET']:.1f}%")
-        
-        # הצג SAM2 Dice אם קיים לפרוסה זו
-        if hasattr(model, 'last_sam2_slices') and slice_idx in model.last_sam2_slices:
-            sam2_slice = model.last_sam2_slices[slice_idx]
-            sam2_dice = calculate_region_dice(sam2_slice, gt_slice)
-            print(f"  SAM2:   WT={sam2_dice['WT']:.1f}%, TC={sam2_dice['TC']:.1f}%, ET={sam2_dice['ET']:.1f}%")
-        
-        # הצג Combined Dice
-        if depth_dim_idx == 0:
-            combined_slice = outputs[batch_idx, :, slice_idx]
-        elif depth_dim_idx == 1:
-            combined_slice = outputs[batch_idx, :, :, slice_idx]
-        else:
-            combined_slice = outputs[batch_idx, :, :, :, slice_idx]
-        
-        combined_dice = calculate_region_dice(combined_slice, gt_slice)
-        print(f"  Combined: WT={combined_dice['WT']:.1f}%, TC={combined_dice['TC']:.1f}%, ET={combined_dice['ET']:.1f}%")
 
 def calculate_dice_score(y_pred, y_true):
     """
@@ -2320,9 +2234,6 @@ def train_epoch(model, train_loader, optimizer, criterion, device, epoch, schedu
                 'ET': f"{dice_metrics.get('ET_mean', 0.0):.1f}%"
             })
 
-            # Visualize first batch
-            if batch_idx % 40 == 0:
-                visualize_slice_comparison(model, images, masks, outputs, depth_dim_idx=2)
             
             # Update total loss
             total_loss += loss.item()
