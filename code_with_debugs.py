@@ -1318,57 +1318,78 @@ class AutoSAM2(nn.Module):
                                    features, depth_dim_idx, previous_masks, device):
         """Process a slice with context from neighboring slices"""
         try:
-            # Extract the center slice
+            # Extract and process the center slice (same as before)
             orig_slice = self._extract_slice(input_vol, center_idx, depth_dim_idx)
             rgb_tensor = self.mri_to_rgb(orig_slice)
             rgb_image = rgb_tensor[0].permute(1, 2, 0).detach().cpu().numpy()
             h, w = rgb_image.shape[:2]
             
-            # Extract features for center slice
-            slice_features = self.slice_processor.extract_slice(
-                features, center_idx // 4, depth_dim_idx
-            )
-            
-            # Get enhanced features
+            slice_features = self.slice_processor.extract_slice(features, center_idx // 4, depth_dim_idx)
             enhanced_features = self.unet_sam_bridge(slice_features)
-            
-            # Generate prompts for the center slice
-            points, labels, box, _ = self.prompt_generator.generate_prompts(
-                enhanced_features, center_idx, h, w
-            )
+            points, labels, box, _ = self.prompt_generator.generate_prompts(enhanced_features, center_idx, h, w)
             
             # Set image in SAM2
             self.sam2.set_image(rgb_image)
             
-            # Try a simpler approach - just pass point and box prompts without mask input
-            masks, scores, _ = self.sam2.predict(
-                point_coords=points,
-                point_labels=labels,
-                box=box,
-                multimask_output=True
-            )
+            # Try different context mask formats
+            mask_input = None
+            if len(context_indices) > 1:
+                neighbor_masks = []
+                for idx in context_indices:
+                    if idx in previous_masks and idx != center_idx:
+                        neighbor_masks.append(previous_masks[idx])
+                
+                if neighbor_masks:
+                    # Try a different format: create a binary mask as numpy array
+                    try:
+                        avg_mask = np.stack(neighbor_masks).mean(axis=0) > 0.5
+                        # Format as expected by SAM2: shape should be (H, W)
+                        mask_input = avg_mask
+                    except Exception as e:
+                        logger.warning(f"Error creating context mask: {e}, using points only")
+                        mask_input = None
             
-            # Process results
+            # Call SAM2 with or without mask
+            if mask_input is not None:
+                try:
+                    masks, scores, _ = self.sam2.predict(
+                        point_coords=points,
+                        point_labels=labels,
+                        box=box,
+                        mask_input=mask_input,
+                        multimask_output=True
+                    )
+                except Exception as e:
+                    logger.warning(f"Error with mask_input: {e}, falling back to points only")
+                    masks, scores, _ = self.sam2.predict(
+                        point_coords=points,
+                        point_labels=labels,
+                        box=box,
+                        multimask_output=True
+                    )
+            else:
+                masks, scores, _ = self.sam2.predict(
+                    point_coords=points,
+                    point_labels=labels,
+                    box=box,
+                    multimask_output=True
+                )
+            
+            # Process results (same as before)
             if len(masks) > 0:
                 best_idx = scores.argmax()
                 best_mask = masks[best_idx]
-                
-                # Format output
                 mask_tensor = torch.from_numpy(best_mask).float().to(device)
                 mask_tensor = mask_tensor.unsqueeze(0).unsqueeze(0)
-                
-                # Create multi-class output
                 multi_class_mask = torch.zeros((1, self.num_classes, h, w), device=device)
                 for c in range(1, self.num_classes):
                     multi_class_mask[:, c] = mask_tensor[:, 0]
-                
                 return multi_class_mask
             
             return None
         except Exception as e:
             logger.error(f"Error processing slice {center_idx} with context: {e}")
             return None
-
                                    
     
     def _extract_slice(self, volume, idx, depth_dim=2):
