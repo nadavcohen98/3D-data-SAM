@@ -1,21 +1,23 @@
-from model import AutoSAM2
-from dataset import get_brats_dataloader, preprocess_batch
-from visualization import visualize_batch_comprehensive
-
+# Standard library imports
 import os
+import gc
+import time
+import random
+import argparse
+from datetime import datetime, timedelta
+
+# External libraries
 import torch
 import torch.nn as nn
 import torch.optim as optim
 import numpy as np
 import matplotlib.pyplot as plt
 from tqdm import tqdm
-import argparse
-import gc
-import time
-from datetime import datetime, timedelta
-import random
-import torch.nn.functional as F
-import torch.serialization
+
+# Local imports
+from model import AutoSAM2
+from dataset import get_brats_dataloader, preprocess_batch
+from visualization import visualize_batch_comprehensive
 
 torch.serialization.add_safe_globals([np.core.multiarray.scalar])
 
