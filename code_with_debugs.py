@@ -1267,6 +1267,201 @@ class AutoSAM2(nn.Module):
                     volume[:, :, :, :, slice_idx] = mask
         
         return volume
+
+    def process_volume_with_3d_context(self, input_vol, features, metadata, device):
+        """Process volume using a sliding window approach for 3D context"""
+        depth_dim_idx = metadata["depth_dim_idx"]
+        key_indices = sorted(metadata["key_indices"])
+        
+        # Results dictionary
+        sam2_results = {}
+        
+        # Process slices in overlapping groups of 3
+        context_window = 3
+        
+        # Track previous masks for continuity
+        previous_masks = {}  # Store masks by slice index
+        
+        # Process each slice with context from neighbors
+        for i in range(len(key_indices)):
+            center_idx = key_indices[i]
+            
+            # Get context indices (current slice plus neighbors)
+            context_indices = []
+            for offset in range(-context_window//2, context_window//2 + 1):
+                neighbor_pos = i + offset
+                if neighbor_pos >= 0 and neighbor_pos < len(key_indices):
+                    context_indices.append(key_indices[neighbor_pos])
+            
+            # Process this slice with context
+            result = self._process_slice_with_context(
+                input_vol, context_indices, center_idx, features, 
+                depth_dim_idx, previous_masks, device
+            )
+            
+            if result is not None:
+                # Store the result
+                sam2_results[center_idx] = result
+                
+                # Update the previous masks dict with this result
+                previous_masks[center_idx] = result.detach().cpu().numpy()
+                
+                # Limit memory usage by keeping only recent slices
+                if len(previous_masks) > context_window*2:
+                    oldest_key = min(previous_masks.keys())
+                    if oldest_key != center_idx:
+                        del previous_masks[oldest_key]
+        
+        return sam2_results
+    
+    def _process_slice_with_context(self, input_vol, context_indices, center_idx, 
+                                   features, depth_dim_idx, previous_masks, device):
+        """Process a slice with context from neighboring slices"""
+        try:
+            # Extract the center slice
+            orig_slice = self._extract_slice(input_vol, center_idx, depth_dim_idx)
+            rgb_tensor = self.mri_to_rgb(orig_slice)
+            rgb_image = rgb_tensor[0].permute(1, 2, 0).detach().cpu().numpy()
+            h, w = rgb_image.shape[:2]
+            
+            # Extract features for center slice
+            slice_features = self.slice_processor.extract_slice(
+                features, center_idx // 4, depth_dim_idx
+            )
+            
+            # Get enhanced features
+            enhanced_features = self.unet_sam_bridge(slice_features)
+            
+            # Generate prompts for the center slice
+            points, labels, box, _ = self.prompt_generator.generate_prompts(
+                enhanced_features, center_idx, h, w
+            )
+            
+            # Set image in SAM2
+            self.sam2.set_image(rgb_image)
+            
+            # Get context mask (average of previously processed neighbor slices)
+            context_mask = None
+            neighbor_masks = []
+            
+            for idx in context_indices:
+                if idx in previous_masks and idx != center_idx:
+                    neighbor_masks.append(previous_masks[idx])
+            
+            if neighbor_masks:
+                # Convert list of masks to numpy array
+                neighbor_masks = [mask[0, 1].squeeze() for mask in neighbor_masks]  # Use class 1 as representative
+                
+                # Average the masks
+                context_mask = np.mean(neighbor_masks, axis=0) > 0.5
+            
+            # Predict with context if available
+            if context_mask is not None:
+                masks, scores, _ = self.sam2.predict(
+                    point_coords=points,
+                    point_labels=labels,
+                    box=box,
+                    mask_input=context_mask,
+                    multimask_output=True
+                )
+            else:
+                # No context available
+                masks, scores, _ = self.sam2.predict(
+                    point_coords=points,
+                    point_labels=labels,
+                    box=box,
+                    multimask_output=True
+                )
+            
+            # Process results
+            if len(masks) > 0:
+                best_idx = scores.argmax()
+                best_mask = masks[best_idx]
+                
+                # Format output
+                mask_tensor = torch.from_numpy(best_mask).float().to(device)
+                mask_tensor = mask_tensor.unsqueeze(0).unsqueeze(0)
+                
+                # Create multi-class output
+                multi_class_mask = torch.zeros((1, self.num_classes, h, w), device=device)
+                for c in range(1, self.num_classes):
+                    multi_class_mask[:, c] = mask_tensor[:, 0]
+                
+                return multi_class_mask
+            
+            return None
+        except Exception as e:
+            logger.error(f"Error processing slice {center_idx} with context: {e}")
+            return None
+    
+    def _extract_slice(self, volume, idx, depth_dim=2):
+        """Extract a specific slice from a 3D volume."""
+        if depth_dim == 0:
+            slice_data = volume[:, :, idx]
+        elif depth_dim == 1:
+            slice_data = volume[:, :, :, idx]
+        else:  # default to dim 2
+            slice_data = volume[:, :, :, :, idx]
+        
+        # If we have a batch, just take the first item
+        if slice_data.shape[0] > 1:
+            slice_data = slice_data[0:1]
+        
+        return slice_data
+    
+    def combine_results_adaptively(self, unet_output, sam2_slices, depth_dim_idx):
+        """Combine UNet3D and SAM2 results with adaptive weighting"""
+        # Start with UNet output
+        combined = unet_output.clone()
+        
+        # Track slices with SAM2 results for visualization
+        processed_slices = []
+        
+        # Process each slice where SAM2 has results
+        for slice_idx, sam2_mask in sam2_slices.items():
+            if sam2_mask is not None:
+                processed_slices.append(slice_idx)
+                
+                # Get UNet slice
+                if depth_dim_idx == 0:
+                    unet_slice = combined[:, :, slice_idx]
+                elif depth_dim_idx == 1:
+                    unet_slice = combined[:, :, :, slice_idx]
+                else:  # depth_dim_idx == 2
+                    unet_slice = combined[:, :, :, :, slice_idx]
+                
+                # Calculate confidence metrics
+                unet_tumor = (unet_slice[:, 1:].sum(dim=1) > 0.5).float()
+                sam2_tumor = (sam2_mask[:, 1:].sum(dim=1) > 0.5).float()
+                
+                # Calculate overlap
+                intersection = (unet_tumor * sam2_tumor).sum()
+                union = torch.clamp(unet_tumor + sam2_tumor, 0, 1).sum()
+                
+                # Calculate agreement level (IOU)
+                if union > 0:
+                    iou = intersection / union
+                else:
+                    iou = torch.tensor(0.0, device=device)
+                
+                # Adaptive blending based on agreement
+                # When agreement is high, blend equally
+                # When agreement is low, trust UNet more but still incorporate SAM2
+                blend_weight = 0.7 - 0.4 * iou  # Range from 0.3 to 0.7
+                
+                # Apply adaptive blending
+                if depth_dim_idx == 0:
+                    combined[:, :, slice_idx] = blend_weight * unet_slice + (1 - blend_weight) * sam2_mask
+                elif depth_dim_idx == 1:
+                    combined[:, :, :, slice_idx] = blend_weight * unet_slice + (1 - blend_weight) * sam2_mask
+                else:  # depth_dim_idx == 2
+                    combined[:, :, :, :, slice_idx] = blend_weight * unet_slice + (1 - blend_weight) * sam2_mask
+        
+        # Log summary
+        if processed_slices:
+            logger.info(f"Combined {len(processed_slices)} slices with 3D context-aware SAM2 results")
+        
+        return combined
     
     def combine_results(self, unet_output, sam2_slices, depth_dim_idx, blend_weight=0.7):
         """
@@ -1386,12 +1581,7 @@ class AutoSAM2(nn.Module):
     
     def forward(self, x):
         """
-        Forward pass with flexible architecture modes.
-        
-        Supports three modes:
-        1. UNet3D only (enable_unet_decoder=True, enable_sam2=False)
-        2. SAM2 only (enable_unet_decoder=False, enable_sam2=True)
-        3. Hybrid mode (enable_unet_decoder=True, enable_sam2=True)
+        Forward pass with 3D context-aware SAM2 integration
         """
         start_time = time.time()
         device = x.device
@@ -1405,45 +1595,28 @@ class AutoSAM2(nn.Module):
             use_full_decoder=self.enable_unet_decoder
         )
         
-        # Get metadata
-        depth_dim_idx = metadata["depth_dim_idx"]
-        key_indices = metadata["key_indices"]
-        
         # Mode 1: UNet3D only
         if not self.enable_sam2 or not self.has_sam2:
             self.performance_metrics["total_time"].append(time.time() - start_time)
             return unet_output
         
-
-        # Process selected slices with SAM2
-        sam2_results = {}
-        for idx in key_indices:
-            # Extract the specific slice from mid_features
-            slice_features = self.slice_processor.extract_slice(
-                mid_features, idx // 4, depth_dim_idx
-            )
-            
-            # Process with SAM2 using the bridge
-            sam2_mask = self.process_slice_with_sam2(
-                x, idx, slice_features, depth_dim_idx, device
-            )
-            
-            # Store valid results
-            if sam2_mask is not None:
-                sam2_results[idx] = sam2_mask
-                
+        # Process entire volume with 3D context for SAM2
+        sam2_results = self.process_volume_with_3d_context(
+            x, mid_features, metadata, device
+        )
+        
         # Mode 2: SAM2 only (without UNet decoder)
         if not self.enable_unet_decoder:
             # Create 3D volume from SAM2 slice results
             final_output = self.create_3d_from_slices(
-                x.shape, sam2_results, depth_dim_idx, device
+                x.shape, sam2_results, metadata["depth_dim_idx"], device
             )
         
         # Mode 3: Hybrid mode (UNet + SAM2)
         else:
-            # Combine UNet output with SAM2 results
-            final_output = self.combine_results(
-                unet_output, sam2_results, depth_dim_idx, blend_weight=0.7
+            # Combine UNet output with 3D context-aware SAM2 results
+            final_output = self.combine_results_adaptively(
+                unet_output, sam2_results, metadata["depth_dim_idx"]
             )
         
         # Update timing metrics
