@@ -826,8 +826,7 @@ def train_model(data_path, batch_size=1, epochs=20, learning_rate=1e-3,
         # Validate
         try:
             val_loss, val_metrics = validate(model, val_loader, criterion, device, epoch)
-            print(f"Validation metrics: {val_metrics}")  # Debugging
-
+            
             history['val_loss'].append(val_loss)
             history['val_dice'].append(val_metrics.get('mean_dice', 0.0))
             history['val_iou'].append(val_metrics.get('mean_iou', 0.0))
@@ -838,10 +837,19 @@ def train_model(data_path, batch_size=1, epochs=20, learning_rate=1e-3,
             history['val_iou_et'].append(val_metrics.get('iou_et', 0.0))
             history['val_iou_wt'].append(val_metrics.get('iou_wt', 0.0))
             history['val_iou_tc'].append(val_metrics.get('iou_tc', 0.0))
-
+        
         except Exception as e:
             print(f"Error during validation: {e}")
-            history['val_loss'].append(float('inf'))
+            # Create default val_metrics when validation fails
+            val_metrics = {
+                'mean_dice': 0.0, 'mean_iou': 0.0, 'bce_loss': 0.0, 'dice_loss': 0.0,
+                'dice_et': 0.0, 'dice_wt': 0.0, 'dice_tc': 0.0,
+                'iou_et': 0.0, 'iou_wt': 0.0, 'iou_tc': 0.0
+            }
+            val_loss = float('inf')
+            
+            # Still update history with zeros
+            history['val_loss'].append(val_loss)
             history['val_dice'].append(0.0)
             history['val_iou'].append(0.0)
             history['val_bce'].append(0.0)
@@ -990,6 +998,17 @@ def main():
     except Exception as e:
         print(f"Error during training: {e}")
         return  # Exit if training fails
+
+    # Before returning from main function
+    try:
+        if 'best_metrics' in locals() and best_metrics:
+            print("\nFinal best metrics:")
+            for key, value in best_metrics.items():
+                print(f"{key}: {value:.4f}")
+        else:
+            print("\nNo final metrics were returned. Training completed anyway.")
+    except:
+        print("\nTraining completed, but could not display metrics.")
 
     # Print final metrics safely
     if best_metrics:
