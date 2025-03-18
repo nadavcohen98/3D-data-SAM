@@ -1346,14 +1346,13 @@ class AutoSAM2(nn.Module):
             
             for idx in context_indices:
                 if idx in previous_masks and idx != center_idx:
-                    neighbor_masks.append(previous_masks[idx])
+                    # Get mask from previous results, using class 1 as representative
+                    mask = previous_masks[idx][0, 1].squeeze().numpy()
+                    neighbor_masks.append(mask)
             
             if neighbor_masks:
-                # Convert list of masks to numpy array
-                neighbor_masks = [mask[0, 1].squeeze() for mask in neighbor_masks]  # Use class 1 as representative
-                
-                # Average the masks
-                context_mask = np.mean(neighbor_masks, axis=0) > 0.5
+                # Average the masks and threshold
+                context_mask = np.stack(neighbor_masks).mean(axis=0) > 0.5
             
             # Predict with context if available
             if context_mask is not None:
@@ -1361,7 +1360,7 @@ class AutoSAM2(nn.Module):
                     point_coords=points,
                     point_labels=labels,
                     box=box,
-                    mask_input=context_mask,
+                    mask_input=context_mask,  # SAM2 expects a boolean numpy array
                     multimask_output=True
                 )
             else:
@@ -1393,6 +1392,8 @@ class AutoSAM2(nn.Module):
         except Exception as e:
             logger.error(f"Error processing slice {center_idx} with context: {e}")
             return None
+
+                                   
     
     def _extract_slice(self, volume, idx, depth_dim=2):
         """Extract a specific slice from a 3D volume."""
