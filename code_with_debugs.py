@@ -2395,8 +2395,9 @@ def train_epoch(model, train_loader, optimizer, criterion, device, epoch, schedu
             model_output = model(images) 
 
             if batch_idx % 40 == 0:
-                slice_indices = [38, 77, 124]
-                model.visualize_slice_comparison(images, model_output, masks, slice_indices)
+                with torch.no_grad():
+                    slice_indices = [38, 77, 124]
+                    model.visualize_slice_comparison(images, model_output, masks, slice_indices)
                 
             # Visualize first batch
             if batch_idx == 0 and epoch % 5 == 0:
