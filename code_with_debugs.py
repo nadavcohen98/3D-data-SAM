@@ -684,38 +684,41 @@ class EnhancedPromptGenerator:
         }
 
 
-    def generate_optimal_box(self, probability_maps, slice_idx, height, width):
+    def generate_optimal_box(self, binary_mask_or_probability_maps, prob_map_or_slice_idx=None, height=None, width=None):
         """
-        Generate an optimal bounding box for tumor segmentation based on probability maps
-        
-        Args:
-            probability_maps: UNet3D feature maps [B, C, H, W]
-            slice_idx: Current slice index
-            height, width: Target dimensions for the box
+        Flexible method to generate optimal bounding box - works with both calling patterns
+        """    
+        # Handle different parameter patterns
+        if height is not None and width is not None:
+            # Called from process_slice_with_sam2 with (probability_maps, slice_idx, height, width)
+            probability_maps = binary_mask_or_probability_maps
+            slice_idx = prob_map_or_slice_idx
             
-        Returns:
-            box: np.array with [x1, y1, x2, y2] coordinates or None
-        """
-        import numpy as np
-        import torch
-        from scipy.ndimage import zoom, label, binary_dilation
-        
-        # Extract tumor probability (combine tumor classes)
-        if probability_maps.shape[1] >= 4:
-            # Combine all tumor classes (1, 2, 3)
-            tumor_prob = torch.sigmoid(probability_maps[0, 1:4]).sum(dim=0).cpu().detach().numpy()
+            # Extract tumor probability (combine tumor classes)
+            if probability_maps.shape[1] >= 4:
+                # Combine all tumor classes (1, 2, 3)
+                tumor_prob = torch.sigmoid(probability_maps[0, 1:4]).sum(dim=0).cpu().detach().numpy()
+            else:
+                # Fallback to first non-background channel
+                tumor_prob = torch.sigmoid(probability_maps[0, min(1, probability_maps.shape[1]-1)]).cpu().detach().numpy()
+            
+            # Resize if necessary
+            curr_h, curr_w = tumor_prob.shape
+            if curr_h != height or curr_w != width:
+                from scipy.ndimage import zoom
+                tumor_prob = zoom(tumor_prob, (height / curr_h, width / curr_w), order=1)
+            
+            # Create binary mask
+            binary_mask = tumor_prob > 0.3
+            prob_map = tumor_prob
+            
         else:
-            # Fallback to first non-background channel
-            tumor_prob = torch.sigmoid(probability_maps[0, min(1, probability_maps.shape[1]-1)]).cpu().detach().numpy()
+            # Called from generate_prompts with (binary_mask, prob_map)
+            binary_mask = binary_mask_or_probability_maps
+            prob_map = prob_map_or_slice_idx
+            height, width = prob_map.shape
         
-        # Resize if necessary
-        curr_h, curr_w = tumor_prob.shape
-        if curr_h != height or curr_w != width:
-            tumor_prob = zoom(tumor_prob, (height / curr_h, width / curr_w), order=1)
-        
-        # Create binary mask with reasonable threshold
-        binary_mask = tumor_prob > 0.3  # Lower threshold to capture more potential tumor
-        
+        # Rest of your implementation
         # If no tumor detected, return None
         if np.sum(binary_mask) < 10:
             return None
@@ -723,24 +726,8 @@ class EnhancedPromptGenerator:
         # Apply dilation to create more inclusive box
         dilated_mask = binary_dilation(binary_mask, iterations=3)
         
-        # Find all tumor regions
-        labeled_mask, num_regions = label(dilated_mask)
-        
-        # If multiple regions, handle them appropriately
-        if num_regions > 1:
-            # Calculate size of each region
-            region_sizes = [(i+1, np.sum(labeled_mask == (i+1))) for i in range(num_regions)]
-            region_sizes.sort(key=lambda x: x[1], reverse=True)
-            
-            # For now, focus on the largest region (could be enhanced to handle multiple regions)
-            largest_region_id = region_sizes[0][0]
-            region_mask = (labeled_mask == largest_region_id)
-            
-            # Find coordinates of the largest region
-            y_coords, x_coords = np.where(region_mask)
-        else:
-            # Single region case
-            y_coords, x_coords = np.where(dilated_mask)
+        # Find coordinates of tumor region
+        y_coords, x_coords = np.where(dilated_mask)
         
         # If no coordinates found, return None
         if len(y_coords) == 0:
@@ -1223,7 +1210,8 @@ class AutoSAM2(nn.Module):
             # DEBUG: Print the actual method signature to compare
             print(f"DEBUG: Available methods: {dir(self.prompt_generator)}")
             
-            box = None 
+            box = self.prompt_generator.generate_optimal_box(enhanced_features, slice_idx, h, w)
+
             
             # Set image in SAM2
             self.sam2.set_image(rgb_image)
