@@ -207,7 +207,7 @@ class FlexibleUNet3D(nn.Module):
         dec_out1 = self.dec1(x5, x4)
         dec_out1 = self.dropout(dec_out1)
         
-        dec_out2 = self.dec2(x4, x3)
+        dec_out2 = self.dec2(dec_out1, x3)
         dec_out2 = self.dropout(dec_out2)
         
         
@@ -242,7 +242,7 @@ class FlexibleUNet3D(nn.Module):
         # Apply sigmoid
         segmentation = torch.sigmoid(output)
         
-        return segmentation, dec_out3, sam_embeddings, metadata
+        return segmentation, dec_out2, sam_embeddings, metadata
 
 
 class MultiPointPromptGenerator:
