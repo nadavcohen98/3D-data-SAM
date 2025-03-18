@@ -25,20 +25,36 @@ def create_custom_colormaps():
     return tumor_cmap, uncertainty_cmap
 
 def get_slice_indices(volume, num_slices=5):
-    """Get strategic slice indices from a 3D volume"""
-    depth = volume.shape[2]  # Assuming shape is [B, C, D, H, W]
+    """
+    Get strategic slice indices from a 3D volume.
     
-    # Calculate percentiles to get representative slices
-    # Skip very beginning and end which often have less information
+    Assumes the input volume has shape [B, C, D, H, W] or similar.
+    To be robust, we consider the smallest spatial dimension (among D, H, and W)
+    as the 'depth' used for selecting representative slices.
+    
+    Args:
+        volume (Tensor): A 3D volume with shape [B, C, D, H, W] (or similar).
+        num_slices (int): Number of slices to select (default is 5).
+    
+    Returns:
+        list: A list of selected slice indices based on percentiles.
+    """
+    # Extract the spatial dimensions (assumed to be dimensions 2, 3, and 4)
+    spatial_dims = volume.shape[2:]
+    # Choose the smallest dimension as the effective depth
+    depth = min(spatial_dims)
+    
+    # Calculate slice indices using percentiles (skip boundaries)
     percentiles = [15, 30, 50, 70, 85]
-    indices = [max(0, min(depth-1, int(depth * p / 100))) for p in percentiles]
+    indices = [max(0, min(depth - 1, int(depth * p / 100))) for p in percentiles]
     
-    # Always include middle slice
+    # Ensure the middle slice is always included
     middle_idx = depth // 2
     if middle_idx not in indices:
-        indices[len(indices)//2] = middle_idx
+        indices[len(indices) // 2] = middle_idx
     
     return indices
+
 
 def visualize_mri_modalities(image_slice, fig, axs, mri_titles=None):
     """Visualize all MRI modalities for a single slice"""
