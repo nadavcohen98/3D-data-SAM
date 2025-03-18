@@ -1531,7 +1531,7 @@ class AutoSAM2(nn.Module):
             return "invalid_config"
 
     def visualize_slice_comparison(self, input_vol, model_output, ground_truth, slice_indices, save_dir="results"):
-        # Move tensors to CPU to reduce GPU memory usage
+        # Move tensors to CPU to free GPU memory
         input_vol = input_vol.detach().cpu()
         model_output = model_output.detach().cpu()
         ground_truth = ground_truth.detach().cpu()
@@ -1543,10 +1543,10 @@ class AutoSAM2(nn.Module):
         
         b = 0  # visualize the first item in the batch
         for idx in slice_indices:
-            # Extract the original image slice from channel 0
+            # Extract the original slice from channel 0
             original_slice = input_vol[b, 0, idx].numpy()
             
-            # Extract ground truth for channels 1, 2, 3 and create an RGB composite
+            # Ground truth: take channels 1,2,3 and create an RGB composite
             gt = ground_truth[b, 1:, idx].numpy()  # shape: [num_classes, H, W]
             gt_rgb = np.zeros((gt.shape[1], gt.shape[2], 3))
             if gt.shape[0] >= 1:
@@ -1556,7 +1556,7 @@ class AutoSAM2(nn.Module):
             if gt.shape[0] >= 3:
                 gt_rgb[:, :, 0] = (gt[2] > 0.5).astype(np.float32)  # Red for class 3
             
-            # Extract model prediction for channels 1,2,3
+            # Model prediction: take channels 1,2,3 similarly
             pred = model_output[b, 1:, idx].numpy()
             pred_rgb = np.zeros((pred.shape[1], pred.shape[2], 3))
             if pred.shape[0] >= 1:
@@ -1566,13 +1566,13 @@ class AutoSAM2(nn.Module):
             if pred.shape[0] >= 3:
                 pred_rgb[:, :, 0] = (pred[2] > 0.5).astype(np.float32)
             
-            # Compute Dice score for the tumor region (union of channels 1-3)
+            # Compute Dice score between prediction and ground truth (for tumor region)
             gt_tumor = (np.sum(gt, axis=0) > 0).astype(np.float32)
             pred_tumor = (np.sum(pred, axis=0) > 0).astype(np.float32)
             intersection = np.sum(gt_tumor * pred_tumor)
             dice_score = (2 * intersection) / (np.sum(gt_tumor) + np.sum(pred_tumor) + 1e-5)
             
-            # Plot the results side-by-side
+            # Plot original, ground truth, and prediction side by side
             fig, axes = plt.subplots(1, 3, figsize=(12, 4))
             axes[0].imshow(original_slice, cmap='gray')
             axes[0].set_title(f"Original Slice {idx}")
