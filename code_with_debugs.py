@@ -8,6 +8,8 @@ import gc
 import logging
 import os
 from collections import defaultdict
+from scipy.ndimage import binary_dilation
+from scipy.ndimage import zoom, binary_erosion, binary_dilation, label, distance_transform_edt
 
 # Configure logging
 logging.basicConfig(
@@ -268,7 +270,6 @@ class MultiPointPromptGenerator:
         """
         Select a diverse set of points that maintain minimum distance from each other.
         """
-        import numpy as np
         
         if len(x_coords) <= num_points:
             return list(range(len(x_coords)))
@@ -311,8 +312,6 @@ class MultiPointPromptGenerator:
 
     def _get_negative_points(self, binary_mask, prob_map, num_points):
         """Generate strategic negative points"""
-        import numpy as np
-        from scipy.ndimage import binary_dilation
         
         # Dilate the mask to find nearby background
         dilated = binary_dilation(binary_mask, iterations=3)
@@ -374,7 +373,7 @@ class MultiPointPromptGenerator:
             points: np.array of point coordinates
             labels: np.array of point labels (1=foreground, 0=background)
         """
-        from scipy.ndimage import zoom, binary_erosion, binary_dilation, label, distance_transform_edt
+
         
         # Extract tumor probability (combine tumor classes with weighted importance)
         if probability_maps.shape[1] >= 4:  # Check if we have enough channels
