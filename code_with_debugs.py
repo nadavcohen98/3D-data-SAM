@@ -1816,39 +1816,111 @@ def calculate_region_dice(pred, gt):
 
 def visualize_slice_comparison(model, images, masks, outputs, depth_dim_idx=2):
     """
-    Compare outputs to ground truth on specific slices (38, 77, 124) using Dice scores.
+    Compare UNet3D, SAM2, and combined model outputs to ground truth on specific slices.
+    Shows detailed Dice scores for each tumor region.
     """
     batch_idx = 0  # Use first batch item
     slice_indices = [38, 77, 124]  # Fixed slice indices as requested
+    device = images.device
     
-    print("\n===== Slice-by-Slice Comparison (Dice scores) =====")
+    print("\n===== UNet3D vs SAM2 vs Combined - Slice Comparison =====")
+    
+    # Store original model state
+    original_unet_state = model.enable_unet_decoder
+    original_sam2_state = model.enable_sam2
     
     for slice_idx in slice_indices:
         # Check if slice index is valid
         if slice_idx >= images.shape[depth_dim_idx + 1]:
             continue
             
-        # Extract slices from masks and outputs
+        # Extract slice from inputs
         if depth_dim_idx == 0:
+            image_slice = images[batch_idx:batch_idx+1, :, slice_idx:slice_idx+1]
             mask_slice = masks[batch_idx:batch_idx+1, :, slice_idx:slice_idx+1]
-            output_slice = outputs[batch_idx:batch_idx+1, :, slice_idx:slice_idx+1]
+            combined_slice = outputs[batch_idx:batch_idx+1, :, slice_idx:slice_idx+1]
         elif depth_dim_idx == 1:
+            image_slice = images[batch_idx:batch_idx+1, :, :, slice_idx:slice_idx+1]
             mask_slice = masks[batch_idx:batch_idx+1, :, :, slice_idx:slice_idx+1]
-            output_slice = outputs[batch_idx:batch_idx+1, :, :, slice_idx:slice_idx+1]
+            combined_slice = outputs[batch_idx:batch_idx+1, :, :, slice_idx:slice_idx+1]
         else:  # depth_dim_idx == 2
+            image_slice = images[batch_idx:batch_idx+1, :, :, :, slice_idx:slice_idx+1]
             mask_slice = masks[batch_idx:batch_idx+1, :, :, :, slice_idx:slice_idx+1]
-            output_slice = outputs[batch_idx:batch_idx+1, :, :, :, slice_idx:slice_idx+1]
+            combined_slice = outputs[batch_idx:batch_idx+1, :, :, :, slice_idx:slice_idx+1]
         
-        # Squeeze the slice dimension for processing
-        mask_slice = mask_slice.squeeze(depth_dim_idx+1)
-        output_slice = output_slice.squeeze(depth_dim_idx+1)
+        # Remove the slice dimension
+        mask_2d = mask_slice.squeeze(depth_dim_idx+1)
+        combined_2d = combined_slice.squeeze(depth_dim_idx+1)
         
-        # Calculate Dice scores for current output
-        dice_scores = calculate_region_dice(output_slice, mask_slice)
+        # Results dictionary
+        results = {}
         
-        # Format for better readability
+        # Combined model result (already computed)
+        combined_dice = calculate_region_dice(combined_2d, mask_2d)
+        results['Combined'] = combined_dice
+        
+        with torch.no_grad():
+            try:
+                # UNet3D-only result
+                model.set_mode(enable_unet_decoder=True, enable_sam2=False)
+                unet_output = model(image_slice)
+                unet_2d = unet_output.squeeze(depth_dim_idx+1)
+                unet_dice = calculate_region_dice(unet_2d, mask_2d)
+                results['UNet3D'] = unet_dice
+                
+                # SAM2 result (need to get slice from UNet3D and process through SAM2)
+                # Note: This requires a bit more work since we need to get intermediate features
+                _, mid_features, sam_embeddings, meta = model.unet3d(image_slice, use_full_decoder=True)
+                
+                # Try to get SAM2 result for this slice
+                model.set_mode(enable_unet_decoder=False, enable_sam2=True)
+                ds_slice_idx = slice_idx // 4 if meta["depth_dim_idx"] == depth_dim_idx else slice_idx
+                
+                # Extract feature slice
+                if meta["depth_dim_idx"] == 0:
+                    feature_slice = mid_features[:, :, ds_slice_idx]
+                elif meta["depth_dim_idx"] == 1:
+                    feature_slice = mid_features[:, :, :, ds_slice_idx]
+                else:  # depth_dim_idx == 2
+                    feature_slice = mid_features[:, :, :, :, ds_slice_idx]
+                
+                # Process with SAM2 directly
+                sam2_output = model.process_slice_with_sam2(
+                    image_slice, slice_idx, feature_slice, depth_dim_idx, device
+                )
+                
+                if sam2_output is not None:
+                    sam2_2d = sam2_output
+                    sam2_dice = calculate_region_dice(sam2_2d, mask_2d)
+                    results['SAM2'] = sam2_dice
+                else:
+                    results['SAM2'] = {'WT': 0.0, 'TC': 0.0, 'ET': 0.0}
+                    
+            except Exception as e:
+                # Handle potential errors gracefully
+                print(f"Error processing slice {slice_idx}: {str(e)}")
+                results['UNet3D'] = {'WT': 0.0, 'TC': 0.0, 'ET': 0.0}
+                results['SAM2'] = {'WT': 0.0, 'TC': 0.0, 'ET': 0.0}
+        
+        # Reset model to original state
+        model.set_mode(enable_unet_decoder=original_unet_state, enable_sam2=original_sam2_state)
+        
+        # Print results in a nice format
         print(f"\nSlice {slice_idx}:")
-        print(f"  Model output: WT={dice_scores['WT']:.1f}%, TC={dice_scores['TC']:.1f}%, ET={dice_scores['ET']:.1f}%")
+        print(f"  UNet3D:   WT={results['UNet3D']['WT']:.1f}%, TC={results['UNet3D']['TC']:.1f}%, ET={results['UNet3D']['ET']:.1f}%")
+        if 'SAM2' in results:
+            print(f"  SAM2:     WT={results['SAM2']['WT']:.1f}%, TC={results['SAM2']['TC']:.1f}%, ET={results['SAM2']['ET']:.1f}%")
+        print(f"  Combined: WT={results['Combined']['WT']:.1f}%, TC={results['Combined']['TC']:.1f}%, ET={results['Combined']['ET']:.1f}%")
+        
+        # If there's significant difference, highlight it
+        if 'SAM2' in results:
+            wt_diff = abs(results['UNet3D']['WT'] - results['SAM2']['WT'])
+            tc_diff = abs(results['UNet3D']['TC'] - results['SAM2']['TC'])
+            et_diff = abs(results['UNet3D']['ET'] - results['SAM2']['ET'])
+            
+            if wt_diff > 10 or tc_diff > 10 or et_diff > 10:
+                better_model = "UNet3D" if results['UNet3D']['WT'] > results['SAM2']['WT'] else "SAM2"
+                print(f"  Note: Significant difference between models on this slice. {better_model} performs better.")
 
 def calculate_dice_score(y_pred, y_true):
     """
