@@ -605,56 +605,93 @@ class MRItoRGBMapper(nn.Module):
 class UNet3DtoSAM2Bridge(nn.Module):
     """
     Enhanced bridge that transforms UNet3D features to SAM2-compatible prompts
-    with better diagnostics and tracking.
+    with dynamic channel attention and better adaptation capabilities.
     """
     def __init__(self, input_channels=32, output_channels=256):
         super().__init__()
         
-        # Direct transformation path
+        # Channel attention mechanism to focus on relevant features
+        self.channel_attention = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1),
+            nn.Conv2d(input_channels, input_channels // 4, kernel_size=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(input_channels // 4, input_channels, kernel_size=1),
+            nn.Sigmoid()
+        )
+        
+        # Spatial attention to focus on important regions
+        self.spatial_attention = nn.Sequential(
+            nn.Conv2d(input_channels, 1, kernel_size=7, padding=3),
+            nn.BatchNorm2d(1),
+            nn.Sigmoid()
+        )
+        
+        # Main transformation path
         self.transformer = nn.Sequential(
-            # Initial feature processing
+            # Initial feature processing with residual connection
             nn.Conv2d(input_channels, 128, kernel_size=3, padding=1),
+            nn.GroupNorm(16, 128),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(128, 128, kernel_size=3, padding=1),
             nn.GroupNorm(16, 128),
             nn.ReLU(inplace=True),
             
             # SAM2-specific formatting
             nn.Conv2d(128, output_channels, kernel_size=1),
-            # Normalization without tanh to preserve signal strength
             nn.GroupNorm(32, output_channels)
         )
         
-        # Importance weighting parameter (learns how much to scale the output)
+        # Learnable importance weighting with adaptive scaling
         self.importance = nn.Parameter(torch.tensor(0.5))
+        self.adaptive_scale = nn.Parameter(torch.tensor(1.0))
         
-        # For tracking feature statistics
-        self.feature_stats = {
-            'iter': 0,
-            'input_means': [],
-            'output_means': [],
-            'importance_values': []
-        }
-
-        self.last_importance = self.importance.clone().detach()
+        # Statistics tracking with proper PyTorch buffers
+        self.register_buffer('running_mean', torch.zeros(1))
+        self.register_buffer('update_count', torch.zeros(1))
+        
+        # Initialize with better scaling
+        nn.init.xavier_normal_(self.transformer[0].weight)
+        nn.init.xavier_normal_(self.transformer[3].weight)
+        nn.init.xavier_normal_(self.transformer[6].weight)
     
     def forward(self, x):
-        # Track input features and parameter changes
+        # Apply channel attention to focus on important features
+        channel_weights = self.channel_attention(x)
+        x_channel = x * channel_weights
+        
+        # Apply spatial attention to focus on relevant regions
+        spatial_weights = self.spatial_attention(x_channel)
+        x_attended = x_channel * spatial_weights
+        
+        # Residual connection - add original features
+        x_combined = x_attended + x
+        
+        # Transform attended features
+        transformed = self.transformer(x_combined)
+        
+        # Calculate dynamic importance factor
+        importance_factor = torch.sigmoid(self.importance) * (1.0 + torch.tanh(self.adaptive_scale))
+        
+        # Apply importance weighting
+        output = transformed * importance_factor
+        
+        # Track statistics during training
         if self.training:
             with torch.no_grad():
-                self.feature_stats['iter'] += 1
-                self.feature_stats['input_means'].append(x.mean().item())
+                curr_mean = output.mean().item()
+                self.update_count += 1
+                self.running_mean = self.running_mean * 0.9 + curr_mean * 0.1
                 
-                if self.feature_stats['iter'] % 2000 == 0:
-                    importance_change = torch.abs(self.importance - self.last_importance).item()
+                # Log every 2000 batches or when importance changes significantly
+                if self.update_count % 2000 == 0:
+                    imp_val = torch.sigmoid(self.importance).item()
+                    scale_val = torch.tanh(self.adaptive_scale).item()
+                    
                     print(f"Bridge Stats - Input mean: {x.mean().item():.4f}, "
-                          f"Importance: {torch.sigmoid(self.importance).item():.4f}, "
-                          f"Change: {importance_change:.8f}")
-                    self.last_importance = self.importance.clone().detach()
-        
-        # Transform features
-        transformed = self.transformer(x)
-        
-        # Apply learnable importance weighting
-        output = transformed * (torch.sigmoid(self.importance) * 2)
+                          f"Output mean: {curr_mean:.4f}, "
+                          f"Running mean: {self.running_mean.item():.4f}, "
+                          f"Importance: {imp_val:.4f}, "
+                          f"Scale: {1.0 + scale_val:.4f}")
         
         return output
         
