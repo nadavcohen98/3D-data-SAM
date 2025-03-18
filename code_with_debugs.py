@@ -1278,100 +1278,24 @@ class AutoSAM2(nn.Module):
         return slice_data
     
     def combine_results_adaptively(self, unet_output, sam2_slices, depth_dim_idx, blend_weight=0.7):
-        """Combine UNet output with SAM2 results with detailed comparisons"""
-        # Start with UNet output
+        """Combine UNet output with SAM2 results without printing detailed comparisons."""
         combined = unet_output.clone()
         
-        # Initialize tracking
-        if not hasattr(self, 'slice_comparison'):
-            self.slice_comparison = {
-                'batch_count': 0,
-                'total_dice': 0,
-                'total_slices': 0
-            }
-        
-        self.slice_comparison['batch_count'] += 1
-        
-        # Show detailed comparison every 40 batches
-        show_details = (self.slice_comparison['batch_count'] % 40 == 0)
-        if show_details:
-            print("\n===== Detailed SAM2 vs UNet3D Comparison =====")
-        
-        batch_dice_scores = []
-        
-        # Replace or blend slices with SAM2 results
+        # Iterate over slices with available SAM2 output and blend them
         for slice_idx, mask in sam2_slices.items():
             if mask is not None:
-                # Get UNet slice
                 if depth_dim_idx == 0:
                     unet_slice = combined[:, :, slice_idx]
+                    combined[:, :, slice_idx] = blend_weight * unet_slice + (1 - blend_weight) * mask
                 elif depth_dim_idx == 1:
                     unet_slice = combined[:, :, :, slice_idx]
+                    combined[:, :, :, slice_idx] = blend_weight * unet_slice + (1 - blend_weight) * mask
                 else:  # depth_dim_idx == 2
                     unet_slice = combined[:, :, :, :, slice_idx]
-                
-                # Get binary tumor segmentations 
-                sam2_tumor = (mask[:, 1:].sum(dim=1) > 0).float()
-                unet_tumor = (unet_slice[:, 1:].sum(dim=1) > 0).float()
-                
-                # Calculate metrics
-                sam2_pixels = torch.sum(sam2_tumor).item()
-                unet_pixels = torch.sum(unet_tumor).item()
-                models_overlap = torch.sum(sam2_tumor * unet_tumor).item()
-                
-                # Compute Dice score between models
-                models_dice = 2 * models_overlap / (sam2_pixels + unet_pixels) if (sam2_pixels + unet_pixels) > 0 else 0
-                batch_dice_scores.append(models_dice)
-                
-                # Track overall statistics
-                self.slice_comparison['total_dice'] += models_dice
-                self.slice_comparison['total_slices'] += 1
-                
-                # Save detailed comparison for selected slices
-                if show_details and slice_idx in [38, 77, 124]:
-                    print(f"Slice {slice_idx}:")
-                    print(f"  SAM2 tumor size: {sam2_pixels} pixels")
-                    print(f"  UNet tumor size: {unet_pixels} pixels")
-                    print(f"  Overlap: {models_overlap} pixels")
-                    print(f"  Dice score: {models_dice:.4f}")
+                    combined[:, :, :, :, slice_idx] = blend_weight * unet_slice + (1 - blend_weight) * mask
                     
-                    # Add interpretation
-                    if models_dice > 0.7:
-                        print("  Interpretation: High agreement between SAM2 and UNet3D")
-                    elif models_dice > 0.4:
-                        print("  Interpretation: Moderate agreement")
-                    else:
-                        print("  Interpretation: Low agreement - the models see different things")
-                    
-                    # Print which is larger
-                    if sam2_pixels > unet_pixels:
-                        print(f"  SAM2 finds {(sam2_pixels/max(1, unet_pixels) - 1)*100:.1f}% more tumor than UNet3D")
-                    elif unet_pixels > sam2_pixels:
-                        print(f"  UNet3D finds {(unet_pixels/max(1, sam2_pixels) - 1)*100:.1f}% more tumor than SAM2")
-                    print()
-                    
-                    # Apply blending
-                    if depth_dim_idx == 0:
-                        combined[:, :, slice_idx] = blend_weight * unet_slice + (1 - blend_weight) * mask
-                    elif depth_dim_idx == 1:
-                        combined[:, :, :, slice_idx] = blend_weight * unet_slice + (1 - blend_weight) * mask
-                    else:  # depth_dim_idx == 2:
-                        combined[:, :, :, :, slice_idx] = blend_weight * unet_slice + (1 - blend_weight) * mask
-        
-        # Print summary statistics
-        if show_details:
-            if batch_dice_scores:
-                avg_dice = np.mean(batch_dice_scores)
-                print(f"Batch average Dice: {avg_dice:.4f}")
-            
-            if self.slice_comparison['total_slices'] > 0:
-                overall_avg = self.slice_comparison['total_dice'] / self.slice_comparison['total_slices']
-                print(f"Overall average Dice: {overall_avg:.4f}")
-                print(f"Total processed slices: {self.slice_comparison['total_slices']}")
-            
-            print("==========================================\n")
-        
         return combined
+
     
     def combine_results(self, unet_output, sam2_slices, depth_dim_idx, blend_weight=0.7):
         """
