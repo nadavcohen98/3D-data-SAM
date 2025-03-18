@@ -9,7 +9,6 @@ import logging
 import os
 from collections import defaultdict
 from scipy.ndimage import zoom, binary_erosion, binary_dilation, label, distance_transform_edt
-import matplotlib.pyplot as plt
 
 # Configure logging
 logging.basicConfig(
@@ -706,7 +705,7 @@ class EnhancedPromptGenerator:
                 tumor_prob = zoom(tumor_prob, (height / curr_h, width / curr_w), order=1)
             
             # Create binary mask
-            binary_mask = tumor_prob > 0.3
+            binary_mask = tumor_prob > 0.4
             prob_map = tumor_prob
         else:
             binary_mask = binary_mask_or_probability_maps
@@ -1016,86 +1015,6 @@ class AutoSAM2(nn.Module):
             
         logger.info(f"Mode set to: UNet Decoder={self.enable_unet_decoder}, SAM2={self.enable_sam2}")
 
-    def visualize_slice_comparison(self, input_vol, model_output, ground_truth, slice_indices, save_dir="results"):
-        """
-        Visualizes and compares specific slices of the input volume.
-        
-        For each specified slice index, this function:
-          - Extracts the original image slice (assumed from channel 0)
-          - Creates an RGB composite of the ground truth mask (assuming channels 1,2,3 represent tumor classes)
-          - Creates an RGB composite of the model prediction (same channel order)
-          - Computes the Dice score for the tumor region (union of channels 1-3)
-          - Displays the original image, ground truth overlay, and model prediction overlay side by side,
-            and saves the figure.
-        
-        Args:
-            input_vol (Tensor): Input volume of shape [B, C, D, H, W].
-            model_output (Tensor): Model output (after sigmoid) of shape [B, C, D, H, W].
-            ground_truth (Tensor): Ground truth mask of shape [B, C, D, H, W].
-            slice_indices (list): List of slice indices to visualize (e.g., [38, 77, 124]).
-            save_dir (str): Directory in which to save the comparison figures.
-        """
-        input_vol = input_vol.detach().cpu()
-        model_output = model_output.detach().cpu()
-        ground_truth = ground_truth.detach().cpu()
-        os.makedirs(save_dir, exist_ok=True)
-        
-        # Assume visualization for the first item in the batch
-        b = 0
-        for idx in slice_indices:
-            # Extract the original image slice (using channel 0)
-            original_slice = input_vol[b, 0, idx].cpu().detach().numpy()
-            
-            # Extract ground truth for channels 1,2,3 (tumor classes) for the given slice
-            gt = ground_truth[b, 1:, idx].cpu().detach().numpy()  # Shape: [num_classes, H, W]
-            # Create an RGB composite for ground truth:
-            #   Class 1 -> Blue, Class 2 -> Green, Class 3 -> Red.
-            gt_rgb = np.zeros((gt.shape[1], gt.shape[2], 3))
-            if gt.shape[0] >= 1:
-                gt_rgb[:, :, 2] = (gt[0] > 0.5).astype(np.float32)  # Blue channel
-            if gt.shape[0] >= 2:
-                gt_rgb[:, :, 1] = (gt[1] > 0.5).astype(np.float32)  # Green channel
-            if gt.shape[0] >= 3:
-                gt_rgb[:, :, 0] = (gt[2] > 0.5).astype(np.float32)  # Red channel
-            
-            # Extract model prediction for channels 1,2,3 for the given slice
-            pred = model_output[b, 1:, idx].cpu().detach().numpy()
-            pred_rgb = np.zeros((pred.shape[1], pred.shape[2], 3))
-            if pred.shape[0] >= 1:
-                pred_rgb[:, :, 2] = (pred[0] > 0.5).astype(np.float32)
-            if pred.shape[0] >= 2:
-                pred_rgb[:, :, 1] = (pred[1] > 0.5).astype(np.float32)
-            if pred.shape[0] >= 3:
-                pred_rgb[:, :, 0] = (pred[2] > 0.5).astype(np.float32)
-            
-            # Compute Dice score for the tumor region (combining channels 1-3)
-            gt_tumor = (np.sum(gt, axis=0) > 0).astype(np.float32)
-            pred_tumor = (np.sum(pred, axis=0) > 0).astype(np.float32)
-            intersection = np.sum(gt_tumor * pred_tumor)
-            dice_score = (2 * intersection) / (np.sum(gt_tumor) + np.sum(pred_tumor) + 1e-5)
-            
-            # Plot the results side by side
-            fig, axes = plt.subplots(1, 3, figsize=(12, 4))
-            axes[0].imshow(original_slice, cmap='gray')
-            axes[0].set_title(f"Original Slice {idx}")
-            axes[0].axis('off')
-            
-            axes[1].imshow(original_slice, cmap='gray')
-            axes[1].imshow(gt_rgb, alpha=0.5)
-            axes[1].set_title(f"Ground Truth\n(Dice: {dice_score:.2f})")
-            axes[1].axis('off')
-            
-            axes[2].imshow(original_slice, cmap='gray')
-            axes[2].imshow(pred_rgb, alpha=0.5)
-            axes[2].set_title("Model Prediction")
-            axes[2].axis('off')
-            
-            plt.suptitle(f"Slice {idx} Comparison - Dice Score: {dice_score:.2f}", fontsize=14)
-            plt.tight_layout()
-            plt.savefig(os.path.join(save_dir, f"slice_{idx}_comparison.png"))
-            plt.close()
-    
-    
     
     def extract_tumor_box(self, prob_map, threshold=0.5):
         # Threshold the probability map
@@ -1408,6 +1327,36 @@ class AutoSAM2(nn.Module):
                 self.slice_comparison['total_dice'] += models_dice
                 self.slice_comparison['total_slices'] += 1
                 
+                # Save detailed comparison for selected slices
+                if show_details and slice_idx in [38, 77, 124]:
+                    print(f"Slice {slice_idx}:")
+                    print(f"  SAM2 tumor size: {sam2_pixels} pixels")
+                    print(f"  UNet tumor size: {unet_pixels} pixels")
+                    print(f"  Overlap: {models_overlap} pixels")
+                    print(f"  Dice score: {models_dice:.4f}")
+                    
+                    # Add interpretation
+                    if models_dice > 0.7:
+                        print("  Interpretation: High agreement between SAM2 and UNet3D")
+                    elif models_dice > 0.4:
+                        print("  Interpretation: Moderate agreement")
+                    else:
+                        print("  Interpretation: Low agreement - the models see different things")
+                    
+                    # Print which is larger
+                    if sam2_pixels > unet_pixels:
+                        print(f"  SAM2 finds {(sam2_pixels/max(1, unet_pixels) - 1)*100:.1f}% more tumor than UNet3D")
+                    elif unet_pixels > sam2_pixels:
+                        print(f"  UNet3D finds {(unet_pixels/max(1, sam2_pixels) - 1)*100:.1f}% more tumor than SAM2")
+                    print()
+                    
+                    # Apply blending
+                    if depth_dim_idx == 0:
+                        combined[:, :, slice_idx] = blend_weight * unet_slice + (1 - blend_weight) * mask
+                    elif depth_dim_idx == 1:
+                        combined[:, :, :, slice_idx] = blend_weight * unet_slice + (1 - blend_weight) * mask
+                    else:  # depth_dim_idx == 2:
+                        combined[:, :, :, :, slice_idx] = blend_weight * unet_slice + (1 - blend_weight) * mask
         
         # Print summary statistics
         if show_details:
@@ -2391,14 +2340,6 @@ def train_epoch(model, train_loader, optimizer, criterion, device, epoch, schedu
                 'TC': f"{dice_metrics.get('TC_mean', 0.0):.1f}%",
                 'ET': f"{dice_metrics.get('ET_mean', 0.0):.1f}%"
             })
-            
-            images, masks = preprocess_batch(batch, device=device)
-            model_output = model(images) 
-
-            if batch_idx % 40 == 0:
-                with torch.no_grad():
-                    slice_indices = [38, 77, 124]
-                    model.visualize_slice_comparison(images, model_output, masks, slice_indices)
                 
             # Visualize first batch
             if batch_idx == 0 and epoch % 5 == 0:
