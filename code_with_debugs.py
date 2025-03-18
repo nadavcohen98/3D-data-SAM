@@ -11,6 +11,8 @@ from collections import defaultdict
 from scipy.ndimage import zoom, binary_erosion, binary_dilation, label, distance_transform_edt
 import matplotlib.pyplot as plt
 
+plt.ion()  # enable interactive mode
+
 # Configure logging
 logging.basicConfig(
     level=logging.WARNING,
@@ -1458,9 +1460,7 @@ class AutoSAM2(nn.Module):
         input_vol = input_vol.detach().cpu()
         model_output = model_output.detach().cpu()
         ground_truth = ground_truth.detach().cpu()
-        
-        import matplotlib.pyplot as plt
-        import numpy as np
+
     
         b = 0  # visualize the first item in the batch
         for idx in slice_indices:
@@ -1507,6 +1507,7 @@ class AutoSAM2(nn.Module):
             plt.suptitle(f"Slice {idx} Comparison - Dice: {dice_score:.2f}", fontsize=14)
             plt.tight_layout()
             plt.show()
+            plt.pause(0.001) 
             plt.close()
 
 
