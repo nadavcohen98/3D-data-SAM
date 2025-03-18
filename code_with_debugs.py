@@ -9,6 +9,7 @@ import logging
 import os
 from collections import defaultdict
 from scipy.ndimage import zoom, binary_erosion, binary_dilation, label, distance_transform_edt
+import matplotlib.pyplot as plt
 
 # Configure logging
 logging.basicConfig(
@@ -1034,9 +1035,9 @@ class AutoSAM2(nn.Module):
             slice_indices (list): List of slice indices to visualize (e.g., [38, 77, 124]).
             save_dir (str): Directory in which to save the comparison figures.
         """
-        import matplotlib.pyplot as plt
-        import numpy as np
-        import os
+        input_vol = input_vol.detach().cpu()
+        model_output = model_output.detach().cpu()
+        ground_truth = ground_truth.detach().cpu()
         os.makedirs(save_dir, exist_ok=True)
         
         # Assume visualization for the first item in the batch
@@ -3012,7 +3013,7 @@ def main():
                         help='Reset training from scratch, ignoring checkpoints')
     parser.add_argument('--no_mixed_precision', action='store_true',
                         help='Disable mixed precision training')
-    parser.add_argument('--memory_limit', type=float, default=0.95,
+    parser.add_argument('--memory_limit', type=float, default=0.9,
                         help='Memory limit for GPU (0.0-1.0)')
     
     args = parser.parse_args()
