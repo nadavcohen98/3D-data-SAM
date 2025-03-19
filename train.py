@@ -670,50 +670,43 @@ def save_training_history(history, filename):
 
 def preprocess_batch(batch, device=None):
     """
-    Ensure both images and masks are in consistent axial orientation
+    Simplified preprocessing function that ensures consistent orientation
+    between images and masks while preserving data integrity.
     """
     images, masks = batch
     
     print(f"Original batch shapes - images: {images.shape}, masks: {masks.shape}")
     
-    # Step 1: First ensure images and masks have matching dimensions
-    # For BraTS, standard axial view should be [B, C, D, H, W] where D is the shortest dimension (155)
-    
-    # Find which dimension contains the depth (155) in both tensors
-    img_dims = list(images.shape[2:])
-    mask_dims = list(masks.shape[2:])
-    
-    # For BraTS, the depth is 155, the other two dimensions are usually 240
-    # Identify which dimension is most likely the depth dimension (smallest)
-    img_depth_idx = img_dims.index(min(img_dims)) + 2  # +2 for batch & channel dims
-    mask_depth_idx = mask_dims.index(min(mask_dims)) + 2
-    
-    # Define the desired order: [B, C, D, H, W] where D is the smallest dimension
-    # The smallest dimension should always be the 3rd dimension (index 2)
-    desired_img_order = list(range(len(images.shape)))
-    if img_depth_idx != 2:
-        # Swap depth dimension with dimension at index 2
-        desired_img_order[2], desired_img_order[img_depth_idx] = desired_img_order[img_depth_idx], desired_img_order[2]
-        images = images.permute(*desired_img_order)
-    
-    desired_mask_order = list(range(len(masks.shape)))
-    if mask_depth_idx != 2:
-        # Swap depth dimension with dimension at index 2
-        desired_mask_order[2], desired_mask_order[mask_depth_idx] = desired_mask_order[mask_depth_idx], desired_mask_order[2]
-        masks = masks.permute(*desired_mask_order)
-    
-    # Make sure mask has same shape as image - they should both be [B, C, 155, 240, 240] for BraTS
+    # If shapes are different, we need to align them
     if images.shape != masks.shape:
-        # Reshape mask to match image dimensions
-        new_masks = torch.zeros_like(images)
+        # Find which dimension in masks is 155 (standard BraTS depth)
+        mask_155_dim = None
+        for i in range(2, len(masks.shape)):
+            if masks.shape[i] == 155:
+                mask_155_dim = i
+                break
+                
+        # Find which dimension in images is 155
+        img_155_dim = None
+        for i in range(2, len(images.shape)):
+            if images.shape[i] == 155:
+                img_155_dim = i
+                break
         
-        # Copy data for common dimensions
-        min_dims = [min(i, m) for i, m in zip(images.shape, masks.shape)]
-        if len(min_dims) == 5:
-            new_masks[:, :, :min_dims[2], :min_dims[3], :min_dims[4]] = \
-                masks[:, :, :min_dims[2], :min_dims[3], :min_dims[4]]
-        
-        masks = new_masks
+        # If we found the 155 dimension in both, and they're different, permute masks
+        if mask_155_dim is not None and img_155_dim is not None and mask_155_dim != img_155_dim:
+            # Create a permutation that puts the mask's 155 dimension where the image has it
+            perm = list(range(len(masks.shape)))
+            perm[mask_155_dim], perm[img_155_dim] = perm[img_155_dim], perm[mask_155_dim]
+            
+            print(f"Permuting masks using order: {perm}")
+            masks = masks.permute(*perm)
+    
+    # At this point, if shapes still don't match, it's likely due to a dimension order mismatch
+    # Rather than create a new tensor, let's just ensure masks match images
+    if images.shape != masks.shape:
+        print(f"Warning: Image shape {images.shape} doesn't match mask shape {masks.shape}")
+        print("Cannot safely reshape - using original masks")
     
     print(f"After orientation normalization - images: {images.shape}, masks: {masks.shape}")
     
@@ -726,7 +719,6 @@ def preprocess_batch(batch, device=None):
         masks = masks.to(device)
     
     return images, masks
-
 
 
 def train_model(data_path, batch_size=1, epochs=20, learning_rate=1e-3,
