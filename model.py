@@ -1055,11 +1055,7 @@ class AutoSAM2(nn.Module):
                 total_prob = multi_class_mask.sum(dim=1, keepdim=True)
                 multi_class_mask = multi_class_mask / total_prob.clamp(min=1e-5)
                 
-                # Debug: check that we have a valid probability distribution
-                if torch.rand(1).item() < 0.01:  # Print occasionally
-                    class_percentages = [(multi_class_mask[:, c] > 0.5).sum().item() / (h * w) * 100 for c in range(self.num_classes)]
-                    print(f"SAM2 Slice {slice_idx} - Class distribution: {class_percentages}")
-                
+              
                 return multi_class_mask
             else:
                 # No valid masks found
