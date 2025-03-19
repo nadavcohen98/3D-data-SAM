@@ -1150,7 +1150,7 @@ class AutoSAM2(nn.Module):
         return img_rgb
     
     def process_slice_with_sam2(self, input_vol, slice_idx, slice_features, depth_dim_idx, device):
-        """Process a single slice with SAM2 using both point and box prompts with improved multi-class handling"""
+        """Process a single slice with SAM2 using both point and box prompts"""
         if not self.has_sam2:
             logger.warning(f"SAM2 not available for slice {slice_idx}")
             return None
@@ -1175,15 +1175,15 @@ class AutoSAM2(nn.Module):
             # Process through bridge network to get enhanced features
             enhanced_features = self.unet_sam_bridge(slice_features)
         
-            # Generate point prompts
-            points, labels, box, tumor_prob = self.prompt_generator.generate_prompts(
+            # Generate point prompts for whole tumor detection
+            points, labels, box, _ = self.prompt_generator.generate_prompts(
                 enhanced_features, slice_idx, h, w
             )
             
             # Set image in SAM2
             self.sam2.set_image(rgb_image)
             
-            # Call SAM2 with both point and box prompts (if box exists)
+            # Call SAM2 with both point and box prompts to get whole tumor mask
             masks, scores, _ = self.sam2.predict(
                 point_coords=points,
                 point_labels=labels,
@@ -1200,52 +1200,42 @@ class AutoSAM2(nn.Module):
                 mask_tensor = torch.from_numpy(best_mask).float().to(device)
                 mask_tensor = mask_tensor.unsqueeze(0).unsqueeze(0)  # [1, 1, H, W]
                 
-                # Create multi-class output with proper BraTS class distribution
-                multi_class_mask = torch.zeros((1, self.num_classes, h, w), device=device)
+                # Create multi-class output
+                height, width = mask_tensor.shape[2:]
+                multi_class_mask = torch.zeros((1, self.num_classes, height, width), device=device)
                 
-                # Determine tumor region characteristics
-                tumor_size = mask_tensor.sum().item() / (h * w)
-                
-                # Background is 1 - tumor
+                # Strategy 1: Anatomical distribution approach
+                # Background (class 0) is inverse of tumor mask
                 multi_class_mask[:, 0] = 1.0 - mask_tensor[:, 0]
                 
-                # Use biomedical knowledge for tumor class distribution:
-                # 1. Smaller tumors are more likely to be focused in one class
-                # 2. Larger tumors tend to have more edema (class 2)
-                # 3. Enhanced tumor (class 4/index 3) is usually smaller and central
+                # Anatomical distribution for tumor regions
+                # Class 2 (ED) - Most common, typically surrounds other classes
+                multi_class_mask[:, 2] = mask_tensor[:, 0].clone() 
                 
-                if tumor_size > 0.001:  # Only if we have meaningful tumor prediction
-                    # Calculate tumor distribution based on size
-                    if tumor_size < 0.05:  # Small tumor
-                        # Small tumors more likely to be predominantly one class
-                        # Choose dominant class based on probability map
-                        if torch.tensor(tumor_prob).max() > 0.8:
-                            # Higher confidence - more likely to be enhancing tumor (ET)
-                            class_weights = [0.2, 0.2, 0.6]  # [NCR, ED, ET]
-                        else:
-                            # Lower confidence - more likely to be edema (ED)
-                            class_weights = [0.1, 0.8, 0.1]  # [NCR, ED, ET]
-                    elif tumor_size < 0.15:  # Medium tumor
-                        # Medium tumors typically have more balanced distribution
-                        class_weights = [0.3, 0.5, 0.2]  # [NCR, ED, ET]
-                    else:  # Large tumor
-                        # Large tumors often have more edema and necrotic core
-                        class_weights = [0.4, 0.5, 0.1]  # [NCR, ED, ET]
-                    
-                    # Apply distribution to tumor classes
-                    multi_class_mask[:, 1] = mask_tensor[:, 0] * class_weights[0]  # NCR (class 1)
-                    multi_class_mask[:, 2] = mask_tensor[:, 0] * class_weights[1]  # ED (class 2)
-                    multi_class_mask[:, 3] = mask_tensor[:, 0] * class_weights[2]  # ET (class 4)
-                    
-                    # Ensure we don't lose tumor signal in the process
-                    # Calculate total tumor signal after distribution
-                    tumor_signal = multi_class_mask[:, 1:].sum(dim=1, keepdim=True)
-                    # If we lost tumor signal, rescale to preserve it
-                    signal_ratio = mask_tensor.sum() / (tumor_signal.sum() + 1e-8)
-                    if signal_ratio > 1.1:  # We lost more than 10% signal
-                        multi_class_mask[:, 1:] *= signal_ratio
+                # Get smaller "core" region for NCR (class 1) and ET (class 3)
+                # Use erosion via max pooling on inverted mask to simulate
+                kernel_size = max(3, int(min(h, w) * 0.05))
+                padded_mask = F.pad(mask_tensor, (kernel_size//2, kernel_size//2, kernel_size//2, kernel_size//2), mode='constant', value=0)
+                eroded_mask = F.max_pool2d(padded_mask, kernel_size=kernel_size, stride=1)
                 
-                return multi_class_mask
+                # Further erosion for ET (class 3)
+                kernel_size_small = max(3, int(min(h, w) * 0.025))
+                padded_eroded = F.pad(eroded_mask, (kernel_size_small//2, kernel_size_small//2, kernel_size_small//2, kernel_size_small//2), mode='constant', value=0)
+                double_eroded = F.max_pool2d(padded_eroded, kernel_size=kernel_size_small, stride=1)
+                
+                # Distribute to classes
+                # NCR (class 1) is core minus inner core
+                multi_class_mask[:, 1] = eroded_mask - double_eroded
+                # ET (class 3) is the innermost region
+                multi_class_mask[:, 3] = double_eroded
+                
+                # Make classes mutually exclusive
+                # Enforce only one active class per pixel by taking the argmax
+                indices = multi_class_mask.argmax(dim=1, keepdim=True)
+                one_hot = torch.zeros_like(multi_class_mask)
+                one_hot.scatter_(1, indices, 1.0)
+                
+                return one_hot
             else:
                 # No valid masks found
                 logger.warning(f"SAM2 failed to generate masks for slice {slice_idx}")
@@ -1256,10 +1246,7 @@ class AutoSAM2(nn.Module):
             return None
     
     def create_3d_from_slices(self, input_shape, sam2_slices, depth_dim_idx, device):
-        """
-        Create a 3D volume from 2D slice results.
-        For axial view, slices are always along dimension 2.
-        """
+        """Create a 3D volume from 2D slice results with multi-class awareness"""
         # Create empty volume matching the expected output size
         batch_size = input_shape[0]
         output_shape = list(input_shape)
@@ -1270,8 +1257,42 @@ class AutoSAM2(nn.Module):
         # Insert each slice result into the appropriate position
         for slice_idx, mask in sam2_slices.items():
             if mask is not None:
-                # For axial view, always use first dimension after channels
+                # For axial view, slices are always along dimension 2
                 volume[:, :, slice_idx] = mask
+        
+        # Fill gaps between processed slices
+        if len(sam2_slices) > 1:
+            # Get sorted slice indices
+            processed_indices = sorted(sam2_slices.keys())
+            
+            # For each gap between processed slices
+            for i in range(len(processed_indices) - 1):
+                current_idx = processed_indices[i]
+                next_idx = processed_indices[i + 1]
+                
+                # Skip if slices are adjacent
+                if next_idx - current_idx <= 1:
+                    continue
+                
+                # Interpolate for each gap slice
+                start_mask = volume[:, :, current_idx]
+                end_mask = volume[:, :, next_idx]
+                
+                for j in range(current_idx + 1, next_idx):
+                    # Calculate interpolation weight
+                    alpha = (j - current_idx) / (next_idx - current_idx)
+                    
+                    # Linear interpolation between masks
+                    interp_mask = (1 - alpha) * start_mask + alpha * end_mask
+                    
+                    # Make mutually exclusive if needed
+                    if not self.training:
+                        indices = interp_mask.argmax(dim=1, keepdim=True)
+                        interp_mask = torch.zeros_like(interp_mask)
+                        interp_mask.scatter_(1, indices, 1.0)
+                    
+                    # Assign interpolated mask
+                    volume[:, :, j] = interp_mask
         
         return volume
 
@@ -1376,21 +1397,30 @@ class AutoSAM2(nn.Module):
     
     
     def combine_results(self, unet_output, sam2_slices, depth_dim_idx, blend_weight=0.7):
-        """
-        Combine UNet output with SAM2 results using a 70-30 blend.
-        For axial view, slices are always along dimension 2.
-        """
+        """Combine UNet output with SAM2 results using a multi-class aware approach"""
         # Start with UNet output
         combined = unet_output.clone()
         
         # Replace or blend slices with SAM2 results
         for slice_idx, mask in sam2_slices.items():
             if mask is not None:
-                # Get UNet slice (for axial view, always use first dimension after channels)
+                # Get UNet slice for axial view
                 unet_slice = combined[:, :, slice_idx]
-                combined[:, :, slice_idx] = blend_weight * unet_slice + (1 - blend_weight) * mask
+                
+                # Create weighted blend for each class separately
+                blended_slice = blend_weight * unet_slice + (1 - blend_weight) * mask
+                
+                # Update combined result
+                combined[:, :, slice_idx] = blended_slice
         
-        return combined
+        # Final class assignment - make mutually exclusive by taking argmax
+        if self.training:  # During training, keep soft probabilities
+            return combined
+        else:  # During inference, ensure each pixel has exactly one class
+            indices = combined.argmax(dim=1, keepdim=True)
+            final_output = torch.zeros_like(combined)
+            final_output.scatter_(1, indices, 1.0)
+            return final_output
     
     def get_boundary_pixels(self, mask, threshold=0.5):
         """Get boundary pixels of a mask for comparing segmentation boundaries"""
@@ -1411,9 +1441,7 @@ class AutoSAM2(nn.Module):
         return boundary
     
     def forward(self, x):
-        """
-        Forward pass with 3D context-aware SAM2 integration
-        """
+        """Forward pass with multi-class aware processing"""
         start_time = time.time()
         device = x.device
         
@@ -1426,20 +1454,16 @@ class AutoSAM2(nn.Module):
             use_full_decoder=self.enable_unet_decoder
         )
         
+        # Store UNet output for use in SAM2 processing
+        if self.enable_sam2:
+            self.last_unet_output = unet_output
+        
         # Mode 1: UNet3D only
         if not self.enable_sam2 or not self.has_sam2:
-            # Apply class-specific scaling even in UNet-only mode
-            for c in range(1, self.num_classes):
-                class_scale = 1.0 + 0.2 * c
-                unet_output[:, c] = unet_output[:, c] * class_scale
-            
-            # Ensure values stay in range
-            unet_output = torch.clamp(unet_output, 0, 1)
-            
             self.performance_metrics["total_time"].append(time.time() - start_time)
             return unet_output
         
-        # Process entire volume with 3D context for SAM2
+        # Process slices with SAM2 - now multi-class aware
         sam2_results = self.process_volume_with_3d_context(
             x, mid_features, metadata, device
         )
@@ -1450,34 +1474,19 @@ class AutoSAM2(nn.Module):
             final_output = self.create_3d_from_slices(
                 x.shape, sam2_results, metadata["depth_dim_idx"], device
             )
-            
-            # Apply class-specific scaling
-            for c in range(1, self.num_classes):
-                class_scale = 1.0 + 0.2 * c
-                final_output[:, c] = final_output[:, c] * class_scale
-            
-            # Ensure values stay in range
-            final_output = torch.clamp(final_output, 0, 1)
         
         # Mode 3: Hybrid mode (UNet + SAM2)
         else:
-            # Combine UNet output with 3D context-aware SAM2 results
+            # Combine UNet output with SAM2 results
             final_output = self.combine_results(
                 unet_output, sam2_results, metadata["depth_dim_idx"]
             )
-            
-            # Apply class-specific scaling
-            for c in range(1, self.num_classes):
-                class_scale = 1.0 + 0.2 * c
-                final_output[:, c] = final_output[:, c] * class_scale
-            
-            # Ensure values stay in range
-            final_output = torch.clamp(final_output, 0, 1)
         
         # Update timing metrics
         total_time = time.time() - start_time
         self.performance_metrics["total_time"].append(total_time)
     
+        # Store results for visualization/debugging
         self.last_unet_output = unet_output
         self.last_sam2_slices = sam2_results
         self.last_combined_output = final_output
