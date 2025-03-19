@@ -24,6 +24,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger("AutoSAM2")
 
+print("=== LOADING AUTOSAM2 WITH FLEXIBLE ARCHITECTURE FOR MULTI-CLASS SEGMENTATION ===")
+
 # Import SAM2 with error handling
 try:
     from sam2.sam2_image_predictor import SAM2ImagePredictor
@@ -243,6 +245,8 @@ class FlexibleUNet3D(nn.Module):
         # Dropout for regularization
         self.dropout = nn.Dropout3d(0.15)
         
+        # Debug counters
+        self.debug_counter = 0
     
     def forward(self, x, use_full_decoder=True):
         """Forward pass with multi-class output handling"""
@@ -325,13 +329,23 @@ class FlexibleUNet3D(nn.Module):
         # Combine for final output
         segmentation = torch.cat([background_prob, tumor_probs], dim=1)
         
+        # Debug output distribution occasionally
+        self.debug_counter += 1
+        if self.debug_counter % 100 == 0:  # Every 100 forward passes
+            class_percentages = []
+            total_pixels = torch.prod(torch.tensor(segmentation.shape[2:]))
+            for c in range(segmentation.shape[1]):
+                percent = (segmentation[:, c] > 0.5).sum().item() / (batch_size * total_pixels) * 100
+                class_percentages.append(f"{percent:.2f}%")
+            print(f"DEBUG - Output class distribution: {class_percentages}")
+        
         return segmentation, dec_out2, sam_embeddings, metadata
 
 
 class EnhancedPromptGenerator:
     """Enhanced prompt generator with comprehensive metrics tracking for SAM2"""
     def __init__(self, 
-                 num_positive_points=10,
+                 num_positive_points=10,  # Increased from 5 for better coverage
                  num_negative_points=3,  
                  edge_detection=True,    
                  use_confidence=True,    
@@ -929,12 +943,19 @@ class AutoSAM2(nn.Module):
         if not HAS_SAM2:
             logger.warning("SAM2 package not available. Running in fallback mode.")
             return
-                
+            
         try:
             # Initialize SAM2
             logger.info(f"Building SAM2 with model_id: {self.sam2_model_id}")
             sam2_model = build_sam2_hf(self.sam2_model_id)
             self.sam2 = SAM2ImagePredictor(sam2_model)
+            
+            # Freeze SAM2 weights
+            for param in self.sam2.model.parameters():
+                param.requires_grad = False
+            
+            self.has_sam2 = True
+            logger.info("SAM2 initialized successfully")
         except Exception as e:
             logger.error(f"Error initializing SAM2: {e}")
             self.has_sam2 = False
@@ -1034,11 +1055,21 @@ class AutoSAM2(nn.Module):
                     typical_dist = [0.0, 0.3, 0.4, 0.3]  # Background + 3 tumor classes
                     for c in range(1, self.num_classes):
                         multi_class_mask[:, c] = mask_tensor[:, 0] * typical_dist[c]
-
+                        if c == 3:  # זו המחלקה של ET
+                            print(f"ET Slice {slice_idx} Debug:")
+                            print(f"Typical ET distribution: {typical_dist[c]}")
+                            print(f"Original mask_tensor sum: {mask_tensor.sum()}")
+                            print(f"ET mask sum before normalization: {multi_class_mask[:, c].sum()}")
+                                                
                 # Ensure the class probabilities sum to 1.0
                 total_prob = multi_class_mask.sum(dim=1, keepdim=True)
                 multi_class_mask = multi_class_mask / total_prob.clamp(min=1e-5)
-                                
+                
+                # Debug: check that we have a valid probability distribution
+                if torch.rand(1).item() < 0.01:  # Print occasionally
+                    class_percentages = [(multi_class_mask[:, c] > 0.5).sum().item() / (h * w) * 100 for c in range(self.num_classes)]
+                    print(f"SAM2 Slice {slice_idx} - Class distribution: {class_percentages}")
+                
                 return multi_class_mask
             else:
                 # No valid masks found
@@ -1170,6 +1201,11 @@ class AutoSAM2(nn.Module):
                 # Combine background and tumor results
                 blended_result = torch.cat([bg_result, tumor_result], dim=1)
                 
+                # Debug: Occasionally print class distribution
+                if torch.rand(1).item() < 0.01:  # 1% chance
+                    class_distribution = [(blended_result[:, c] > 0.5).sum().item() / blended_result[:, c].numel() * 100 for c in range(blended_result.shape[1])]
+                    print(f"Slice {slice_idx} blended class distribution: {class_distribution}")
+                
                 # Normalize to ensure valid probability distribution
                 total_prob = blended_result.sum(dim=1, keepdim=True)
                 blended_result = blended_result / total_prob.clamp(min=1e-5)
@@ -1249,7 +1285,7 @@ class AutoSAM2(nn.Module):
             # Combine UNet output with SAM2 results
             final_output = self.combine_results(
                 unet_output, sam2_results, depth_dim_idx, 
-                bg_blend=0.5,    # Background relies more on UNet
+                bg_blend=0.9,    # Background relies more on UNet
                 tumor_blend=0.5  # Tumor relies more on SAM2
             )
         
@@ -1262,6 +1298,51 @@ class AutoSAM2(nn.Module):
         
         return final_output
     
+    def analyze_class_distribution(self, output, print_results=True):
+        """Analyze the class distribution in the current output for debugging."""
+        if output is None:
+            return "No output available for analysis"
+        
+        try:
+            # Get binary mask for each class
+            class_masks = (output > 0.5).float()
+            
+            # Calculate volume percentages
+            total_volume = torch.prod(torch.tensor(output.shape[2:]))
+            class_volumes = []
+            
+            for c in range(output.shape[1]):
+                vol = class_masks[:, c].sum().item() / total_volume * 100
+                class_volumes.append(f"Class {c}: {vol:.2f}%")
+            
+            result = " | ".join(class_volumes)
+            
+            if print_results:
+                print(f"Class Distribution: {result}")
+            
+            # Check for any all-zero or all-one slices (potential issues)
+            empty_slices = 0
+            all_bg_slices = 0
+            
+            for s in range(output.shape[2]):  # For axial view
+                slice_data = output[:, :, s]
+                
+                # If slice has no predictions at all
+                if (slice_data.sum() < 1e-5):
+                    empty_slices += 1
+                
+                # If slice is all background
+                if (slice_data[:, 1:].sum() < 1e-5):
+                    all_bg_slices += 1
+            
+            if print_results and (empty_slices > 0 or all_bg_slices > 0):
+                print(f"Warning: Found {empty_slices} empty slices and {all_bg_slices} background-only slices")
+            
+            return result
+        
+        except Exception as e:
+            logger.error(f"Error analyzing class distribution: {e}")
+            return f"Error: {str(e)}"
     
     def get_performance_stats(self):
         """Return performance statistics."""
