@@ -1045,11 +1045,6 @@ class AutoSAM2(nn.Module):
                     typical_dist = [0.0, 0.3, 0.4, 0.3]  # Background + 3 tumor classes
                     for c in range(1, self.num_classes):
                         multi_class_mask[:, c] = mask_tensor[:, 0] * typical_dist[c]
-                        if c == 3:  # זו המחלקה של ET
-                            print(f"ET Slice {slice_idx} Debug:")
-                            print(f"Typical ET distribution: {typical_dist[c]}")
-                            print(f"Original mask_tensor sum: {mask_tensor.sum()}")
-                            print(f"ET mask sum before normalization: {multi_class_mask[:, c].sum()}")
                                                 
                 # Ensure the class probabilities sum to 1.0
                 total_prob = multi_class_mask.sum(dim=1, keepdim=True)
@@ -1187,11 +1182,7 @@ class AutoSAM2(nn.Module):
                 # Combine background and tumor results
                 blended_result = torch.cat([bg_result, tumor_result], dim=1)
                 
-                # Debug: Occasionally print class distribution
-                if torch.rand(1).item() < 0.01:  # 1% chance
-                    class_distribution = [(blended_result[:, c] > 0.5).sum().item() / blended_result[:, c].numel() * 100 for c in range(blended_result.shape[1])]
-                    print(f"Slice {slice_idx} blended class distribution: {class_distribution}")
-                
+               
                 # Normalize to ensure valid probability distribution
                 total_prob = blended_result.sum(dim=1, keepdim=True)
                 blended_result = blended_result / total_prob.clamp(min=1e-5)
