@@ -236,7 +236,7 @@ class FlexibleUNet3D(nn.Module):
         # Projection for SAM2 embeddings (from mid-decoder features)
         self.sam_projection = nn.Conv3d(base_channels * 2, 256, kernel_size=1)
 
-
+        self.dropout = nn.Dropout3d
 
 
     def forward(self, x, use_full_decoder=True):
