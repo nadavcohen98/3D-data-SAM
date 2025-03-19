@@ -185,8 +185,13 @@ def visualize_batch_comprehensive(images, masks, outputs, epoch, mode="hybrid", 
     for i, slice_idx in enumerate(slice_indices):
         try:
             # Extract slice data
+            print(f"Extracting slice {slice_idx} from images shape: {images.shape}")
             image_slice = images[b, :, slice_idx].cpu().detach().numpy()
-            image_slice = images[b, :, slice_idx].cpu().detach().numpy()
+            print(f"Extracted image_slice with shape: {image_slice.shape}")
+            
+            print(f"Extracting slice {slice_idx} from masks shape: {masks.shape}")
+            mask_slice = masks[b, :, slice_idx].cpu().detach().numpy()
+            print(f"Extracted mask_slice with shape: {mask_slice.shape}")
             output_slice = probs[b, :, slice_idx].cpu().detach().numpy()
             
             # Create main figure (2x3 grid)
@@ -319,6 +324,8 @@ def visualize_batch_comprehensive(images, masks, outputs, epoch, mode="hybrid", 
         
         # Add a row for each view: MRI, Ground Truth, Prediction
         for i, slice_idx in enumerate(slice_indices):
+
+            
             # Extract slice data
             image_slice = images[b, :, slice_idx].cpu().detach().numpy()
             mask_slice = masks[b, :, slice_idx].cpu().detach().numpy()
@@ -359,6 +366,8 @@ def visualize_batch_comprehensive(images, masks, outputs, epoch, mode="hybrid", 
         print(f"Error creating summary visualization: {e}")
 
 # Additional function to visualize a comparison of UNet3D and SAM2 outputs
+
+
 def visualize_model_comparison(images, masks, unet_outputs, hybrid_outputs, epoch, slice_indices=None, output_dir="results/comparison"):
     """
     Create visualizations comparing UNet3D and Hybrid modes
