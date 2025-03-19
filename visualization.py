@@ -25,43 +25,60 @@ def get_slice_indices(volume, num_slices=5):
     return indices
 
 def create_segmentation_overlay(img_slice, seg_slice, alpha=0.6):
-    """Create an RGB overlay of segmentation on grayscale image"""
-    # Create RGB version of the grayscale image
+    """
+    Create visualization overlay for BraTS tumor segmentation with proper color scheme.
+    Blue: Edema (ED)
+    Red: Necrotic Core (NCR)
+    Yellow: Enhancing Tumor (ET)
+    """
+    # Create normalized background image
     p1, p99 = np.percentile(img_slice, (1, 99))
     img_normalized = np.clip((img_slice - p1) / (p99 - p1 + 1e-8), 0, 1)
     rgb_img = np.stack([img_normalized]*3, axis=-1)
     
-    # Create RGB mask with colors matching your existing visualization
-    h, w = seg_slice.shape[1:]
-    rgb_mask = np.zeros((h, w, 3))
+    # Create a copy for overlay
+    overlay = rgb_img.copy()
     
-    # Apply your color convention
-    # Class 1 (NCR) - Blue
-    if 1 < seg_slice.shape[0]:  # Make sure we have this channel
+    # Check if we have multi-class segmentation
+    is_multi_class = seg_slice.shape[0] >= 4
+    
+    if is_multi_class:
+        # Create binary masks for each class (threshold > 0.5)
+        # Background is at index 0, NCR at 1, ED at 2, ET at 3
         ncr_mask = seg_slice[1] > 0.5
-        rgb_mask[ncr_mask, 0] = 0.0  # R
-        rgb_mask[ncr_mask, 1] = 0.0  # G
-        rgb_mask[ncr_mask, 2] = 1.0  # B
-    
-    # Class 2 (ED) - Green
-    if 2 < seg_slice.shape[0]:
         ed_mask = seg_slice[2] > 0.5
-        rgb_mask[ed_mask, 0] = 0.0  # R
-        rgb_mask[ed_mask, 1] = 1.0  # G
-        rgb_mask[ed_mask, 2] = 0.0  # B
-    
-    # Class 4 (ET) at index 3 - Red
-    if 3 < seg_slice.shape[0]:
         et_mask = seg_slice[3] > 0.5
-        rgb_mask[et_mask, 0] = 1.0  # R
-        rgb_mask[et_mask, 1] = 0.0  # G
-        rgb_mask[et_mask, 2] = 0.0  # B
+        
+        # Apply colors in the right order (outer to inner)
+        # First Edema (ED) - Blue
+        overlay[ed_mask, 0] = 0.0  # R
+        overlay[ed_mask, 1] = 0.0  # G
+        overlay[ed_mask, 2] = 1.0  # B
+        
+        # Next Necrotic Core (NCR) - Red
+        overlay[ncr_mask, 0] = 1.0  # R
+        overlay[ncr_mask, 1] = 0.0  # G
+        overlay[ncr_mask, 2] = 0.0  # B
+        
+        # Finally Enhancing Tumor (ET) - Yellow
+        overlay[et_mask, 0] = 1.0  # R
+        overlay[et_mask, 1] = 1.0  # G
+        overlay[et_mask, 2] = 0.0  # B
+    else:
+        # Fallback for binary segmentation
+        tumor_mask = seg_slice[0] > 0.5
+        overlay[tumor_mask, 0] = 0.0  # R
+        overlay[tumor_mask, 1] = 1.0  # G
+        overlay[tumor_mask, 2] = 0.0  # B
     
-    # Combine the image and mask
-    mask_present = (rgb_mask.sum(axis=-1, keepdims=True) > 0)
-    combined = rgb_img * (1 - alpha * mask_present) + rgb_mask * alpha
+    # Blend with original image
+    mask_present = np.sum(overlay != rgb_img, axis=-1) > 0
+    alpha_mask = np.zeros_like(rgb_img)
+    alpha_mask[mask_present, :] = alpha
     
-    return combined
+    blended = rgb_img * (1 - alpha_mask) + overlay * alpha_mask
+    
+    return blended
 
 def create_difference_map(gt_slice, pred_slice, img_slice):
     """Create a map highlighting differences between ground truth and prediction - FIXED VERSION"""
