@@ -16,7 +16,7 @@ import torch.nn.functional as F
 # Local imports
 from model import AutoSAM2
 from dataset import get_brats_dataloader
-from visualization import visualize_batch_comprehensive
+from visualization import visualize_batch_comprehensive, visualize_model_comparison
 torch.serialization.add_safe_globals([np.core.multiarray.scalar])
 
 
@@ -774,7 +774,7 @@ def train_model(data_path, batch_size=1, epochs=20, learning_rate=1e-3,
             print(f"Error loading optimizer state: {e}. Using fresh optimizer.")
     
     # Get data loaders
-    max_samples = 64 if test_run else None
+    max_samples = 10 if test_run else None
     
     train_loader = get_brats_dataloader(
         data_path, batch_size=batch_size, train=True,
