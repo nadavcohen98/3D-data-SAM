@@ -181,9 +181,7 @@ def visualize_batch_comprehensive(images, masks, outputs, epoch, mode="hybrid", 
     img_shape = list(images.shape[2:])  # Skip batch and channel dims
     depth_dim = min(img_shape)
     depth_dim_idx = img_shape.index(depth_dim) + 2  # +2 for batch and channel
-    
-    print(f"Detected depth dimension {depth_dim} at index {depth_dim_idx}")
-    
+        
     # Determine slice indices for this depth dimension
     total_slices = images.shape[depth_dim_idx]
     slice_indices = [
