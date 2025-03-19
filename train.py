@@ -220,46 +220,46 @@ class BraTSDiceLoss(nn.Module):
         self.smooth = smooth
         self.region_weights = region_weights
         
-def forward(self, y_pred, y_true):
-    # Get sigmoid activation for binary predictions
-    if torch.min(y_pred) < 0 or torch.max(y_pred) > 1:
-        probs = torch.sigmoid(y_pred)
-    else:
-        probs = y_pred
-    
-    batch_size = y_pred.size(0)
-    device = y_pred.device
-    
-    # Initialize losses for all regions
-    losses = []
-    
-    for b in range(batch_size):
-        # Compute dice loss for each class independently
-        for class_idx in range(1, y_pred.size(1)):  # Skip background
-            pred_class = probs[b, class_idx].reshape(-1)
-            true_class = y_true[b, class_idx].reshape(-1)
-            
-            # Only calculate if there's something to predict
-            if true_class.sum() > 0 or pred_class.sum() > 0:
-                intersection = (pred_class * true_class).sum()
-                dice = (2. * intersection + self.smooth) / (pred_class.sum() + true_class.sum() + self.smooth)
-                losses.append(1. - dice)
-    
-    # If no valid regions found
-    if not losses:
-        return torch.tensor(0.0, requires_grad=True, device=device)
-    
-    # Compute weighted mean loss
-    losses_tensor = torch.stack(losses)
-    
-    # Apply regional weights if specified
-    weighted_regions = {
-        'ET': 1.3,   # More weight for enhancing tumor
-        'WT': 1.0,   # Standard weight for whole tumor
-        'TC': 1.2    # Slightly more weight for tumor core
-    }
-    
-    return losses_tensor.mean()
+    def forward(self, y_pred, y_true):
+        # Get sigmoid activation for binary predictions
+        if torch.min(y_pred) < 0 or torch.max(y_pred) > 1:
+            probs = torch.sigmoid(y_pred)
+        else:
+            probs = y_pred
+        
+        batch_size = y_pred.size(0)
+        device = y_pred.device
+        
+        # Initialize losses for all regions
+        losses = []
+        
+        for b in range(batch_size):
+            # Compute dice loss for each class independently
+            for class_idx in range(1, y_pred.size(1)):  # Skip background
+                pred_class = probs[b, class_idx].reshape(-1)
+                true_class = y_true[b, class_idx].reshape(-1)
+                
+                # Only calculate if there's something to predict
+                if true_class.sum() > 0 or pred_class.sum() > 0:
+                    intersection = (pred_class * true_class).sum()
+                    dice = (2. * intersection + self.smooth) / (pred_class.sum() + true_class.sum() + self.smooth)
+                    losses.append(1. - dice)
+        
+        # If no valid regions found
+        if not losses:
+            return torch.tensor(0.0, requires_grad=True, device=device)
+        
+        # Compute weighted mean loss
+        losses_tensor = torch.stack(losses)
+        
+        # Apply regional weights if specified
+        weighted_regions = {
+            'ET': 1.3,   # More weight for enhancing tumor
+            'WT': 1.0,   # Standard weight for whole tumor
+            'TC': 1.2    # Slightly more weight for tumor core
+        }
+        
+        return losses_tensor.mean()
 
 class BraTSCombinedLoss(nn.Module):
     """
