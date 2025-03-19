@@ -464,24 +464,24 @@ class MultiPointPromptGenerator:
 
         
         # Extract tumor probability (combine tumor classes with weighted importance)
-        if probability_maps.shape[1] >= 4:  # Check if we have enough channels
-            # Use class channels 1, 2, 3 (tumor classes) with weighted combination
-            # Weight ET (class 3) higher as it's typically the most important region
-            tumor_prob = (
-                0.3 * torch.sigmoid(probability_maps[0, 1]) +  # NCR
-                0.3 * torch.sigmoid(probability_maps[0, 2]) +  # ED
-                0.4 * torch.sigmoid(probability_maps[0, 3])    # ET (enhancing tumor)
-            ).cpu().detach().numpy()
+        if probability_maps.shape[1] >= 4:
+            # Equal weighting of all tumor classes
+            tumor_prob = torch.zeros((height, width), device=probability_maps.device)
+            for c in range(1, probability_maps.shape[1]):
+                tumor_prob += torch.sigmoid(probability_maps[0, c])
+            # Normalize to 0-1 range and increase contrast
+            tumor_prob = tumor_prob / (probability_maps.shape[1] - 1) 
+            tumor_prob = tumor_prob * 1.5  # Boost signal
+            tumor_prob = tumor_prob.cpu().detach().numpy()
         else:
-            # Fallback to first non-background channel
-            tumor_prob = torch.sigmoid(probability_maps[0, min(1, probability_maps.shape[1]-1)]).cpu().detach().numpy()
+            tumor_prob = torch.sigmoid(probability_maps[0, 1]).cpu().detach().numpy() * 1.5
         
         # Resize to target dimensions if necessary
         if tumor_prob.shape != (height, width):
             tumor_prob = zoom(tumor_prob, (height / tumor_prob.shape[0], width / tumor_prob.shape[1]), order=1)
         
         # Create binary mask from probability map
-        binary_mask = tumor_prob > 0.5
+        binary_mask = tumor_prob > 0.4
         
         # Initialize points lists
         foreground_points = []
@@ -1198,17 +1198,25 @@ class AutoSAM2(nn.Module):
                 best_idx = scores.argmax()
                 best_mask = masks[best_idx]
                 
-                # Convert to tensor and format
+                # Convert to tensor
                 mask_tensor = torch.from_numpy(best_mask).float().to(device)
                 mask_tensor = mask_tensor.unsqueeze(0).unsqueeze(0)  # [1, 1, H, W]
                 
-                # Create multi-class output
-                height, width = mask_tensor.shape[2:]
+                # Create multi-class output with class-specific weighting
                 multi_class_mask = torch.zeros((1, self.num_classes, height, width), device=device)
                 
-                # Fill tumor classes (1,2,3)
+                # Background (inverse of mask)
+                multi_class_mask[:, 0] = 1.0 - mask_tensor[:, 0]
+                
+                # Class distribution based on region probabilities
+                # Get region probability maps for each class
+                class_probs = torch.sigmoid(enhanced_features[0, 1:])
+                
+                # For each tumor class, apply mask with class-specific weighting
                 for c in range(1, self.num_classes):
-                    multi_class_mask[:, c] = mask_tensor[:, 0]
+                    # Weight the mask by the class probability
+                    class_weight = torch.mean(class_probs[c-1]).item()
+                    multi_class_mask[:, c] = mask_tensor[:, 0] * (0.5 + 0.5 * class_weight)
                 
                 return multi_class_mask
             else:
@@ -1394,6 +1402,14 @@ class AutoSAM2(nn.Module):
         
         # Mode 1: UNet3D only
         if not self.enable_sam2 or not self.has_sam2:
+            # Apply class-specific scaling even in UNet-only mode
+            for c in range(1, self.num_classes):
+                class_scale = 1.0 + 0.2 * c
+                unet_output[:, c] = unet_output[:, c] * class_scale
+            
+            # Ensure values stay in range
+            unet_output = torch.clamp(unet_output, 0, 1)
+            
             self.performance_metrics["total_time"].append(time.time() - start_time)
             return unet_output
         
@@ -1408,6 +1424,14 @@ class AutoSAM2(nn.Module):
             final_output = self.create_3d_from_slices(
                 x.shape, sam2_results, metadata["depth_dim_idx"], device
             )
+            
+            # Apply class-specific scaling
+            for c in range(1, self.num_classes):
+                class_scale = 1.0 + 0.2 * c
+                final_output[:, c] = final_output[:, c] * class_scale
+            
+            # Ensure values stay in range
+            final_output = torch.clamp(final_output, 0, 1)
         
         # Mode 3: Hybrid mode (UNet + SAM2)
         else:
@@ -1415,11 +1439,19 @@ class AutoSAM2(nn.Module):
             final_output = self.combine_results(
                 unet_output, sam2_results, metadata["depth_dim_idx"]
             )
+            
+            # Apply class-specific scaling
+            for c in range(1, self.num_classes):
+                class_scale = 1.0 + 0.2 * c
+                final_output[:, c] = final_output[:, c] * class_scale
+            
+            # Ensure values stay in range
+            final_output = torch.clamp(final_output, 0, 1)
         
         # Update timing metrics
         total_time = time.time() - start_time
         self.performance_metrics["total_time"].append(total_time)
-
+    
         self.last_unet_output = unet_output
         self.last_sam2_slices = sam2_results
         self.last_combined_output = final_output
