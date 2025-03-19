@@ -1288,51 +1288,6 @@ class AutoSAM2(nn.Module):
         
         return final_output
     
-    def analyze_class_distribution(self, output, print_results=True):
-        """Analyze the class distribution in the current output for debugging."""
-        if output is None:
-            return "No output available for analysis"
-        
-        try:
-            # Get binary mask for each class
-            class_masks = (output > 0.5).float()
-            
-            # Calculate volume percentages
-            total_volume = torch.prod(torch.tensor(output.shape[2:]))
-            class_volumes = []
-            
-            for c in range(output.shape[1]):
-                vol = class_masks[:, c].sum().item() / total_volume * 100
-                class_volumes.append(f"Class {c}: {vol:.2f}%")
-            
-            result = " | ".join(class_volumes)
-            
-            if print_results:
-                print(f"Class Distribution: {result}")
-            
-            # Check for any all-zero or all-one slices (potential issues)
-            empty_slices = 0
-            all_bg_slices = 0
-            
-            for s in range(output.shape[2]):  # For axial view
-                slice_data = output[:, :, s]
-                
-                # If slice has no predictions at all
-                if (slice_data.sum() < 1e-5):
-                    empty_slices += 1
-                
-                # If slice is all background
-                if (slice_data[:, 1:].sum() < 1e-5):
-                    all_bg_slices += 1
-            
-            if print_results and (empty_slices > 0 or all_bg_slices > 0):
-                print(f"Warning: Found {empty_slices} empty slices and {all_bg_slices} background-only slices")
-            
-            return result
-        
-        except Exception as e:
-            logger.error(f"Error analyzing class distribution: {e}")
-            return f"Error: {str(e)}"
     
     def get_performance_stats(self):
         """Return performance statistics."""
