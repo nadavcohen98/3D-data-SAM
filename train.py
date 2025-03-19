@@ -467,7 +467,7 @@ def validate(model, val_loader, criterion, device, epoch):
                     'ET': f"{dice_metrics.get('ET_mean', 0.0):.1f}%"
                 })
                 
-                # Visualize first batch
+                # Visualize batch
                 if (batch_idx == 6):
                     print("Creating visualizations for validation batch")
                     try:
