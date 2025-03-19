@@ -1396,19 +1396,19 @@ class AutoSAM2(nn.Module):
         return slice_data
 
     def debug_mask_distribution(self, mask):
-    """Debug helper to check mask class distribution"""
-    if torch.is_tensor(mask):
-        # Get percentage of each class
-        total_pixels = torch.prod(torch.tensor(mask.shape[2:]))
-        class_percentages = []
-        
-        for c in range(mask.shape[1]):
-            pixels_in_class = torch.sum(mask[:, c] > 0.5)
-            percentage = (pixels_in_class / total_pixels) * 100
-            class_percentages.append(percentage.item())
-        
-        print(f"Class distribution: {class_percentages}")
-    return mask
+        """Debug helper to check mask class distribution"""
+        if torch.is_tensor(mask):
+            # Get percentage of each class
+            total_pixels = torch.prod(torch.tensor(mask.shape[2:]))
+            class_percentages = []
+            
+            for c in range(mask.shape[1]):
+                pixels_in_class = torch.sum(mask[:, c] > 0.5)
+                percentage = (pixels_in_class / total_pixels) * 100
+                class_percentages.append(percentage.item())
+            
+            print(f"Class distribution: {class_percentages}")
+        return mask
 
     
     def combine_results(self, unet_output, sam2_slices, depth_dim_idx, blend_weight=0.7):
