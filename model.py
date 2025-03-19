@@ -975,6 +975,9 @@ class AutoSAM2(nn.Module):
     
     def process_slice_with_sam2(self, input_vol, slice_idx, slice_features, depth_dim_idx, device):
         """Process a single slice with SAM2 for multi-class segmentation."""
+        print(f"\nProcessing Slice {slice_idx} Debug:")
+        print(f"Input volume shape: {input_vol.shape}")
+        print(f"Slice features shape: {slice_features.shape}")
         if not self.has_sam2:
             logger.warning(f"SAM2 not available for slice {slice_idx}")
             return None
@@ -988,6 +991,8 @@ class AutoSAM2(nn.Module):
             
             # Convert to numpy array in the format SAM2 expects: [H, W, 3]
             rgb_image = rgb_tensor[0].permute(1, 2, 0).detach().cpu().numpy()
+            print(f"RGB image shape: {rgb_image.shape}")
+            print(f"RGB image value range: [{rgb_image.min()}, {rgb_image.max()}]")
             
             # Get image dimensions
             h, w = rgb_image.shape[:2]
@@ -1010,6 +1015,12 @@ class AutoSAM2(nn.Module):
                 box=box,
                 multimask_output=True
             )
+            print("\nSAM2 Prediction Debug:")
+            print(f"Masks shape: {masks.shape}")
+            print(f"Scores: {scores}")
+            for i, mask in enumerate(masks):
+                print(f"Mask {i} unique values: {np.unique(mask)}")
+                print(f"Mask {i} sum: {mask.sum()}")
             
             # Select best mask based on score
             if len(masks) > 0:
@@ -1184,13 +1195,7 @@ class AutoSAM2(nn.Module):
         combined = unet_output.clone()
         
         # Replace or blend slices with SAM2 results
-        print("Combine Results Debug:")
-        print(f"UNet output shape: {unet_output.shape}")
-        print(f"UNet output unique values: {torch.unique(unet_output)}")
-        print(f"Number of SAM2 slices: {len(sam2_slices)}")
         for slice_idx, mask in sam2_slices.items():
-            print(f"Slice {slice_idx} mask shape: {mask.shape}")
-            print(f"Slice {slice_idx} mask unique values: {torch.unique(mask)}")
             if mask is not None:
                 # Get UNet slice
                 if depth_dim_idx == 2:
