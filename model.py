@@ -820,9 +820,6 @@ class AutoSAM2(nn.Module):
         self.prompt_generator = EnhancedPromptGenerator(
             num_positive_points=5,
             num_negative_points=3,
-            edge_detection=True,
-            use_confidence=True,
-            use_mask_prompt=True
         )
         
         # Bridge network for connecting UNet features to SAM2
