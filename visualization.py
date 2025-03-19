@@ -346,23 +346,25 @@ def visualize_batch_comprehensive(images, masks, outputs, epoch, mode="hybrid", 
         print(f"Error creating summary visualization: {e}")
 
 # Additional function to visualize a comparison of UNet3D and SAM2 outputs
-def visualize_model_comparison(images, masks, unet_outputs, sam_outputs, hybrid_outputs, epoch, slice_indices=None, prefix=""):
+def visualize_model_comparison(images, masks, unet_outputs, hybrid_outputs, epoch, slice_indices=None, output_dir="results/comparison"):
     """
-    Create visualizations comparing UNet3D, SAM2, and Hybrid modes
+    Create visualizations comparing UNet3D and Hybrid modes
     
     Args:
         images: Input MRI scans [B, C, D, H, W]
         masks: Ground truth masks [B, C, D, H, W]
         unet_outputs: UNet3D predictions [B, C, D, H, W]
-        sam_outputs: SAM2 predictions [B, C, D, H, W]
         hybrid_outputs: Hybrid model predictions [B, C, D, H, W]
         epoch: Current epoch number
         slice_indices: Specific slice indices to visualize (optional)
-        prefix: Prefix for saved files
+        output_dir: Directory to save comparison visualizations
     """
-    # Create output directory
-    os.makedirs("results", exist_ok=True)
-    os.makedirs("results/comparison", exist_ok=True)
+    # Create output directory with absolute path
+    current_dir = os.path.abspath(os.getcwd())
+    comp_dir = os.path.join(current_dir, output_dir)
+    os.makedirs(comp_dir, exist_ok=True)
+    
+    print(f"Saving comparison visualizations to: {comp_dir}")
     
     # Get batch item
     b = 0
@@ -373,11 +375,6 @@ def visualize_model_comparison(images, masks, unet_outputs, sam_outputs, hybrid_
     else:
         unet_probs = unet_outputs
         
-    if torch.is_tensor(sam_outputs) and (torch.min(sam_outputs) < 0 or torch.max(sam_outputs) > 1):
-        sam_probs = torch.sigmoid(sam_outputs)
-    else:
-        sam_probs = sam_outputs
-        
     if torch.is_tensor(hybrid_outputs) and (torch.min(hybrid_outputs) < 0 or torch.max(hybrid_outputs) > 1):
         hybrid_probs = torch.sigmoid(hybrid_outputs)
     else:
@@ -387,19 +384,8 @@ def visualize_model_comparison(images, masks, unet_outputs, sam_outputs, hybrid_
     if slice_indices is None:
         slice_indices = get_slice_indices(images)
     
-    # Set up figure properties
-    plt.rcParams.update({
-        'font.size': 10,
-        'axes.titlesize': 10,
-        'axes.labelsize': 10,
-        'xtick.labelsize': 8,
-        'ytick.labelsize': 8,
-        'figure.titlesize': 12,
-        'figure.dpi': 150
-    })
-    
     # Process each slice
-    for i, slice_idx in enumerate(slice_indices):
+    for slice_idx in slice_indices:
         try:
             # Extract slice data
             image_slice = images[b, :, slice_idx].cpu().detach().numpy()
@@ -407,12 +393,10 @@ def visualize_model_comparison(images, masks, unet_outputs, sam_outputs, hybrid_
             
             # Get outputs from each model
             unet_slice = unet_probs[b, :, slice_idx].cpu().detach().numpy() if torch.is_tensor(unet_probs) else None
-            sam_slice = sam_probs[b, :, slice_idx].cpu().detach().numpy() if torch.is_tensor(sam_probs) else None
             hybrid_slice = hybrid_probs[b, :, slice_idx].cpu().detach().numpy() if torch.is_tensor(hybrid_probs) else None
             
             # Create figure (2x2 grid)
-            fig = plt.figure(figsize=(16, 12))
-            gs = gridspec.GridSpec(2, 2, figure=fig)
+            fig, axs = plt.subplots(2, 2, figsize=(14, 12))
             
             # Show FLAIR MRI with ground truth overlay
             flair_idx = min(3, image_slice.shape[0]-1)
@@ -420,53 +404,53 @@ def visualize_model_comparison(images, masks, unet_outputs, sam_outputs, hybrid_
             flair_normalized = np.clip((image_slice[flair_idx] - p1) / (p99 - p1 + 1e-8), 0, 1)
             
             # Ground Truth overlay (top left)
-            ax1 = fig.add_subplot(gs[0, 0])
             gt_overlay = create_segmentation_overlay(image_slice[flair_idx], mask_slice)
-            ax1.imshow(gt_overlay)
-            ax1.set_title('Ground Truth')
-            ax1.axis('off')
+            axs[0, 0].imshow(gt_overlay)
+            axs[0, 0].set_title('Ground Truth', fontsize=12)
+            axs[0, 0].axis('off')
             
             # UNet3D prediction (top right)
-            ax2 = fig.add_subplot(gs[0, 1])
             if unet_slice is not None:
                 unet_overlay = create_segmentation_overlay(image_slice[flair_idx], unet_slice)
-                ax2.imshow(unet_overlay)
-                ax2.set_title('UNet3D Prediction')
+                axs[0, 1].imshow(unet_overlay)
+                axs[0, 1].set_title('UNet3D Prediction', fontsize=12)
             else:
-                ax2.imshow(flair_normalized, cmap='gray')
-                ax2.set_title('UNet3D (Not Available)')
-            ax2.axis('off')
+                axs[0, 1].imshow(flair_normalized, cmap='gray')
+                axs[0, 1].set_title('UNet3D (Not Available)', fontsize=12)
+            axs[0, 1].axis('off')
             
-            # SAM2 prediction (bottom left)
-            ax3 = fig.add_subplot(gs[1, 0])
-            if sam_slice is not None:
-                sam_overlay = create_segmentation_overlay(image_slice[flair_idx], sam_slice)
-                ax3.imshow(sam_overlay)
-                ax3.set_title('SAM2 Prediction')
+            # Difference map for UNet3D (bottom left)
+            if unet_slice is not None:
+                unet_diff = create_difference_map(mask_slice, unet_slice, image_slice[flair_idx])
+                axs[1, 0].imshow(unet_diff)
+                axs[1, 0].set_title('UNet3D Difference Map (TP=Green, FP=Red, FN=Blue)', fontsize=12)
             else:
-                ax3.imshow(flair_normalized, cmap='gray')
-                ax3.set_title('SAM2 (Not Available)')
-            ax3.axis('off')
+                axs[1, 0].imshow(flair_normalized, cmap='gray')
+                axs[1, 0].set_title('UNet3D Difference (Not Available)', fontsize=12)
+            axs[1, 0].axis('off')
             
             # Hybrid prediction (bottom right)
-            ax4 = fig.add_subplot(gs[1, 1])
             if hybrid_slice is not None:
                 hybrid_overlay = create_segmentation_overlay(image_slice[flair_idx], hybrid_slice)
-                ax4.imshow(hybrid_overlay)
-                ax4.set_title('Hybrid Prediction')
+                axs[1, 1].imshow(hybrid_overlay)
+                axs[1, 1].set_title('Hybrid (70/30) Prediction', fontsize=12)
             else:
-                ax4.imshow(flair_normalized, cmap='gray')
-                ax4.set_title('Hybrid (Not Available)')
-            ax4.axis('off')
+                axs[1, 1].imshow(flair_normalized, cmap='gray')
+                axs[1, 1].set_title('Hybrid (Not Available)', fontsize=12)
+            axs[1, 1].axis('off')
             
             # Add title
-            plt.suptitle(f'Model Comparison - Epoch {epoch} - Slice {slice_idx}', fontsize=12)
+            plt.suptitle(f'Model Comparison - Epoch {epoch} - Slice {slice_idx}', fontsize=14)
             
             # Adjust layout and save
             plt.tight_layout(rect=[0, 0, 1, 0.95])
-            comparison_filename = f"results/comparison/{prefix}_comp_slice{slice_idx}_epoch{epoch}.png"
+            comparison_filename = os.path.join(comp_dir, f"compare_slice{slice_idx}_epoch{epoch}.png")
             plt.savefig(comparison_filename, dpi=300, bbox_inches='tight')
             plt.close(fig)
             
+            print(f"Saved comparison to: {comparison_filename}")
+            
         except Exception as e:
             print(f"Error creating comparison visualization for slice {slice_idx}: {e}")
+            import traceback
+            traceback.print_exc()
