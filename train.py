@@ -511,7 +511,7 @@ def validate(model, val_loader, criterion, device, epoch):
                 })
                 
                 # Visualize first batch
-                if (batch_idx == 6):
+                if (batch_idx == 10):
                     print("Creating visualizations for validation batch")
                     try:
                         if hasattr(model, 'last_unet_output'):
