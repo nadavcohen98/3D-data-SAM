@@ -201,15 +201,19 @@ class BraTSDataset(Dataset):
                 # The mask should have the same orientation as the image
                 mask_data = np.transpose(mask_data, (2, 0, 1))
     
+                # Create multi-class mask with proper BraTS class mapping
+                # BraTS labels: 0=background, 1=NCR, 2=ED, 4=ET
                 multi_class_mask = np.zeros((4,) + mask_data.shape, dtype=np.float32)
-                multi_class_mask[0] = (mask_data == 0).astype(np.float32)
-                multi_class_mask[1] = (mask_data == 1).astype(np.float32)
-                multi_class_mask[2] = (mask_data == 2).astype(np.float32)
-                multi_class_mask[3] = (mask_data == 4).astype(np.float32)    
+                multi_class_mask[0] = (mask_data == 0).astype(np.float32)  # Background
+                multi_class_mask[1] = (mask_data == 1).astype(np.float32)  # NCR (class 1)
+                multi_class_mask[2] = (mask_data == 2).astype(np.float32)  # ED (class 2)
+                multi_class_mask[3] = (mask_data == 4).astype(np.float32)  # ET (class 4)
+                
                 mask_data = multi_class_mask
-    
             else:
+                # If no label file exists, create empty mask with 100% background
                 mask_data = np.zeros((4,) + image_data.shape[1:], dtype=np.float32)
+                mask_data[0] = 1.0  # All background
             
             # Convert to PyTorch tensors
             image = torch.tensor(image_data, dtype=torch.float32)
@@ -225,7 +229,9 @@ class BraTSDataset(Dataset):
                 print(f"Error loading image {self.image_files[idx]}: {e}")
             # Return dummy data
             dummy_shape = (4, 155, 240, 240)  # Corrected standard BraTS shape 
-            return torch.zeros(dummy_shape, dtype=torch.float32), torch.zeros((4,) + dummy_shape[1:], dtype=torch.float32)
+            dummy_mask = torch.zeros((4,) + dummy_shape[1:], dtype=torch.float32)
+            dummy_mask[0] = 1.0  # All background
+            return torch.zeros(dummy_shape, dtype=torch.float32), dummy_mask
 
     
     def __getitem__(self, idx):
