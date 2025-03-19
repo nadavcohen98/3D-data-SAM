@@ -935,6 +935,10 @@ class AutoSAM2(nn.Module):
             logger.info(f"Building SAM2 with model_id: {self.sam2_model_id}")
             sam2_model = build_sam2_hf(self.sam2_model_id)
             self.sam2 = SAM2ImagePredictor(sam2_model)
+        except Exception as e:
+            logger.error(f"Error initializing SAM2: {e}")
+            self.has_sam2 = False
+            self.sam2 = None
     
     def set_mode(self, enable_unet_decoder=None, enable_sam2=None):
         """Change the processing mode dynamically."""
