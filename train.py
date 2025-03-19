@@ -962,7 +962,48 @@ def train_model(data_path, batch_size=1, epochs=20, learning_rate=1e-3,
                     std_val = val_metrics.get(f'{region}_std', 0.0)
                     iqr_val = val_metrics.get(f'{region}_iqr', 0.0)
                     print(f"{region}: Mean={mean_val:.2f}%, Median={median_val:.2f}%, Std={std_val:.2f}%, IQR={iqr_val:.2f}%")
-    
+    # Save best metrics to a separate file
+    with open("results/best_metrics_summary.txt", "w") as f:
+        f.write("="*50 + "\n")
+        f.write("BEST PERFORMANCE METRICS:\n")
+        f.write("="*50 + "\n")
+        
+        best_dice_train = max(history['train_dice']) if history['train_dice'] else 0.0
+        best_dice_val = max(history['val_dice']) if history['val_dice'] else 0.0
+        best_wt_dice = max(history['val_dice_wt']) if history['val_dice_wt'] else 0.0
+        best_tc_dice = max(history['val_dice_tc']) if history['val_dice_tc'] else 0.0
+        best_et_dice = max(history['val_dice_et']) if history['val_dice_et'] else 0.0
+        
+        f.write(f"Best Mean Dice Train: {best_dice_train:.4f}\n")
+        f.write(f"Best Mean Dice Validation: {best_dice_val:.4f}\n")
+        f.write(f"Best Whole Tumor (WT) Dice: {best_wt_dice:.4f}\n")
+        f.write(f"Best Tumor Core (TC) Dice: {best_tc_dice:.4f}\n")
+        f.write(f"Best Enhancing Tumor (ET) Dice: {best_et_dice:.4f}\n")
+        
+        # Add IoU metrics if needed
+        best_iou_train = max(history['train_iou']) if history['train_iou'] else 0.0
+        best_iou_val = max(history['val_iou']) if history['val_iou'] else 0.0
+        
+        f.write(f"\nBest Mean IoU Train: {best_iou_train:.4f}\n")
+        f.write(f"Best Mean IoU Validation: {best_iou_val:.4f}\n")
+        
+        # Add timing information
+        if 'epoch_time' in history and history['epoch_time']:
+            avg_epoch_time = sum(history['epoch_time']) / len(history['epoch_time'])
+            f.write(f"\nAverage Epoch Time: {avg_epoch_time:.2f} seconds\n")
+            f.write(f"Total Training Time: {sum(history['epoch_time']):.2f} seconds\n")
+        
+        # Save configuration information
+        f.write("\nModel Configuration:\n")
+        if hasattr(model, 'get_performance_stats'):
+            stats = model.get_performance_stats()
+            for key, value in stats.items():
+                f.write(f"  {key}: {value}\n")
+        
+        # Save timestamp
+        from datetime import datetime
+        f.write(f"\nTraining completed at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+        
     print(f"Training complete! Best overall Dice score: {best_dice:.4f}")
 
     return model, history, best_metrics
