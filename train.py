@@ -670,67 +670,44 @@ def save_training_history(history, filename):
 
 def preprocess_batch(batch, device=None):
     """
-    פונקציה משופרת שמבטיחה התאמה בין אוריינטציה של התמונות והמסכות
+    Ensure both images and masks are in consistent axial orientation
     """
     images, masks = batch
     
     print(f"Original batch shapes - images: {images.shape}, masks: {masks.shape}")
     
-    # זיהוי מימד העומק (בד"כ 155 ב-BraTS)
+    # Step 1: First ensure images and masks have matching dimensions
+    # For BraTS, standard axial view should be [B, C, D, H, W] where D is the shortest dimension (155)
+    
+    # Find which dimension contains the depth (155) in both tensors
     img_dims = list(images.shape[2:])
     mask_dims = list(masks.shape[2:])
     
-    # זיהוי המימד המכיל את עומק 155 
-    depth_dim_value = 155
-    img_depth_idx = None
-    mask_depth_idx = None
+    # For BraTS, the depth is 155, the other two dimensions are usually 240
+    # Identify which dimension is most likely the depth dimension (smallest)
+    img_depth_idx = img_dims.index(min(img_dims)) + 2  # +2 for batch & channel dims
+    mask_depth_idx = mask_dims.index(min(mask_dims)) + 2
     
-    # חיפוש המימד שערכו 155 (עומק BraTS סטנדרטי)
-    for i, dim in enumerate(img_dims):
-        if dim == depth_dim_value:
-            img_depth_idx = i + 2  # +2 כי מתחילים אחרי batch וערוץ
-            break
-    
-    for i, dim in enumerate(mask_dims):
-        if dim == depth_dim_value:
-            mask_depth_idx = i + 2  # +2 כי מתחילים אחרי batch וערוץ
-            break
-    
-    # אם לא מצאנו מימד 155, נחפש את המימד הקטן ביותר
-    if img_depth_idx is None:
-        img_depth_idx = img_dims.index(min(img_dims)) + 2
-    
-    if mask_depth_idx is None:
-        mask_depth_idx = mask_dims.index(min(mask_dims)) + 2
-    
-    # מימד העומק צריך להיות במקום השלישי (אינדקס 2)
-    # פרמוטציה של התמונות אם צריך
+    # Define the desired order: [B, C, D, H, W] where D is the smallest dimension
+    # The smallest dimension should always be the 3rd dimension (index 2)
+    desired_img_order = list(range(len(images.shape)))
     if img_depth_idx != 2:
-        img_permutation = list(range(len(images.shape)))
-        img_permutation[2], img_permutation[img_depth_idx] = img_permutation[img_depth_idx], img_permutation[2]
-        print(f"Permuting images using order: {img_permutation}")
-        images = images.permute(*img_permutation)
+        # Swap depth dimension with dimension at index 2
+        desired_img_order[2], desired_img_order[img_depth_idx] = desired_img_order[img_depth_idx], desired_img_order[2]
+        images = images.permute(*desired_img_order)
     
-    # פרמוטציה של המסכות אם צריך
+    desired_mask_order = list(range(len(masks.shape)))
     if mask_depth_idx != 2:
-        mask_permutation = list(range(len(masks.shape)))
-        mask_permutation[2], mask_permutation[mask_depth_idx] = mask_permutation[mask_depth_idx], mask_permutation[2]
-        print(f"Permuting masks using order: {mask_permutation}")
-        masks = masks.permute(*mask_permutation)
+        # Swap depth dimension with dimension at index 2
+        desired_mask_order[2], desired_mask_order[mask_depth_idx] = desired_mask_order[mask_depth_idx], desired_mask_order[2]
+        masks = masks.permute(*desired_mask_order)
     
-    # חשוב מאוד: אם המסכה עדיין לא מתואמת עם התמונה, יתכן שיש צורך להחליף את מימדי הרוחב והגובה
-    # בדיקה אם המסכה והתמונה לא תואמות למרות שהעומק במקום הנכון
-    if images.shape != masks.shape and images.shape[2] == masks.shape[2]:
-        print("Image and mask have different H/W orientation. Swapping mask's H and W dimensions.")
-        mask_permutation = [0, 1, 2, 4, 3]  # החלפת מימדי גובה ורוחב
-        masks = masks.permute(*mask_permutation)
-    
-    # אם המימדים עדיין לא תואמים, נשנה את גודל המסכה להתאים לתמונה
+    # Make sure mask has same shape as image - they should both be [B, C, 155, 240, 240] for BraTS
     if images.shape != masks.shape:
-        print(f"Reshaping mask from {masks.shape} to match image shape {images.shape}")
+        # Reshape mask to match image dimensions
         new_masks = torch.zeros_like(images)
         
-        # העתקת נתונים למימדים המשותפים
+        # Copy data for common dimensions
         min_dims = [min(i, m) for i, m in zip(images.shape, masks.shape)]
         if len(min_dims) == 5:
             new_masks[:, :, :min_dims[2], :min_dims[3], :min_dims[4]] = \
@@ -740,10 +717,10 @@ def preprocess_batch(batch, device=None):
     
     print(f"After orientation normalization - images: {images.shape}, masks: {masks.shape}")
     
-    # וידוא שערכי המסכה בטווח תקין
+    # Ensure mask values are within expected range
     masks = torch.clamp(masks, 0, 1)
     
-    # העברה למכשיר המתאים אם צוין
+    # Move to device if specified
     if device is not None:
         images = images.to(device)
         masks = masks.to(device)
