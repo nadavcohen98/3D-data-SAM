@@ -39,6 +39,91 @@ except ImportError:
 
 # ======= Base model components =======
 
+    # For selecting exactly 30% of slices with center concentration:
+    def get_strategic_slices(depth, percentage=0.3):
+        """
+        Select strategic slices making up exactly the requested percentage of total depth
+        with higher concentration in the center regions.
+        
+        Args:
+            depth: Total number of slices in the volume
+            percentage: Percentage of slices to select (0.0-1.0)
+        
+        Returns:
+            List of selected slice indices
+        """
+        # Calculate number of slices to select (30% of total)
+        num_slices = max(1, int(depth * percentage))
+        
+        # Create a distribution that favors the middle
+        if num_slices <= 5:
+            # For very few slices, use simple approach
+            return [int(depth * p) for p in [0.1, 0.3, 0.5, 0.7, 0.9][:num_slices]]
+        
+        # Create three regions with different densities
+        center_region = 0.5  # 50% of slices in the center 40% of the volume
+        sides_region = 0.3   # 30% of slices in the middle 40% of the volume 
+        edges_region = 0.2   # 20% of slices in the outer 20% of the volume
+        
+        # Calculate slice counts for each region
+        center_count = int(num_slices * center_region)
+        sides_count = int(num_slices * sides_region)
+        edges_count = num_slices - center_count - sides_count
+        
+        # Generate slice indices for center region (40-60% of depth)
+        center_start = int(depth * 0.4)
+        center_end = int(depth * 0.6)
+        center_slices = []
+        if center_count > 0:
+            step = (center_end - center_start) / center_count
+            center_slices = [int(center_start + i * step) for i in range(center_count)]
+        
+        # Generate slice indices for sides regions (20-40% and 60-80% of depth)
+        side1_start = int(depth * 0.2)
+        side1_end = int(depth * 0.4)
+        side2_start = int(depth * 0.6)
+        side2_end = int(depth * 0.8)
+        
+        sides_slices = []
+        if sides_count > 0:
+            sides_per_side = sides_count // 2
+            remainder = sides_count % 2
+            
+            side1_step = (side1_end - side1_start) / (sides_per_side)
+            side1_slices = [int(side1_start + i * side1_step) for i in range(sides_per_side)]
+            
+            side2_step = (side2_end - side2_start) / (sides_per_side + remainder)
+            side2_slices = [int(side2_start + i * side2_step) for i in range(sides_per_side + remainder)]
+            
+            sides_slices = side1_slices + side2_slices
+        
+        # Generate slice indices for edge regions (0-20% and 80-100% of depth)
+        edge1_start = 0
+        edge1_end = int(depth * 0.2)
+        edge2_start = int(depth * 0.8)
+        edge2_end = depth
+        
+        edges_slices = []
+        if edges_count > 0:
+            edges_per_side = edges_count // 2
+            remainder = edges_count % 2
+            
+            edge1_step = (edge1_end - edge1_start) / (edges_per_side)
+            edge1_slices = [int(edge1_start + i * edge1_step) for i in range(edges_per_side)]
+            
+            edge2_step = (edge2_end - edge2_start) / (edges_per_side + remainder)
+            edge2_slices = [int(edge2_start + i * edge2_step) for i in range(edges_per_side + remainder)]
+            
+            edges_slices = edge1_slices + edge2_slices
+        
+        # Combine all slices and sort
+        all_slices = sorted(center_slices + sides_slices + edges_slices)
+        
+        # Ensure we don't have duplicates and stay within bounds
+        all_slices = sorted(list(set([min(depth-1, max(0, idx)) for idx in all_slices])))
+        
+        return all_slices
+
 class ResidualBlock3D(nn.Module):
     """3D convolutional block with residual connections and group normalization."""
     def __init__(self, in_channels, out_channels, num_groups=8):
@@ -152,91 +237,7 @@ class FlexibleUNet3D(nn.Module):
         self.sam_projection = nn.Conv3d(base_channels * 2, 256, kernel_size=1)
 
         self.dropout = nn.Dropout3d(0.15) 
-    
-    # For selecting exactly 30% of slices with center concentration
-    def get_strategic_slices(depth, percentage=0.3):
-        """
-        Select strategic slices making up exactly the requested percentage of total depth
-        with higher concentration in the center regions.
-        
-        Args:
-            depth: Total number of slices in the volume
-            percentage: Percentage of slices to select (0.0-1.0)
-        
-        Returns:
-            List of selected slice indices
-        """
-        # Calculate number of slices to select (30% of total)
-        num_slices = max(1, int(depth * percentage))
-        
-        # Create a distribution that favors the middle
-        if num_slices <= 5:
-            # For very few slices, use simple approach
-            return [int(depth * p) for p in [0.1, 0.3, 0.5, 0.7, 0.9][:num_slices]]
-        
-        # Create three regions with different densities
-        center_region = 0.5  # 50% of slices in the center 40% of the volume
-        sides_region = 0.3   # 30% of slices in the middle 40% of the volume 
-        edges_region = 0.2   # 20% of slices in the outer 20% of the volume
-        
-        # Calculate slice counts for each region
-        center_count = int(num_slices * center_region)
-        sides_count = int(num_slices * sides_region)
-        edges_count = num_slices - center_count - sides_count
-        
-        # Generate slice indices for center region (40-60% of depth)
-        center_start = int(depth * 0.4)
-        center_end = int(depth * 0.6)
-        center_slices = []
-        if center_count > 0:
-            step = (center_end - center_start) / center_count
-            center_slices = [int(center_start + i * step) for i in range(center_count)]
-        
-        # Generate slice indices for sides regions (20-40% and 60-80% of depth)
-        side1_start = int(depth * 0.2)
-        side1_end = int(depth * 0.4)
-        side2_start = int(depth * 0.6)
-        side2_end = int(depth * 0.8)
-        
-        sides_slices = []
-        if sides_count > 0:
-            sides_per_side = sides_count // 2
-            remainder = sides_count % 2
-            
-            side1_step = (side1_end - side1_start) / (sides_per_side)
-            side1_slices = [int(side1_start + i * side1_step) for i in range(sides_per_side)]
-            
-            side2_step = (side2_end - side2_start) / (sides_per_side + remainder)
-            side2_slices = [int(side2_start + i * side2_step) for i in range(sides_per_side + remainder)]
-            
-            sides_slices = side1_slices + side2_slices
-        
-        # Generate slice indices for edge regions (0-20% and 80-100% of depth)
-        edge1_start = 0
-        edge1_end = int(depth * 0.2)
-        edge2_start = int(depth * 0.8)
-        edge2_end = depth
-        
-        edges_slices = []
-        if edges_count > 0:
-            edges_per_side = edges_count // 2
-            remainder = edges_count % 2
-            
-            edge1_step = (edge1_end - edge1_start) / (edges_per_side)
-            edge1_slices = [int(edge1_start + i * edge1_step) for i in range(edges_per_side)]
-            
-            edge2_step = (edge2_end - edge2_start) / (edges_per_side + remainder)
-            edge2_slices = [int(edge2_start + i * edge2_step) for i in range(edges_per_side + remainder)]
-            
-            edges_slices = edge1_slices + edge2_slices
-        
-        # Combine all slices and sort
-        all_slices = sorted(center_slices + sides_slices + edges_slices)
-        
-        # Ensure we don't have duplicates and stay within bounds
-        all_slices = sorted(list(set([min(depth-1, max(0, idx)) for idx in all_slices])))
-        
-        return all_slices
+
 
 
     def forward(self, x, use_full_decoder=True):
