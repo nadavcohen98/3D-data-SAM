@@ -24,12 +24,12 @@ def get_slice_indices(volume, num_slices=5):
     
     return indices
 
-def create_segmentation_overlay(img_slice, seg_slice, alpha=0.6):
+def create_segmentation_overlay(img_slice, seg_slice, alpha=0.7):
     """
     Create visualization overlay for BraTS tumor segmentation with proper color scheme.
-    Blue: Edema (ED)
-    Red: Necrotic Core (NCR)
-    Yellow: Enhancing Tumor (ET)
+    Blue: Edema (ED) - Class 2
+    Red: Necrotic Core (NCR) - Class 1
+    Yellow: Enhancing Tumor (ET) - Class 4
     """
     # Create normalized background image
     p1, p99 = np.percentile(img_slice, (1, 99))
@@ -39,42 +39,39 @@ def create_segmentation_overlay(img_slice, seg_slice, alpha=0.6):
     # Create a copy for overlay
     overlay = rgb_img.copy()
     
-    # Check if we have multi-class segmentation
-    is_multi_class = seg_slice.shape[0] >= 4
+    # Create binary masks for each class (threshold > 0.5)
+    # Standard BraTS classes: Background(0), NCR(1), ED(2), ET(3)
+    if seg_slice.shape[0] >= 4:  # Multi-class segmentation
+        # Extract each tumor class separately
+        ncr_mask = (seg_slice[1] > 0.5)
+        ed_mask = (seg_slice[2] > 0.5)
+        et_mask = (seg_slice[3] > 0.5)
+        
+        # Apply colors one by one, each overwrites the previous
+        # Apply edema first (blue) - outermost layer
+        overlay[ed_mask, 0] = 0.0      # R
+        overlay[ed_mask, 1] = 0.0      # G
+        overlay[ed_mask, 2] = 1.0      # B
+        
+        # Apply necrotic core (red)
+        overlay[ncr_mask, 0] = 1.0     # R
+        overlay[ncr_mask, 1] = 0.0     # G
+        overlay[ncr_mask, 2] = 0.0     # B
+        
+        # Apply enhancing tumor (yellow) - innermost layer
+        overlay[et_mask, 0] = 1.0      # R
+        overlay[et_mask, 1] = 1.0      # G
+        overlay[et_mask, 2] = 0.0      # B
     
-    if is_multi_class:
-        # Create binary masks for each class (threshold > 0.5)
-        # Background is at index 0, NCR at 1, ED at 2, ET at 3
-        ncr_mask = seg_slice[1] > 0.5
-        ed_mask = seg_slice[2] > 0.5
-        et_mask = seg_slice[3] > 0.5
-        
-        # Apply colors in the right order (outer to inner)
-        # First Edema (ED) - Blue
-        overlay[ed_mask, 0] = 0.0  # R
-        overlay[ed_mask, 1] = 0.0  # G
-        overlay[ed_mask, 2] = 1.0  # B
-        
-        # Next Necrotic Core (NCR) - Red
-        overlay[ncr_mask, 0] = 1.0  # R
-        overlay[ncr_mask, 1] = 0.0  # G
-        overlay[ncr_mask, 2] = 0.0  # B
-        
-        # Finally Enhancing Tumor (ET) - Yellow
-        overlay[et_mask, 0] = 1.0  # R
-        overlay[et_mask, 1] = 1.0  # G
-        overlay[et_mask, 2] = 0.0  # B
-    else:
-        # Fallback for binary segmentation
-        tumor_mask = seg_slice[0] > 0.5
-        overlay[tumor_mask, 0] = 0.0  # R
-        overlay[tumor_mask, 1] = 1.0  # G
-        overlay[tumor_mask, 2] = 0.0  # B
+    else:  # Binary segmentation fallback
+        tumor_mask = (seg_slice[0] > 0.5)
+        overlay[tumor_mask, 0] = 0.0   # R
+        overlay[tumor_mask, 1] = 1.0   # G
+        overlay[tumor_mask, 2] = 0.0   # B
     
-    # Blend with original image
-    mask_present = np.sum(overlay != rgb_img, axis=-1) > 0
+    # Blend the overlay with original image
     alpha_mask = np.zeros_like(rgb_img)
-    alpha_mask[mask_present, :] = alpha
+    alpha_mask[np.any(overlay != rgb_img, axis=-1)] = alpha
     
     blended = rgb_img * (1 - alpha_mask) + overlay * alpha_mask
     
