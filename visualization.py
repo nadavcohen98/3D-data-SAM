@@ -43,11 +43,18 @@ def create_segmentation_overlay(img_slice, seg_slice, alpha=0.7):
     
     # Create binary masks for each class (threshold > 0.5)
     # Standard BraTS classes: Background(0), NCR(1), ED(2), ET(3)
+    print("Segmentation Slice Debug:")
+    print(f"seg_slice shape: {seg_slice.shape}")
+    print(f"seg_slice dtype: {seg_slice.dtype}")
+    print(f"seg_slice unique values: {np.unique(seg_slice)}")
+    print(f"seg_slice[3] unique values: {np.unique(seg_slice[3])}")
+    print(f"seg_slice[3] sum: {np.sum(seg_slice[3])}")
+    print(f"seg_slice[3] > 0.5 sum: {np.sum(seg_slice[3] > 0.5)}")
     if seg_slice.shape[0] >= 4:  # Multi-class segmentation
         # Extract each tumor class separately
         ncr_mask = (seg_slice[1] > 0.5)
         ed_mask = (seg_slice[2] > 0.5)
-        et_mask = (seg_slice[4] > 0.5)
+        et_mask = (seg_slice[3] > 0.5)
         
         # Apply colors one by one, each overwrites the previous
         # Apply edema first (blue) - outermost layer
