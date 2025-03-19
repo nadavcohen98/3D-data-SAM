@@ -229,7 +229,7 @@ class BraTSDataset(Dataset):
             if self.verbose:
                 print(f"Error loading image {self.image_files[idx]}: {e}")
             # Return dummy data
-            dummy_shape = (4, 155, 240, 240)  # Corrected standard BraTS shape
+            dummy_shape = (4, 240, 240, 155)  # Corrected standard BraTS shape
             return torch.zeros(dummy_shape, dtype=torch.float32), torch.zeros((4,) + dummy_shape[1:], dtype=torch.float32)
     
     def __getitem__(self, idx):
