@@ -178,7 +178,7 @@ class BraTSDataset(Dataset):
             return len(self.patient_dirs)
     
     def _load_monai_data(self, idx):
-        """Load data from MONAI's Task01_BrainTumour structure with error handling"""
+        """Load data from MONAI's Task01_BrainTumour structure with consistent orientation"""
         # Check if data is in cache
         if self.cache_data and idx in self.data_cache:
             return self.data_cache[idx]
@@ -188,6 +188,8 @@ class BraTSDataset(Dataset):
             image_data = nib.load(image_path).get_fdata()
             
             # The Task01_BrainTumour dataset has 4 modalities in the 4th dimension
+            # Make sure we use a consistent orientation - should be [C, D, H, W]
+            # where D is the smallest dimension (155 for BraTS)
             image_data = np.transpose(image_data, (3, 2, 0, 1))
             
             # Load mask
@@ -196,16 +198,23 @@ class BraTSDataset(Dataset):
             
             if os.path.exists(label_path):
                 mask_data = nib.load(label_path).get_fdata()
-
-                multi_class_mask = np.zeros((4,) + mask_data.shape, dtype=np.float32)
+                
+                # IMPORTANT: Make sure the mask has the same orientation as the image
+                # For masks, we need to transpose to match the image orientation
+                # The mask doesn't have a channel dimension, so we add it and transpose correctly
+                mask_data = np.expand_dims(mask_data, axis=0)  # Add channel dim
+                mask_data = np.transpose(mask_data, (0, 2, 0, 1))  # Match image orientation
+                
+                multi_class_mask = np.zeros((4,) + mask_data.shape[1:], dtype=np.float32)
                 multi_class_mask[0] = (mask_data == 0).astype(np.float32)
                 multi_class_mask[1] = (mask_data == 1).astype(np.float32)
                 multi_class_mask[2] = (mask_data == 2).astype(np.float32)
                 multi_class_mask[3] = (mask_data == 4).astype(np.float32)    
                 mask_data = multi_class_mask
-
+    
             else:
-                mask_data = np.zeros((1,) + image_data.shape[1:])
+                # Create an empty mask with same orientation as image
+                mask_data = np.zeros((4,) + image_data.shape[1:], dtype=np.float32)
             
             # Convert to PyTorch tensors
             image = torch.tensor(image_data, dtype=torch.float32)
@@ -220,8 +229,8 @@ class BraTSDataset(Dataset):
             if self.verbose:
                 print(f"Error loading image {self.image_files[idx]}: {e}")
             # Return dummy data
-            dummy_shape = (4, 240, 240, 155) 
-            return torch.zeros(dummy_shape, dtype=torch.float32), torch.zeros((1, *dummy_shape[1:]), dtype=torch.float32)
+            dummy_shape = (4, 155, 240, 240)  # Corrected standard BraTS shape
+            return torch.zeros(dummy_shape, dtype=torch.float32), torch.zeros((4,) + dummy_shape[1:], dtype=torch.float32)
     
     def __getitem__(self, idx):
         # Only use MONAI data loader for simplicity
