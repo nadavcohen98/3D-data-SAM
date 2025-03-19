@@ -203,6 +203,21 @@ class BraTSDataset(Dataset):
             
             return image, mask
 
+    def __getitem__(self, idx):
+        # Only use MONAI data loader for simplicity
+        image, mask = self._load_monai_data(idx)
+        
+        # Apply preprocessing with improved normalization
+        if self.normalize:
+            image = preprocess_brats_data(image, normalize=True)
+        
+        
+        # Apply data augmentation in training mode
+        if self.use_augmentation:
+            image, mask = apply_augmentations(image, mask)
+        
+        return image, mask
+
 def get_brats_dataloader(root_dir, batch_size=1, train=True, normalize=True, max_samples=None, 
                          num_workers=4, filter_empty=False, use_augmentation=False, 
                          cache_data=False, verbose=True):
