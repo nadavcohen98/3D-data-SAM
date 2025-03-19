@@ -119,8 +119,6 @@ class BraTSDataset(Dataset):
             
             # Filter samples to only include those with tumors
             if filter_empty:
-                if verbose:
-                    print("Filtering dataset to include only samples with tumors...")
                 filtered_image_files = []
                 
                 for img_file in tqdm(self.image_files, desc="Filtering empty samples", disable=not verbose):
@@ -139,8 +137,6 @@ class BraTSDataset(Dataset):
                             if verbose:
                                 print(f"Error loading {label_path}: {e}")
                 
-                if verbose:
-                    print(f"Found {len(filtered_image_files)} samples with tumors out of {len(self.image_files)} total")
                 self.image_files = filtered_image_files
             
             # Limit samples if specified
@@ -152,14 +148,12 @@ class BraTSDataset(Dataset):
                     # Use first portion for training
                     train_size = min(max_samples, len(self.image_files))
                     self.image_files = self.image_files[:train_size]
-                    if verbose:
-                        print(f"Using {len(self.image_files)} samples for training")
+
                 else:
                     # For validation, use last portion
                     val_size = min(max_samples, len(self.image_files)//5)  # Use 20% for validation
                     self.image_files = self.image_files[-val_size:]
-                    if verbose:
-                        print(f"Using {len(self.image_files)} samples for validation")
+
         else:
             # Regular BraTS structure
             if train:
@@ -231,8 +225,6 @@ class BraTSDataset(Dataset):
             return image, mask
         
         except Exception as e:
-            if self.verbose:
-                print(f"Error loading image {self.image_files[idx]}: {e}")
             
             # Return dummy data
             dummy_shape = (4, 155, 240, 240)
@@ -290,8 +282,6 @@ def get_brats_dataloader(root_dir, batch_size=1, train=True, normalize=True, max
     
     # Step 2: Determine the total number of samples
     total_samples = len(full_dataset)
-    if verbose:
-        print(f"Full dataset contains {total_samples} samples")
     
     # Step 3: Create fixed indices for reproducible but random splits
     import random
@@ -321,12 +311,9 @@ def get_brats_dataloader(root_dir, batch_size=1, train=True, normalize=True, max
         dataset = Subset(full_dataset, train_indices)
         if use_augmentation:
             full_dataset.use_augmentation = True
-        if verbose:
-            print(f"Created training dataset with {len(dataset)} samples")
     else:
         dataset = Subset(full_dataset, val_indices)
-        if verbose:
-            print(f"Created validation dataset with {len(dataset)} samples")
+
     
     # Step 7: Create and return the DataLoader
     loader = DataLoader(
@@ -338,7 +325,5 @@ def get_brats_dataloader(root_dir, batch_size=1, train=True, normalize=True, max
         drop_last=train  # Drop incomplete batches only during training
     )
     
-    if verbose:
-        print(f"Created {'training' if train else 'validation'} dataloader with {len(loader)} batches")
     
     return loader
