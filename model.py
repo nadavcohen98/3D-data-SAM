@@ -337,7 +337,6 @@ class FlexibleUNet3D(nn.Module):
             for c in range(segmentation.shape[1]):
                 percent = (segmentation[:, c] > 0.5).sum().item() / (batch_size * total_pixels) * 100
                 class_percentages.append(f"{percent:.2f}%")
-            print(f"DEBUG - Output class distribution: {class_percentages}")
         
         return segmentation, dec_out2, sam_embeddings, metadata
 
@@ -1055,11 +1054,7 @@ class AutoSAM2(nn.Module):
                     typical_dist = [0.0, 0.3, 0.4, 0.3]  # Background + 3 tumor classes
                     for c in range(1, self.num_classes):
                         multi_class_mask[:, c] = mask_tensor[:, 0] * typical_dist[c]
-                        if c == 3:  # זו המחלקה של ET
-                            print(f"ET Slice {slice_idx} Debug:")
-                            print(f"Typical ET distribution: {typical_dist[c]}")
-                            print(f"Original mask_tensor sum: {mask_tensor.sum()}")
-                            print(f"ET mask sum before normalization: {multi_class_mask[:, c].sum()}")
+
                                                 
                 # Ensure the class probabilities sum to 1.0
                 total_prob = multi_class_mask.sum(dim=1, keepdim=True)
@@ -1068,7 +1063,6 @@ class AutoSAM2(nn.Module):
                 # Debug: check that we have a valid probability distribution
                 if torch.rand(1).item() < 0.01:  # Print occasionally
                     class_percentages = [(multi_class_mask[:, c] > 0.5).sum().item() / (h * w) * 100 for c in range(self.num_classes)]
-                    print(f"SAM2 Slice {slice_idx} - Class distribution: {class_percentages}")
                 
                 return multi_class_mask
             else:
@@ -1200,11 +1194,6 @@ class AutoSAM2(nn.Module):
                 
                 # Combine background and tumor results
                 blended_result = torch.cat([bg_result, tumor_result], dim=1)
-                
-                # Debug: Occasionally print class distribution
-                if torch.rand(1).item() < 0.01:  # 1% chance
-                    class_distribution = [(blended_result[:, c] > 0.5).sum().item() / blended_result[:, c].numel() * 100 for c in range(blended_result.shape[1])]
-                    print(f"Slice {slice_idx} blended class distribution: {class_distribution}")
                 
                 # Normalize to ensure valid probability distribution
                 total_prob = blended_result.sum(dim=1, keepdim=True)
