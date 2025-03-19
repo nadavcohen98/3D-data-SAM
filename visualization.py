@@ -131,9 +131,15 @@ def visualize_batch_comprehensive(images, masks, outputs, epoch, mode="hybrid", 
         mode: Processing mode ("unet3d", "sam2", or "hybrid")
         prefix: Prefix for saved files
     """
-    # Create output directory
-    os.makedirs("results", exist_ok=True)
-    os.makedirs("results/slices", exist_ok=True)
+    # Create output directory - use absolute paths
+    current_dir = os.path.abspath(os.getcwd())
+    results_dir = os.path.join(current_dir, "results")
+    slices_dir = os.path.join(results_dir, "slices")
+    
+    os.makedirs(results_dir, exist_ok=True)
+    os.makedirs(slices_dir, exist_ok=True)
+    
+    print(f"Saving visualizations to: {slices_dir}")
     
     # Get batch item (usually just one in 3D segmentation)
     b = 0
@@ -149,6 +155,7 @@ def visualize_batch_comprehensive(images, masks, outputs, epoch, mode="hybrid", 
     
     # Determine slice indices 
     slice_indices = get_slice_indices(images, num_slices=5)
+    print(f"Visualizing slices at indices: {slice_indices}")
     
     # Set up figure properties for better visualization
     plt.rcParams.update({
@@ -283,11 +290,15 @@ def visualize_batch_comprehensive(images, masks, outputs, epoch, mode="hybrid", 
             
             # Adjust layout and save
             plt.tight_layout(rect=[0, 0, 1, 0.95])  # Leave room for suptitle
-            slice_filename = f"results/slices/{prefix}_slice{slice_idx}_epoch{epoch}.png"
+            slice_filename = os.path.join(slices_dir, f"{prefix}_slice{slice_idx}_epoch{epoch}.png")
             plt.savefig(slice_filename, dpi=300, bbox_inches='tight')
             plt.close(fig)
+            
+            print(f"Saved visualization to: {slice_filename}")
         except Exception as e:
             print(f"Error visualizing slice {slice_idx}: {e}")
+            import traceback
+            traceback.print_exc()
     
     # Create a summary figure with all slices side by side
     try:
