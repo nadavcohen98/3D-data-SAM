@@ -1394,34 +1394,59 @@ class AutoSAM2(nn.Module):
             slice_data = slice_data[0:1]
         
         return slice_data
-    
+
+    def debug_mask_distribution(self, mask):
+    """Debug helper to check mask class distribution"""
+    if torch.is_tensor(mask):
+        # Get percentage of each class
+        total_pixels = torch.prod(torch.tensor(mask.shape[2:]))
+        class_percentages = []
+        
+        for c in range(mask.shape[1]):
+            pixels_in_class = torch.sum(mask[:, c] > 0.5)
+            percentage = (pixels_in_class / total_pixels) * 100
+            class_percentages.append(percentage.item())
+        
+        print(f"Class distribution: {class_percentages}")
+    return mask
+
     
     def combine_results(self, unet_output, sam2_slices, depth_dim_idx, blend_weight=0.7):
-        """Combine UNet output with SAM2 results using a multi-class aware approach"""
-        # Start with UNet output
+        """Combines UNet and SAM2 outputs with proper multi-class handling"""
+        # Start with UNet output 
         combined = unet_output.clone()
         
-        # Replace or blend slices with SAM2 results
+        # Debug the UNet output distribution
+        self.debug_mask_distribution(combined)
+        
+        # For each slice processed by SAM2
         for slice_idx, mask in sam2_slices.items():
             if mask is not None:
-                # Get UNet slice for axial view
+                # Debug SAM2 output
+                self.debug_mask_distribution(mask.unsqueeze(0))
+                
+                # Get UNet slice
                 unet_slice = combined[:, :, slice_idx]
                 
-                # Create weighted blend for each class separately
-                blended_slice = blend_weight * unet_slice + (1 - blend_weight) * mask
-                
-                # Update combined result
-                combined[:, :, slice_idx] = blended_slice
+                # Blend each class separately
+                for c in range(combined.shape[1]):
+                    # Weighted average of probabilities (not argmax yet)
+                    combined[:, c, slice_idx] = blend_weight * unet_slice[:, c] + (1 - blend_weight) * mask[:, c]
         
-        # Final class assignment - make mutually exclusive by taking argmax
-        if self.training:  # During training, keep soft probabilities
-            return combined
-        else:  # During inference, ensure each pixel has exactly one class
-            indices = combined.argmax(dim=1, keepdim=True)
-            final_output = torch.zeros_like(combined)
-            final_output.scatter_(1, indices, 1.0)
-            return final_output
-    
+        # Apply softmax again to ensure valid probability distribution
+        # Reshape for softmax
+        b, c, *spatial_dims = combined.shape
+        flat_shape = (b, c, -1)
+        combined_flat = combined.reshape(flat_shape)
+        
+        # Apply softmax along class dimension
+        combined_flat = F.softmax(combined_flat, dim=1)
+        
+        # Reshape back
+        combined = combined_flat.reshape(combined.shape)
+        
+        return combined
+        
     def get_boundary_pixels(self, mask, threshold=0.5):
         """Get boundary pixels of a mask for comparing segmentation boundaries"""
         mask_binary = (mask[:, 1:] > threshold).float()
