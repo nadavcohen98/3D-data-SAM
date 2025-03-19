@@ -328,7 +328,6 @@ class FlexibleUNet3D(nn.Module):
         
         # Combine for final output
         combined_probs = torch.cat([background_prob, tumor_probs], dim=1)
-        segmentation = combined_probs / combined_probs.sum(dim=1, keepdim=True)
         
         # Debug output distribution occasionally
         self.debug_counter += 1
