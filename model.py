@@ -491,6 +491,8 @@ class EnhancedPromptGenerator:
         Returns:
             points: np.array of point coordinates
             labels: np.array of point labels (1=foreground, 0=background)
+            box: bounding box coordinates or None
+            tumor_prob: tumor probability map
         """
         # Extract tumor probability using binary-style approach
         # For BraTS with multi-class: combine all tumor classes with weighted sum
@@ -609,8 +611,12 @@ class EnhancedPromptGenerator:
         
         # Update statistics
         self.prompt_stats['points_generated'] += len(all_points)
+
+        # Generate bounding box
+        box = self.generate_optimal_box(binary_mask, tumor_prob)
         
-        return np.array(all_points), np.array(all_labels)
+        return np.array(all_points), np.array(all_labels), box, tumor_prob
+
     
     def generate_optimal_box(self, binary_mask_or_probability_maps, prob_map_or_slice_idx=None, height=None, width=None):
         """Generate optimal bounding box for tumor region."""
