@@ -77,6 +77,10 @@ def calculate_dice_score(y_pred, y_true, epsilon=1e-7):
         # ET (Class 3, index 3)
         pred_et = preds[b, 3].reshape(-1)
         true_et = y_true[b, 3].reshape(-1)
+        print(f"Batch {b} - ET prediction shape: {pred_et.shape}")
+        print(f"Batch {b} - ET prediction sum: {pred_et.sum()}")
+        print(f"Batch {b} - ET true shape: {true_et.shape}")
+        print(f"Batch {b} - ET true sum: {true_et.sum()}")
         if true_et.sum() > 0 or pred_et.sum() > 0:
             intersection_et = (pred_et * true_et).sum()
             dice_et = (2.0 * intersection_et / (pred_et.sum() + true_et.sum() + epsilon)).item() * 100
