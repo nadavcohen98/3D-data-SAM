@@ -176,72 +176,16 @@ class BraTSDataset(Dataset):
             return len(self.image_files)
         else:
             return len(self.patient_dirs)
-
         
     def _load_monai_data(self, idx):
-        """Load data from MONAI's Task01_BrainTumour structure with error handling"""
-        # Check if data is in cache
-        if self.cache_data and idx in self.data_cache:
-            return self.data_cache[idx]
+        image_path = os.path.join(self.data_dir, self.image_files[idx])
+        label_file = self.image_files[idx].replace('_0000.nii.gz', '.nii.gz')
+        label_path = os.path.join(self.label_dir, label_file)
         
-        try:
-            image_path = os.path.join(self.data_dir, self.image_files[idx])
-            image_data = nib.load(image_path).get_fdata()
-            
-            # The Task01_BrainTumour dataset has 4 modalities in the 4th dimension
-            image_data = np.transpose(image_data, (3, 2, 0, 1))
-            
-            # Load mask
-            label_file = self.image_files[idx].replace('_0000.nii.gz', '.nii.gz')
-            label_path = os.path.join(self.label_dir, label_file)
-            
-            if os.path.exists(label_path):
-                mask_data = nib.load(label_path).get_fdata()
-                
-                # Transpose mask to match image orientation
-                mask_data = np.transpose(mask_data, (2, 0, 1))
-        
-                # Create multi-class mask with proper BraTS class mapping
-                multi_class_mask = np.zeros((4,) + mask_data.shape, dtype=np.float32)
-                
-                # Background
-                multi_class_mask[0] = (mask_data == 0).astype(np.float32)
-                
-                # NCR
-                multi_class_mask[1] = (mask_data == 1).astype(np.float32)
-                
-                # ED
-                multi_class_mask[2] = (mask_data == 2).astype(np.float32)
-                
-                # ET - Primary mapping with fallback
-                multi_class_mask[3] = (mask_data == 4).astype(np.float32)
-                if np.sum(multi_class_mask[3]) == 0:
-                    multi_class_mask[3] = (mask_data == 3).astype(np.float32)
-            
-            else:
-                # If no label file exists, create empty mask with 100% background
-                multi_class_mask = np.zeros((4,) + image_data.shape[1:], dtype=np.float32)
-                multi_class_mask[0] = 1.0  # All background
-            
-            # Convert to PyTorch tensors
-            image = torch.tensor(image_data, dtype=torch.float32)
-            mask = torch.tensor(multi_class_mask, dtype=torch.float32)
-            
-            # Store in cache if enabled
-            if self.cache_data:
-                self.data_cache[idx] = (image, mask)
-            
-            return image, mask
-        
-        except Exception as e:
-            if self.verbose:
-                print(f"Error loading image {self.image_files[idx]}: {e}")
-            
-            # Return dummy data
-            dummy_shape = (4, 155, 240, 240)
-            dummy_mask = torch.zeros((4,) + dummy_shape[1:], dtype=torch.float32)
-            dummy_mask[0] = 1.0  # All background
-            return torch.zeros(dummy_shape, dtype=torch.float32), dummy_mask
+        if os.path.exists(label_path):
+            mask_data = nib.load(label_path).get_fdata()
+            print(f"Unique mask values: {np.unique(mask_data)}")
+            print(f"Counts for each value: {dict(zip(*np.unique(mask_data, return_counts=True)))}")
     
         
         def __getitem__(self, idx):
