@@ -315,9 +315,19 @@ class FlexibleUNet3D(nn.Module):
         # Final convolution (returns logits)
         logits = self.output_conv(dec_out4)
         
-
-        segmentation = F.softmax(logits, dim=1)
-
+        # MULTI-CLASS HANDLING: Use a binary-style approach for tumor classes
+        # For BraTS: class 0=background, class 1=NCR, class 2=ED, class 3=ET
+        
+        # Use sigmoid for tumor classes (1, 2, 3) independently
+        tumor_probs = torch.sigmoid(logits[:, 1:])
+        
+        # Background is inverse of combined tumor probability
+        # First get the combined tumor probability (clamp to avoid >1)
+        combined_tumor_prob = torch.clamp(tumor_probs.sum(dim=1, keepdim=True), max=1.0)
+        background_prob = 1.0 - combined_tumor_prob
+        
+        # Combine for final output
+        segmentation = torch.cat([background_prob, tumor_probs], dim=1)
         
         # Debug output distribution occasionally
         self.debug_counter += 1
