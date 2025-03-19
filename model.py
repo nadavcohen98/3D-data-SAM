@@ -316,10 +316,10 @@ class FlexibleUNet3D(nn.Module):
         dec_out4 = self.dec4(dec_out3, x1)
     
         # Final convolution
-        output = self.output_conv(dec_out4)
+        logits = self.output_conv(dec_out4)
         
         # Apply sigmoid
-        segmentation = torch.sigmoid(output)
+        segmentation = F.softmax(logits, dim=1)
         
         return segmentation, dec_out2, sam_embeddings, metadata
 
