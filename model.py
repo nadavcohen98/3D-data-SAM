@@ -1,147 +1,4 @@
-print("=== AUTOSAM2 WITH MULTI-CLASS SEGMENTATION SUPPORT LOADED SUCCESSFULLY ===")
-    def analyze_class_distribution(self, output, print_results=True):
-        """Analyze the class distribution in the current output for debugging."""
-        if output is None:
-            return "No output available for analysis"
-        
-        try:
-            # Get binary mask for each class
-            class_masks = (output > 0.5).float()
-            
-            # Calculate volume percentages
-            total_volume = torch.prod(torch.tensor(output.shape[2:]))
-            class_volumes = []
-            
-            for c in range(output.shape[1]):
-                vol = class_masks[:, c].sum().item() / total_volume * 100
-                class_volumes.append(f"Class {c}: {vol:.2f}%")
-            
-            result = " | ".join(class_volumes)
-            
-            if print_results:
-                print(f"Class Distribution: {result}")
-            
-            # Check for any all-zero or all-one slices (potential issues)
-            empty_slices = 0
-            all_bg_slices = 0
-            
-            for s in range(output.shape[2]):  # For axial view
-                slice_data = output[:, :, s]
-                
-                # If slice has no predictions at all
-                if (slice_data.sum() < 1e-5):
-                    empty_slices += 1
-                
-                # If slice is all background
-                if (slice_data[:, 1:].sum() < 1e-5):
-                    all_bg_slices += 1
-            
-            if print_results and (empty_slices > 0 or all_bg_slices > 0):
-                print(f"Warning: Found {empty_slices} empty slices and {all_bg_slices} background-only slices")
-            
-            return result
-        
-        except Exception as e:
-            logger.error(f"Error analyzing class distribution: {e}")
-            return f"Error: {str(e)}"
-    
-    def get_performance_stats(self):
-        """Return performance statistics."""
-        stats = {
-            "has_sam2": self.has_sam2,
-            "sam2_enabled": self.has_sam2_enabled,
-            "unet_enabled": self.enable_unet_decoder,
-            "sam2_slices_processed": self.performance_metrics["sam2_slices_processed"],
-            "model_mode": self._get_current_mode()
-        }
-        
-        if self.performance_metrics["total_time"]:
-            stats["avg_time_per_forward"] = np.mean(self.performance_metrics["total_time"])
-            stats["total_forward_passes"] = len(self.performance_metrics["total_time"])
-        
-        return stats
-    
-    def _get_current_mode(self):
-        """Return string describing current mode."""
-        if self.enable_unet_decoder and not self.has_sam2_enabled:
-            return "unet3d_only"
-        elif not self.enable_unet_decoder and self.has_sam2_enabled:
-            return "sam2_only"
-        elif self.enable_unet_decoder and self.has_sam2_enabled:
-            return "hybrid"
-        else:
-            return "invalid_config"    def forward(self, x):
-        """
-        Forward pass with multi-class segmentation support
-        """
-        start_time = time.time()
-        device = x.device
-        
-        # Flag for SAM2 usage tracking
-        self.has_sam2_enabled = self.enable_sam2 and self.has_sam2
-        
-        # Process with UNet3D to get mid-decoder features
-        unet_output, mid_features, sam_embeddings, metadata = self.unet3d(
-            x, 
-            use_full_decoder=self.enable_unet_decoder
-        )
-        
-        # Store UNet output for visualization if full decoder is enabled
-        if self.enable_unet_decoder:
-            self.last_unet_output = unet_output
-        
-        # Mode 1: UNet3D only
-        if not self.enable_sam2 or not self.has_sam2:
-            self.performance_metrics["total_time"].append(time.time() - start_time)
-            return unet_output
-        
-        # Extract key slices for SAM2 processing
-        depth_dim_idx = metadata["depth_dim_idx"]
-        key_indices = sorted(metadata["key_indices"])
-        
-        # Process key slices with SAM2
-        sam2_results = {}
-        for idx in key_indices:
-            try:
-                # Get features for this slice
-                slice_features = self.slice_processor.extract_slice(mid_features, idx // 4, depth_dim_idx)
-                
-                # Process with SAM2
-                result = self.process_slice_with_sam2(x, idx, slice_features, depth_dim_idx, device)
-                
-                if result is not None:
-                    sam2_results[idx] = result
-                    self.performance_metrics["sam2_slices_processed"] += 1
-            except Exception as e:
-                logger.error(f"Error processing slice {idx}: {e}")
-        
-        # Store SAM2 results for visualization
-        self.last_sam2_slices = sam2_results
-        
-        # Mode 2: SAM2 only (without UNet decoder)
-        if not self.enable_unet_decoder:
-            # Create 3D volume from SAM2 slice results
-            final_output = self.create_3d_from_slices(
-                x.shape, sam2_results, depth_dim_idx, device
-            )
-        
-        # Mode 3: Hybrid mode (UNet + SAM2)
-        else:
-            # Combine UNet output with SAM2 results
-            final_output = self.combine_results(
-                unet_output, sam2_results, depth_dim_idx, 
-                bg_blend=0.9,    # Background relies more on UNet
-                tumor_blend=0.5  # Tumor relies more on SAM2
-            )
-        
-        # Store combined output for visualization
-        self.last_combined_output = final_output
-        
-        # Update timing metrics
-        total_time = time.time() - start_time
-        self.performance_metrics["total_time"].append(total_time)
-        
-        return final_output# Standard library imports
+# Standard library imports
 import os
 import time
 import gc
@@ -830,6 +687,114 @@ class UNet3DtoSAM2Bridge(nn.Module):
 
 # ======= SAM2 integration components =======
 
+class SliceProcessor(nn.Module):
+    """Process 3D volume slices for SAM2 integration with multi-class support."""
+    def __init__(self, input_channels=256, output_size=(64, 64)):
+        super().__init__()
+        
+        self.output_size = output_size
+        
+        # Refinement for slice features
+        self.refine = nn.Sequential(
+            nn.Conv2d(input_channels, input_channels, kernel_size=3, padding=1),
+            nn.GroupNorm(num_groups=32, num_channels=input_channels),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(input_channels, input_channels, kernel_size=1),
+            nn.GroupNorm(num_groups=32, num_channels=input_channels),
+            nn.ReLU(inplace=True)
+        )
+        
+        # Adaptive pooling to ensure correct output size
+        self.adaptive_pool = nn.AdaptiveAvgPool2d(output_size)
+    
+    def extract_slice(self, volume, idx, depth_dim=2):
+        """Extract a specific slice from a 3D volume."""
+        if depth_dim == 2:
+            slice_data = volume[:, :, idx]
+        elif depth_dim == 3:
+            slice_data = volume[:, :, :, idx]
+        elif depth_dim == 4:
+            slice_data = volume[:, :, :, :, idx]
+        else:
+            raise ValueError(f"Unsupported depth_dim: {depth_dim}")
+            
+        # If we have a batch, ensure it's handled correctly
+        if len(slice_data.shape) > 3 and slice_data.shape[0] > 1:
+            slice_data = slice_data[0:1]
+            
+        return slice_data
+    
+    def forward(self, features, indices, depth_dim):
+        """Process slices for SAM2."""
+        processed_slices = {}
+        
+        for idx in indices:
+            # Extract slice
+            slice_2d = self.extract_slice(features, idx, depth_dim)
+            
+            # Apply refinement
+            refined_slice = self.refine(slice_2d)
+            
+            # Ensure correct size with adaptive pooling
+            if refined_slice.shape[2:] != self.output_size:
+                refined_slice = self.adaptive_pool(refined_slice)
+            
+            # Store processed slice
+            processed_slices[idx] = refined_slice
+        
+        return processed_slices, [idx for idx in indices]
+
+class MRItoRGBMapper(nn.Module):
+    """Advanced mapping from 4 MRI channels to 3 RGB channels with attention"""
+    def __init__(self):
+        super().__init__()
+        
+        # Combined processing - simpler and more robust
+        self.initial_features = nn.Sequential(
+            nn.Conv2d(4, 16, kernel_size=3, padding=1),
+            nn.GroupNorm(4, 16),
+            nn.ReLU(inplace=True),
+        )
+        
+        # Feature extraction and integration
+        self.features = nn.Sequential(
+            nn.Conv2d(16, 16, kernel_size=3, padding=1),
+            nn.GroupNorm(4, 16),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(16, 16, kernel_size=3, padding=1),
+            nn.GroupNorm(4, 16),
+            nn.ReLU(inplace=True),
+        )
+        
+        # Simple self-attention mechanism
+        self.attention = nn.Sequential(
+            nn.Conv2d(16, 1, kernel_size=1),
+            nn.Sigmoid()
+        )
+        
+        # Final RGB mapping
+        self.to_rgb = nn.Conv2d(16, 3, kernel_size=1)
+        
+    def forward(self, x):
+        # Process all modalities together
+        features = self.initial_features(x)
+        
+        # Extract integrated features
+        features = self.features(features)
+        
+        # Apply attention
+        attention_map = self.attention(features)
+        attended_features = features * attention_map
+        
+        # Generate RGB
+        rgb = self.to_rgb(attended_features)
+        
+        # Ensure proper range with sigmoid
+        enhanced_rgb = torch.sigmoid(rgb)
+        
+        return enhanced_rgb
+
+
 # ======= Main AutoSAM2 model =======
 
 class AutoSAM2(nn.Module):
@@ -1197,14 +1162,19 @@ class AutoSAM2(nn.Module):
         """
         Combine UNet output with SAM2 results using adaptive blending.
         Modified for multi-class segmentation with class-specific blending.
+        
+        Args:
+            unet_output: Output from UNet3D [B, C, D, H, W]
+            sam2_slices: Dictionary of SAM2 results {slice_idx: mask}
+            depth_dim_idx: Index of depth dimension
+            bg_blend: Blending weight for background class (higher = more UNet)
+            tumor_blend: Blending weight for tumor classes (higher = more UNet)
+            
+        Returns:
+            Combined segmentation with valid probability distribution
         """
         # Start with UNet output
         combined = unet_output.clone()
-        
-        # Adaptive blending weights for different classes
-        # Use stronger influence from SAM2 for tumor boundaries
-        # bg_blend = 0.9 passed as param  # Background relies more on UNet
-        # tumor_blend = 0.5 passed as param  # Tumor relies more on SAM2
         
         # Replace or blend slices with SAM2 results
         for slice_idx, mask in sam2_slices.items():
@@ -1240,110 +1210,158 @@ class AutoSAM2(nn.Module):
                     combined[:, :, :, slice_idx] = blended_result
                 elif depth_dim_idx == 4:
                     combined[:, :, :, :, slice_idx] = blended_result
-
-class SliceProcessor(nn.Module):
-    """Process 3D volume slices for SAM2 integration with multi-class support."""
-    def __init__(self, input_channels=256, output_size=(64, 64)):
-        super().__init__()
         
-        self.output_size = output_size
+        # Apply final normalization to whole volume to ensure valid probabilities
+        total_prob = combined.sum(dim=1, keepdim=True)
+        combined = combined / total_prob.clamp(min=1e-5)
         
-        # Refinement for slice features
-        self.refine = nn.Sequential(
-            nn.Conv2d(input_channels, input_channels, kernel_size=3, padding=1),
-            nn.GroupNorm(num_groups=32, num_channels=input_channels),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(input_channels, input_channels, kernel_size=1),
-            nn.GroupNorm(num_groups=32, num_channels=input_channels),
-            nn.ReLU(inplace=True)
-        )
-        
-        # Adaptive pooling to ensure correct output size
-        self.adaptive_pool = nn.AdaptiveAvgPool2d(output_size)
+        return combined
     
-    def extract_slice(self, volume, idx, depth_dim=2):
-        """Extract a specific slice from a 3D volume."""
-        if depth_dim == 2:
-            slice_data = volume[:, :, idx]
-        elif depth_dim == 3:
-            slice_data = volume[:, :, :, idx]
-        elif depth_dim == 4:
-            slice_data = volume[:, :, :, :, idx]
-        else:
-            raise ValueError(f"Unsupported depth_dim: {depth_dim}")
-            
-        # If we have a batch, ensure it's handled correctly
-        if len(slice_data.shape) > 3 and slice_data.shape[0] > 1:
-            slice_data = slice_data[0:1]
-            
-        return slice_data
-    
-    def forward(self, features, indices, depth_dim):
-        """Process slices for SAM2."""
-        processed_slices = {}
-        
-        for idx in indices:
-            # Extract slice
-            slice_2d = self.extract_slice(features, idx, depth_dim)
-            
-            # Apply refinement
-            refined_slice = self.refine(slice_2d)
-            
-            # Ensure correct size with adaptive pooling
-            if refined_slice.shape[2:] != self.output_size:
-                refined_slice = self.adaptive_pool(refined_slice)
-            
-            # Store processed slice
-            processed_slices[idx] = refined_slice
-        
-        return processed_slices, [idx for idx in indices]
 
-class MRItoRGBMapper(nn.Module):
-    """Advanced mapping from 4 MRI channels to 3 RGB channels with attention"""
-    def __init__(self):
-        super().__init__()
-        
-        # Combined processing - simpler and more robust
-        self.initial_features = nn.Sequential(
-            nn.Conv2d(4, 16, kernel_size=3, padding=1),
-            nn.GroupNorm(4, 16),
-            nn.ReLU(inplace=True),
-        )
-        
-        # Feature extraction and integration
-        self.features = nn.Sequential(
-            nn.Conv2d(16, 16, kernel_size=3, padding=1),
-            nn.GroupNorm(4, 16),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(16, 16, kernel_size=3, padding=1),
-            nn.GroupNorm(4, 16),
-            nn.ReLU(inplace=True),
-        )
-        
-        # Simple self-attention mechanism
-        self.attention = nn.Sequential(
-            nn.Conv2d(16, 1, kernel_size=1),
-            nn.Sigmoid()
-        )
-        
-        # Final RGB mapping
-        self.to_rgb = nn.Conv2d(16, 3, kernel_size=1)
-        
     def forward(self, x):
-        # Process all modalities together
-        features = self.initial_features(x)
+        """
+        Forward pass with multi-class segmentation support
+        """
+        start_time = time.time()
+        device = x.device
         
-        # Extract integrated features
-        features = self.features(features)
+        # Flag for SAM2 usage tracking
+        self.has_sam2_enabled = self.enable_sam2 and self.has_sam2
         
-        # Apply attention
-        attention_map = self.attention(features)
-        attended_features = features * attention_map
+        # Process with UNet3D to get mid-decoder features
+        unet_output, mid_features, sam_embeddings, metadata = self.unet3d(
+            x, 
+            use_full_decoder=self.enable_unet_decoder
+        )
         
-        # Generate RGB
-        rgb = self.to_rgb(attended_features)
+        # Store UNet output for visualization if full decoder is enabled
+        if self.enable_unet_decoder:
+            self.last_unet_output = unet_output
         
-        # Ensure proper range with sigmoid
-        enhanced_rgb = torch.sigmoid(rgb)
+        # Mode 1: UNet3D only
+        if not self.enable_sam2 or not self.has_sam2:
+            self.performance_metrics["total_time"].append(time.time() - start_time)
+            return unet_output
         
-        return enhanced_rgb
+        # Extract key slices for SAM2 processing
+        depth_dim_idx = metadata["depth_dim_idx"]
+        key_indices = sorted(metadata["key_indices"])
+        
+        # Process key slices with SAM2
+        sam2_results = {}
+        for idx in key_indices:
+            try:
+                # Get features for this slice
+                slice_features = self.slice_processor.extract_slice(mid_features, idx // 4, depth_dim_idx)
+                
+                # Process with SAM2
+                result = self.process_slice_with_sam2(x, idx, slice_features, depth_dim_idx, device)
+                
+                if result is not None:
+                    sam2_results[idx] = result
+                    self.performance_metrics["sam2_slices_processed"] += 1
+            except Exception as e:
+                logger.error(f"Error processing slice {idx}: {e}")
+        
+        # Store SAM2 results for visualization
+        self.last_sam2_slices = sam2_results
+        
+        # Mode 2: SAM2 only (without UNet decoder)
+        if not self.enable_unet_decoder:
+            # Create 3D volume from SAM2 slice results
+            final_output = self.create_3d_from_slices(
+                x.shape, sam2_results, depth_dim_idx, device
+            )
+        
+        # Mode 3: Hybrid mode (UNet + SAM2)
+        else:
+            # Combine UNet output with SAM2 results
+            final_output = self.combine_results(
+                unet_output, sam2_results, depth_dim_idx, 
+                bg_blend=0.9,    # Background relies more on UNet
+                tumor_blend=0.5  # Tumor relies more on SAM2
+            )
+        
+        # Store combined output for visualization
+        self.last_combined_output = final_output
+        
+        # Update timing metrics
+        total_time = time.time() - start_time
+        self.performance_metrics["total_time"].append(total_time)
+        
+        return final_output
+    
+    def analyze_class_distribution(self, output, print_results=True):
+        """Analyze the class distribution in the current output for debugging."""
+        if output is None:
+            return "No output available for analysis"
+        
+        try:
+            # Get binary mask for each class
+            class_masks = (output > 0.5).float()
+            
+            # Calculate volume percentages
+            total_volume = torch.prod(torch.tensor(output.shape[2:]))
+            class_volumes = []
+            
+            for c in range(output.shape[1]):
+                vol = class_masks[:, c].sum().item() / total_volume * 100
+                class_volumes.append(f"Class {c}: {vol:.2f}%")
+            
+            result = " | ".join(class_volumes)
+            
+            if print_results:
+                print(f"Class Distribution: {result}")
+            
+            # Check for any all-zero or all-one slices (potential issues)
+            empty_slices = 0
+            all_bg_slices = 0
+            
+            for s in range(output.shape[2]):  # For axial view
+                slice_data = output[:, :, s]
+                
+                # If slice has no predictions at all
+                if (slice_data.sum() < 1e-5):
+                    empty_slices += 1
+                
+                # If slice is all background
+                if (slice_data[:, 1:].sum() < 1e-5):
+                    all_bg_slices += 1
+            
+            if print_results and (empty_slices > 0 or all_bg_slices > 0):
+                print(f"Warning: Found {empty_slices} empty slices and {all_bg_slices} background-only slices")
+            
+            return result
+        
+        except Exception as e:
+            logger.error(f"Error analyzing class distribution: {e}")
+            return f"Error: {str(e)}"
+    
+    def get_performance_stats(self):
+        """Return performance statistics."""
+        stats = {
+            "has_sam2": self.has_sam2,
+            "sam2_enabled": self.has_sam2_enabled,
+            "unet_enabled": self.enable_unet_decoder,
+            "sam2_slices_processed": self.performance_metrics["sam2_slices_processed"],
+            "model_mode": self._get_current_mode()
+        }
+        
+        if self.performance_metrics["total_time"]:
+            stats["avg_time_per_forward"] = np.mean(self.performance_metrics["total_time"])
+            stats["total_forward_passes"] = len(self.performance_metrics["total_time"])
+        
+        return stats
+    
+    def _get_current_mode(self):
+        """Return string describing current mode."""
+        if self.enable_unet_decoder and not self.has_sam2_enabled:
+            return "unet3d_only"
+        elif not self.enable_unet_decoder and self.has_sam2_enabled:
+            return "sam2_only"
+        elif self.enable_unet_decoder and self.has_sam2_enabled:
+            return "hybrid"
+        else:
+            return "invalid_config"
+
+
