@@ -188,7 +188,7 @@ class BraTSDataset(Dataset):
             image_data = nib.load(image_path).get_fdata()
             
             # The Task01_BrainTumour dataset has 4 modalities in the 4th dimension
-            image_data = np.transpose(image_data, (3, 1, 2, 0))
+            image_data = np.transpose(image_data, (3, 2, 0, 1))
             
             # Load mask
             label_file = self.image_files[idx].replace('_0000.nii.gz', '.nii.gz')
