@@ -186,7 +186,7 @@ def visualize_batch_comprehensive(images, masks, outputs, epoch, mode="hybrid", 
         try:
             # Extract slice data
             image_slice = images[b, :, slice_idx].cpu().detach().numpy()
-            mask_slice = masks[b, :, slice_idx].cpu().detach().numpy()
+            image_slice = images[b, :, slice_idx].cpu().detach().numpy()
             output_slice = probs[b, :, slice_idx].cpu().detach().numpy()
             
             # Create main figure (2x3 grid)
