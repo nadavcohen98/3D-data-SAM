@@ -511,9 +511,15 @@ def validate(model, val_loader, criterion, device, epoch):
                 })
                 
                 # Visualize first batch
-                
                 if (batch_idx == 6):
-                    visualize_batch_comprehensive(images, masks, outputs, epoch, mode="hybrid", prefix="val")
+                    print("Creating visualizations for validation batch")
+                    try:
+                        visualize_batch_comprehensive(images, masks, outputs, epoch, mode="hybrid", prefix="val")
+                        print("Visualization complete")
+                    except Exception as e:
+                        print(f"Error in visualization: {e}")
+                        import traceback
+                        traceback.print_exc()
                
                 
                 # Update total loss
