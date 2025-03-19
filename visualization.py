@@ -516,7 +516,6 @@ def visualize_model_comparison(images, masks, unet_outputs, hybrid_outputs, epoc
                 if hybrid_slice is not None:
                     hybrid_slice = np.transpose(hybrid_slice, (0, 1, 2))
             
-            print(f"Slice {slice_idx} - Image shape: {image_slice.shape}, Mask shape: {mask_slice.shape}")
             
             # Create figure (2x2 grid)
             fig, axs = plt.subplots(2, 2, figsize=(14, 12))
