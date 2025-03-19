@@ -1364,4 +1364,5 @@ class AutoSAM2(nn.Module):
         else:
             return "invalid_config"
 
+print("=== AUTOSAM2 WITH MULTI-CLASS SEGMENTATION SUPPORT LOADED SUCCESSFULLY ===")
 
