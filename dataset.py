@@ -176,7 +176,8 @@ class BraTSDataset(Dataset):
             return len(self.image_files)
         else:
             return len(self.patient_dirs)
-    
+
+        
     def _load_monai_data(self, idx):
         """Load data from MONAI's Task01_BrainTumour structure with error handling"""
         # Check if data is in cache
@@ -241,15 +242,6 @@ class BraTSDataset(Dataset):
             dummy_mask = torch.zeros((4,) + dummy_shape[1:], dtype=torch.float32)
             dummy_mask[0] = 1.0  # All background
             return torch.zeros(dummy_shape, dtype=torch.float32), dummy_mask
-            
-            except Exception as e:
-                print(f"Error loading {self.image_files[idx]}: {e}")
-                
-                # Dummy data
-                dummy_shape = (4, 155, 240, 240)
-                dummy_mask = torch.zeros((4,) + dummy_shape[1:], dtype=torch.float32)
-                dummy_mask[0] = 1.0
-                return torch.zeros(dummy_shape, dtype=torch.float32), dummy_mask
     
         
         def __getitem__(self, idx):
