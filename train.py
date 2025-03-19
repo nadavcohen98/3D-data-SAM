@@ -670,14 +670,26 @@ def save_training_history(history, filename):
 
 
 def preprocess_batch(batch, device=None):
-    """
-    Preprocess batch for BraTS segmentation with class labels 0, 1, 2, 4
-    """
-    images, masks = batch
-    print(f"Batch images shape: {images.shape}, masks shape: {masks.shape}")
-    
-    # Convert binary masks to multi-class format if needed
-    if masks.shape[1] == 1:
+   """
+   Preprocess batch for BraTS segmentation
+   """
+   images, masks = batch
+   
+   print(f"Original batch shapes - images: {images.shape}, masks: {masks.shape}")
+   
+   # Transpose masks to match the axial orientation of images
+   # If images are [B, C, D, H, W] but masks are [B, C, H, W, D]
+   # we need to permute masks to match
+   if images.shape[2:] != masks.shape[2:]:
+       print("Transposing masks to match image orientation")
+       # Permute to match [B, C, D, H, W]
+       masks = masks.permute(0, 1, 4, 2, 3)
+       print(f"After transpose - masks: {masks.shape}")
+   
+   # Rest of the preprocessing as before...
+   
+   # Convert binary masks to multi-class format if needed
+   if masks.shape[1] == 1:
        # For binary masks, create proper BraTS format with classes 0, 1, 2, 4
        multi_class_masks = torch.zeros((masks.shape[0], 4, *masks.shape[2:]), dtype=torch.float32)
        
@@ -685,7 +697,6 @@ def preprocess_batch(batch, device=None):
        multi_class_masks[:, 0] = (masks[:, 0] == 0).float()
        
        # If we have a binary tumor mask, distribute it to the three tumor classes
-       # This is a simplified approach when we only have tumor/no-tumor labels
        if torch.sum(masks[:, 0]) > 0:
            # Use percentages of the tumor mask for each class
            # Class 1: NCR (Necrotic tumor core)
@@ -698,16 +709,16 @@ def preprocess_batch(batch, device=None):
            multi_class_masks[:, 3] = (masks[:, 0] * (torch.rand_like(masks[:, 0]) < 0.2)).float()
        
        masks = multi_class_masks
-    
-    # Ensure mask values are within expected range
-    masks = torch.clamp(masks, 0, 1)
-    
-    # Move to device if specified
-    if device is not None:
+   
+   # Ensure mask values are within expected range
+   masks = torch.clamp(masks, 0, 1)
+   
+   # Move to device if specified
+   if device is not None:
        images = images.to(device)
        masks = masks.to(device)
-    
-    return images, masks
+   
+   return images, masks
 
 
 def train_model(data_path, batch_size=1, epochs=20, learning_rate=1e-3,
