@@ -670,64 +670,69 @@ def save_training_history(history, filename):
 
 
 def preprocess_batch(batch, device=None):
-   """
-   Preprocess batch for BraTS segmentation with robust orientation handling
-   """
-   images, masks = batch
-   
-   print(f"Original batch shapes - images: {images.shape}, masks: {masks.shape}")
-   
-   # Find the depth dimension (smallest one, usually 155)
-   img_dims = images.shape[2:]
-   mask_dims = masks.shape[2:]
-   
-   # Find which dimension is the depth dimension (smallest)
-   img_min_dim_idx = img_dims.index(min(img_dims)) + 2  # +2 for batch & channel dims
-   mask_min_dim_idx = mask_dims.index(min(mask_dims)) + 2
-   
-   print(f"Detected depth dimension - images: {img_min_dim_idx}, masks: {mask_min_dim_idx}")
-   
-   # Define a target orientation [B, C, D, H, W] where D is always the smallest dimension
-   target_order = [0, 1]  # Always keep batch and channel dimensions first
-   
-   # Create the target permutation
-   for dim_idx in range(2, 5):  # For the spatial dimensions
-       if dim_idx == img_min_dim_idx:
-           target_order.append(2)  # Depth should be dimension 2
-       else:
-           target_order.append(3 if len(target_order) == 2 else 4)  # Height then Width
-   
-   # Permute images to target orientation if needed
-   if img_min_dim_idx != 2:
-       print(f"Permuting images using order: {target_order}")
-       images = images.permute(*target_order)
-   
-   # Create a similar permutation for masks
-   mask_target_order = [0, 1]
-   
-   for dim_idx in range(2, 5):
-       if dim_idx == mask_min_dim_idx:
-           mask_target_order.append(2)
-       else:
-           mask_target_order.append(3 if len(mask_target_order) == 2 else 4)
-   
-   # Permute masks to target orientation if needed
-   if mask_min_dim_idx != 2:
-       print(f"Permuting masks using order: {mask_target_order}")
-       masks = masks.permute(*mask_target_order)
-   
-   print(f"After orientation normalization - images: {images.shape}, masks: {masks.shape}")
-   
-   # Rest of your preprocessing code...
-   # Ensure mask values are within expected range
-   masks = torch.clamp(masks, 0, 1)
-   
-   # Move to device if specified
-   if device is not None:
-       images = images.to(device)
-       masks = masks.to(device)
-   
-   return images, masks
+    """
+    Robust preprocessing function that guarantees consistent orientation
+    between images and masks by forcing both to have the same shape.
+    """
+    images, masks = batch
+    
+    print(f"Original batch shapes - images: {images.shape}, masks: {masks.shape}")
+    
+    # First: determine which dimension is the depth dimension for each
+    img_dims = images.shape[2:]  # Spatial dimensions only
+    mask_dims = masks.shape[2:]
+    
+    # Find the smallest dimension index (likely the depth)
+    img_min_dim = min(img_dims)
+    img_min_dim_idx = img_dims.index(img_min_dim) + 2  # +2 for batch & channel dims
+    
+    mask_min_dim = min(mask_dims)
+    mask_min_dim_idx = mask_dims.index(mask_min_dim) + 2
+    
+    print(f"Detected dimensions - images depth: {img_min_dim} at index {img_min_dim_idx}, "
+          f"masks depth: {mask_min_dim} at index {mask_min_dim_idx}")
+    
+    # Standard orientation: [B, C, D, H, W] where D is the smallest dimension
+    # For BraTS, typically D=155, H=W=240
+    
+    # Step 1: Choose the orientation of the IMAGE as the reference
+    # This means we'll permute the MASK to match the IMAGE
+    mask_permutation = list(range(len(masks.shape)))  # Start with identity
+    
+    # Step 2: Determine which spatial dimension in mask corresponds to depth in image
+    if img_min_dim_idx != mask_min_dim_idx:
+        print(f"Permuting masks to match image orientation...")
+        # Swap the depth dimension in mask with the depth dimension in image
+        mask_permutation[img_min_dim_idx], mask_permutation[mask_min_dim_idx] = \
+            mask_permutation[mask_min_dim_idx], mask_permutation[img_min_dim_idx]
+        
+        masks = masks.permute(*mask_permutation)
+    
+    # Ensure we have matching shapes (width and height should be same if depths match)
+    if images.shape != masks.shape:
+        print(f"Shape mismatch after orientation correction. Reshaping mask...")
+        # Create a new mask tensor with the same shape as images
+        new_masks = torch.zeros_like(images)
+        
+        # Copy data from old mask to new mask - common dimensions only
+        min_dims = [min(i, m) for i, m in zip(images.shape, masks.shape)]
+        if len(min_dims) == 5:  # Should be 5D tensors
+            new_masks[:, :, :min_dims[2], :min_dims[3], :min_dims[4]] = \
+                masks[:, :, :min_dims[2], :min_dims[3], :min_dims[4]]
+        
+        masks = new_masks
+    
+    print(f"After orientation normalization - images: {images.shape}, masks: {masks.shape}")
+    
+    # Ensure mask values are within expected range
+    masks = torch.clamp(masks, 0, 1)
+    
+    # Move to device if specified
+    if device is not None:
+        images = images.to(device)
+        masks = masks.to(device)
+    
+    return images, masks
 
 
 def train_model(data_path, batch_size=1, epochs=20, learning_rate=1e-3,
