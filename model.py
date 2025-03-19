@@ -1184,7 +1184,13 @@ class AutoSAM2(nn.Module):
         combined = unet_output.clone()
         
         # Replace or blend slices with SAM2 results
+        print("Combine Results Debug:")
+        print(f"UNet output shape: {unet_output.shape}")
+        print(f"UNet output unique values: {torch.unique(unet_output)}")
+        print(f"Number of SAM2 slices: {len(sam2_slices)}")
         for slice_idx, mask in sam2_slices.items():
+            print(f"Slice {slice_idx} mask shape: {mask.shape}")
+            print(f"Slice {slice_idx} mask unique values: {torch.unique(mask)}")
             if mask is not None:
                 # Get UNet slice
                 if depth_dim_idx == 2:
