@@ -20,202 +20,193 @@ from visualization import visualize_batch_comprehensive, visualize_model_compari
 torch.serialization.add_safe_globals([np.core.multiarray.scalar])
 
 
-def calculate_dice_score(y_pred, y_true):
+def calculate_dice_score(y_pred, y_true, epsilon=1e-7):
     """
-    Enhanced Dice score calculation for BraTS data with correct class mapping.
+    Enhanced multi-class Dice score calculation for BraTS segmentation
     """
-    # For raw logits, apply sigmoid first
-    if not torch.is_tensor(y_pred):
-        y_pred = torch.tensor(y_pred)
-    
-    # Check if input contains logits or probabilities
+    # Apply sigmoid if input contains logits
     if torch.min(y_pred) < 0 or torch.max(y_pred) > 1:
         probs = torch.sigmoid(y_pred)
     else:
         probs = y_pred
     
-    # Apply threshold to get binary predictions
+    # Binary predictions using threshold
     preds = (probs > 0.5).float()
     
-    # Initialize results dictionary
-    result = {}
+    # Ensure y_true and y_pred have same shape
+    if y_pred.shape != y_true.shape:
+        raise ValueError(f"Shape mismatch: y_pred {y_pred.shape}, y_true {y_true.shape}")
     
-    # Store all per-sample Dice scores for statistics
+    result = {}
     all_dice_scores = {
-        'class_1': [],  # NCR
-        'class_2': [],  # ED
-        'class_4': [],  # ET (at index 3)
-        'ET': [],       # Enhancing Tumor (class 4, at index 3)
-        'WT': [],       # Whole Tumor (classes 1+2+4)
-        'TC': []        # Tumor Core (classes 1+4)
+        'background': [],
+        'NCR': [],      # Class 1
+        'ED': [],       # Class 2
+        'ET': [],       # Class 3 (index 3)
+        'WT': [],       # Whole Tumor (NCR + ED + ET)
+        'TC': []        # Tumor Core (NCR + ET)
     }
     
     batch_size = y_pred.size(0)
     
-    # Calculate per-sample Dice scores for each class and region
     for b in range(batch_size):
-        # Calculate per-class Dice
-        # Class 1 (NCR) - at index 1
-        pred_ncr = preds[b, 1]
-        true_ncr = y_true[b, 1]
+        # Background
+        pred_bg = preds[b, 0].reshape(-1)
+        true_bg = y_true[b, 0].reshape(-1)
+        if true_bg.sum() > 0 or pred_bg.sum() > 0:
+            intersection_bg = (pred_bg * true_bg).sum()
+            dice_bg = (2.0 * intersection_bg / (pred_bg.sum() + true_bg.sum() + epsilon)).item() * 100
+            all_dice_scores['background'].append(dice_bg)
+        
+        # NCR (Class 1)
+        pred_ncr = preds[b, 1].reshape(-1)
+        true_ncr = y_true[b, 1].reshape(-1)
         if true_ncr.sum() > 0 or pred_ncr.sum() > 0:
             intersection_ncr = (pred_ncr * true_ncr).sum()
-            dice_ncr = (2.0 * intersection_ncr / (pred_ncr.sum() + true_ncr.sum() + 1e-5)).item() * 100
-            all_dice_scores['class_1'].append(dice_ncr)
-            
-        # Class 2 (ED) - at index 2
-        pred_ed = preds[b, 2]
-        true_ed = y_true[b, 2]
+            dice_ncr = (2.0 * intersection_ncr / (pred_ncr.sum() + true_ncr.sum() + epsilon)).item() * 100
+            all_dice_scores['NCR'].append(dice_ncr)
+        
+        # ED (Class 2)
+        pred_ed = preds[b, 2].reshape(-1)
+        true_ed = y_true[b, 2].reshape(-1)
         if true_ed.sum() > 0 or pred_ed.sum() > 0:
             intersection_ed = (pred_ed * true_ed).sum()
-            dice_ed = (2.0 * intersection_ed / (pred_ed.sum() + true_ed.sum() + 1e-5)).item() * 100
-            all_dice_scores['class_2'].append(dice_ed)
-            
-        # Class 4 (ET) - at index 3
-        pred_et = preds[b, 3]
-        true_et = y_true[b, 3]
+            dice_ed = (2.0 * intersection_ed / (pred_ed.sum() + true_ed.sum() + epsilon)).item() * 100
+            all_dice_scores['ED'].append(dice_ed)
+        
+        # ET (Class 3, index 3)
+        pred_et = preds[b, 3].reshape(-1)
+        true_et = y_true[b, 3].reshape(-1)
         if true_et.sum() > 0 or pred_et.sum() > 0:
             intersection_et = (pred_et * true_et).sum()
-            dice_et = (2.0 * intersection_et / (pred_et.sum() + true_et.sum() + 1e-5)).item() * 100
-            all_dice_scores['class_4'].append(dice_et)
-            all_dice_scores['ET'].append(dice_et)  # ET is the same as class 4
+            dice_et = (2.0 * intersection_et / (pred_et.sum() + true_et.sum() + epsilon)).item() * 100
+            all_dice_scores['ET'].append(dice_et)
         
-        # Calculate WT (Whole Tumor) - Classes 1+2+4 (indices 1,2,3)
-        pred_wt = (preds[b, 1:4].sum(dim=0) > 0).float()
-        true_wt = (y_true[b, 1:4].sum(dim=0) > 0).float()
+        # Whole Tumor (WT): NCR + ED + ET
+        pred_wt = (preds[b, 1:4].sum(dim=0) > 0).float().reshape(-1)
+        true_wt = (y_true[b, 1:4].sum(dim=0) > 0).float().reshape(-1)
         if true_wt.sum() > 0 or pred_wt.sum() > 0:
             intersection_wt = (pred_wt * true_wt).sum()
-            dice_wt = (2.0 * intersection_wt / (pred_wt.sum() + true_wt.sum() + 1e-5)).item() * 100
+            dice_wt = (2.0 * intersection_wt / (pred_wt.sum() + true_wt.sum() + epsilon)).item() * 100
             all_dice_scores['WT'].append(dice_wt)
         
-        # Calculate TC (Tumor Core) - Classes 1+4 (indices 1,3)
-        pred_tc = ((preds[b, 1] + preds[b, 3]) > 0).float()
-        true_tc = ((y_true[b, 1] + y_true[b, 3]) > 0).float()
+        # Tumor Core (TC): NCR + ET
+        pred_tc = ((preds[b, 1] + preds[b, 3]) > 0).float().reshape(-1)
+        true_tc = ((y_true[b, 1] + y_true[b, 3]) > 0).float().reshape(-1)
         if true_tc.sum() > 0 or pred_tc.sum() > 0:
             intersection_tc = (pred_tc * true_tc).sum()
-            dice_tc = (2.0 * intersection_tc / (pred_tc.sum() + true_tc.sum() + 1e-5)).item() * 100
+            dice_tc = (2.0 * intersection_tc / (pred_tc.sum() + true_tc.sum() + epsilon)).item() * 100
             all_dice_scores['TC'].append(dice_tc)
     
-    # Calculate statistics for each class and region
+    # Calculate statistics for each category
     for key, scores in all_dice_scores.items():
-        if scores:  # Only calculate if we have scores
+        if scores:
             scores_tensor = torch.tensor(scores)
             result[f'{key}_mean'] = scores_tensor.mean().item()
             result[f'{key}_std'] = scores_tensor.std().item() if len(scores_tensor) > 1 else 0.0
             result[f'{key}_median'] = torch.median(scores_tensor).item()
             
-            # Calculate IQR (75th percentile - 25th percentile)
+            # Interquartile range
             if len(scores_tensor) > 1:
                 q1, q3 = torch.tensor(scores_tensor.tolist()).quantile(torch.tensor([0.25, 0.75])).tolist()
                 result[f'{key}_iqr'] = q3 - q1
             else:
                 result[f'{key}_iqr'] = 0.0
         else:
-            # Set default values if no scores available
+            # Default values if no scores
             result[f'{key}_mean'] = 0.0
             result[f'{key}_std'] = 0.0
             result[f'{key}_median'] = 0.0
             result[f'{key}_iqr'] = 0.0
     
-    # Calculate overall mean Dice across all regions
-    region_means = [result.get(f'{region}_mean', 0.0) for region in ['ET', 'WT', 'TC']]
+    # Overall mean Dice
+    region_means = [result.get(f'{region}_mean', 0.0) for region in ['NCR', 'ED', 'ET']]
     result['mean'] = sum(region_means) / len(region_means) if region_means else 0.0
     
     return result
 
-def calculate_iou(y_pred, y_true, threshold=0.5, eps=1e-6):
+def calculate_iou(y_pred, y_true, threshold=0.5, epsilon=1e-7):
     """
-    Calculate IoU for BraTS tumor regions with correct class mapping.
+    Enhanced multi-class IoU calculation for BraTS segmentation
     """
-    if y_pred.shape != y_true.shape:
-        raise ValueError("Shape mismatch: y_pred and y_true must have the same shape.")
-
-    # Apply threshold to convert probability predictions into binary masks
-    y_pred_bin = (torch.sigmoid(y_pred) > threshold).float()
-
-    batch_size = y_pred.shape[0]
+    # Apply sigmoid if input contains logits
+    y_pred_bin = (torch.sigmoid(y_pred) > threshold).float() if torch.min(y_pred) < 0 else y_pred
+    
+    batch_size = y_pred.size(0)
     result = {}
     
-    # For storing per-sample IoU values
     all_iou_values = {
-        'class_1': [],  # NCR
-        'class_2': [],  # ED
-        'class_4': [],  # ET (at index 3)
-        'ET': [],       # Enhancing Tumor (class 4)
-        'WT': [],       # Whole Tumor (classes 1+2+4)
-        'TC': []        # Tumor Core (classes 1+4)
+        'background': [],
+        'NCR': [],      # Class 1
+        'ED': [],       # Class 2
+        'ET': [],       # Class 3 (index 3)
+        'WT': [],       # Whole Tumor (NCR + ED + ET)
+        'TC': []        # Tumor Core (NCR + ET)
     }
     
     for b in range(batch_size):
-        # Class 1 (NCR) - at index 1
-        pred_ncr = y_pred_bin[b, 1].reshape(-1)
-        true_ncr = y_true[b, 1].reshape(-1)
-        intersection_ncr = (pred_ncr * true_ncr).sum()
-        union_ncr = (pred_ncr + true_ncr).clamp(0, 1).sum()
-        if union_ncr > eps:
-            iou_ncr = (intersection_ncr / union_ncr).item() * 100
-            all_iou_values['class_1'].append(iou_ncr)
+        # IoU for each class follows same pattern as Dice calculation
+        classes = [
+            (0, 'background'),
+            (1, 'NCR'),
+            (2, 'ED'),
+            (3, 'ET')
+        ]
         
-        # Class 2 (ED) - at index 2
-        pred_ed = y_pred_bin[b, 2].reshape(-1)
-        true_ed = y_true[b, 2].reshape(-1)
-        intersection_ed = (pred_ed * true_ed).sum()
-        union_ed = (pred_ed + true_ed).clamp(0, 1).sum()
-        if union_ed > eps:
-            iou_ed = (intersection_ed / union_ed).item() * 100
-            all_iou_values['class_2'].append(iou_ed)
+        for class_idx, class_name in classes:
+            pred_class = y_pred_bin[b, class_idx].reshape(-1)
+            true_class = y_true[b, class_idx].reshape(-1)
+            
+            intersection = (pred_class * true_class).sum()
+            union = (pred_class + true_class).clamp(0, 1).sum()
+            
+            if union > epsilon:
+                iou = (intersection / union).item() * 100
+                all_iou_values[class_name].append(iou)
         
-        # Class 4 (ET) - at index 3
-        pred_et = y_pred_bin[b, 3].reshape(-1)
-        true_et = y_true[b, 3].reshape(-1)
-        intersection_et = (pred_et * true_et).sum()
-        union_et = (pred_et + true_et).clamp(0, 1).sum()
-        if union_et > eps:
-            iou_et = (intersection_et / union_et).item() * 100
-            all_iou_values['class_4'].append(iou_et)
-            all_iou_values['ET'].append(iou_et)  # ET is the same as class 4
-        
-        # Calculate WT (Whole Tumor) - Classes 1+2+4 (indices 1,2,3)
+        # Whole Tumor and Tumor Core follow similar logic to Dice
         pred_wt = (y_pred_bin[b, 1:4].sum(dim=0) > 0).float().reshape(-1)
         true_wt = (y_true[b, 1:4].sum(dim=0) > 0).float().reshape(-1)
-        intersection_wt = (pred_wt * true_wt).sum()
-        union_wt = (pred_wt + true_wt).clamp(0, 1).sum()
-        if union_wt > eps:
-            iou_wt = (intersection_wt / union_wt).item() * 100
+        
+        if true_wt.sum() > 0 or pred_wt.sum() > 0:
+            intersection_wt = (pred_wt * true_wt).sum()
+            union_wt = (pred_wt + true_wt).clamp(0, 1).sum()
+            
+            iou_wt = (intersection_wt / union_wt).item() * 100 if union_wt > epsilon else 0.0
             all_iou_values['WT'].append(iou_wt)
         
-        # Calculate TC (Tumor Core) - Classes 1+4 (indices 1,3)
+        # Tumor Core
         pred_tc = ((y_pred_bin[b, 1] + y_pred_bin[b, 3]) > 0).float().reshape(-1)
         true_tc = ((y_true[b, 1] + y_true[b, 3]) > 0).float().reshape(-1)
-        intersection_tc = (pred_tc * true_tc).sum()
-        union_tc = (pred_tc + true_tc).clamp(0, 1).sum()
-        if union_tc > eps:
-            iou_tc = (intersection_tc / union_tc).item() * 100
+        
+        if true_tc.sum() > 0 or pred_tc.sum() > 0:
+            intersection_tc = (pred_tc * true_tc).sum()
+            union_tc = (pred_tc + true_tc).clamp(0, 1).sum()
+            
+            iou_tc = (intersection_tc / union_tc).item() * 100 if union_tc > epsilon else 0.0
             all_iou_values['TC'].append(iou_tc)
     
-    # Calculate statistics for each category
+    # Calculate statistics for each category (similar to Dice score)
     for key, values in all_iou_values.items():
-        if values:  # Only calculate if we have values
+        if values:
             values_tensor = torch.tensor(values)
             result[f'{key}_mean'] = values_tensor.mean().item()
             result[f'{key}_std'] = values_tensor.std().item() if len(values_tensor) > 1 else 0.0
             result[f'{key}_median'] = torch.median(values_tensor).item()
             
-            # Calculate IQR
             if len(values_tensor) > 1:
                 q1, q3 = torch.tensor(values_tensor.tolist()).quantile(torch.tensor([0.25, 0.75])).tolist()
                 result[f'{key}_iqr'] = q3 - q1
             else:
                 result[f'{key}_iqr'] = 0.0
         else:
-            # Set default values if no scores available
             result[f'{key}_mean'] = 0.0
             result[f'{key}_std'] = 0.0
             result[f'{key}_median'] = 0.0
             result[f'{key}_iqr'] = 0.0
     
-    # Calculate mean IoU across regions
-    region_means = [result.get(f'{region}_mean', 0.0) for region in ['ET', 'WT', 'TC']]
+    # Mean IoU
+    region_means = [result.get(f'{region}_mean', 0.0) for region in ['NCR', 'ED', 'ET']]
     result['mean_iou'] = sum(region_means) / len(region_means) if region_means else 0.0
     
     return result
