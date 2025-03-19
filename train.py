@@ -308,8 +308,8 @@ class BraTSCombinedLoss(nn.Module):
     """
     Combined loss function for BraTS segmentation task.
     """
-    def __init__(self, dice_weight=0.75, bce_weight=0.15, focal_weight=0.1, 
-                 region_weights={'ET': 1.3, 'WT': 1.1, 'TC': 1.2}):
+    def __init__(self, dice_weight=0.8, bce_weight=0.1, focal_weight=0.1, 
+                 region_weights={'ET': 1.6, 'WT': 1.1, 'TC': 1.3}):
         super().__init__()
         self.dice_weight = dice_weight
         self.bce_weight = bce_weight
