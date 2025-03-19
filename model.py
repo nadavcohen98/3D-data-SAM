@@ -1,4 +1,147 @@
-# Standard library imports
+print("=== AUTOSAM2 WITH MULTI-CLASS SEGMENTATION SUPPORT LOADED SUCCESSFULLY ===")
+    def analyze_class_distribution(self, output, print_results=True):
+        """Analyze the class distribution in the current output for debugging."""
+        if output is None:
+            return "No output available for analysis"
+        
+        try:
+            # Get binary mask for each class
+            class_masks = (output > 0.5).float()
+            
+            # Calculate volume percentages
+            total_volume = torch.prod(torch.tensor(output.shape[2:]))
+            class_volumes = []
+            
+            for c in range(output.shape[1]):
+                vol = class_masks[:, c].sum().item() / total_volume * 100
+                class_volumes.append(f"Class {c}: {vol:.2f}%")
+            
+            result = " | ".join(class_volumes)
+            
+            if print_results:
+                print(f"Class Distribution: {result}")
+            
+            # Check for any all-zero or all-one slices (potential issues)
+            empty_slices = 0
+            all_bg_slices = 0
+            
+            for s in range(output.shape[2]):  # For axial view
+                slice_data = output[:, :, s]
+                
+                # If slice has no predictions at all
+                if (slice_data.sum() < 1e-5):
+                    empty_slices += 1
+                
+                # If slice is all background
+                if (slice_data[:, 1:].sum() < 1e-5):
+                    all_bg_slices += 1
+            
+            if print_results and (empty_slices > 0 or all_bg_slices > 0):
+                print(f"Warning: Found {empty_slices} empty slices and {all_bg_slices} background-only slices")
+            
+            return result
+        
+        except Exception as e:
+            logger.error(f"Error analyzing class distribution: {e}")
+            return f"Error: {str(e)}"
+    
+    def get_performance_stats(self):
+        """Return performance statistics."""
+        stats = {
+            "has_sam2": self.has_sam2,
+            "sam2_enabled": self.has_sam2_enabled,
+            "unet_enabled": self.enable_unet_decoder,
+            "sam2_slices_processed": self.performance_metrics["sam2_slices_processed"],
+            "model_mode": self._get_current_mode()
+        }
+        
+        if self.performance_metrics["total_time"]:
+            stats["avg_time_per_forward"] = np.mean(self.performance_metrics["total_time"])
+            stats["total_forward_passes"] = len(self.performance_metrics["total_time"])
+        
+        return stats
+    
+    def _get_current_mode(self):
+        """Return string describing current mode."""
+        if self.enable_unet_decoder and not self.has_sam2_enabled:
+            return "unet3d_only"
+        elif not self.enable_unet_decoder and self.has_sam2_enabled:
+            return "sam2_only"
+        elif self.enable_unet_decoder and self.has_sam2_enabled:
+            return "hybrid"
+        else:
+            return "invalid_config"    def forward(self, x):
+        """
+        Forward pass with multi-class segmentation support
+        """
+        start_time = time.time()
+        device = x.device
+        
+        # Flag for SAM2 usage tracking
+        self.has_sam2_enabled = self.enable_sam2 and self.has_sam2
+        
+        # Process with UNet3D to get mid-decoder features
+        unet_output, mid_features, sam_embeddings, metadata = self.unet3d(
+            x, 
+            use_full_decoder=self.enable_unet_decoder
+        )
+        
+        # Store UNet output for visualization if full decoder is enabled
+        if self.enable_unet_decoder:
+            self.last_unet_output = unet_output
+        
+        # Mode 1: UNet3D only
+        if not self.enable_sam2 or not self.has_sam2:
+            self.performance_metrics["total_time"].append(time.time() - start_time)
+            return unet_output
+        
+        # Extract key slices for SAM2 processing
+        depth_dim_idx = metadata["depth_dim_idx"]
+        key_indices = sorted(metadata["key_indices"])
+        
+        # Process key slices with SAM2
+        sam2_results = {}
+        for idx in key_indices:
+            try:
+                # Get features for this slice
+                slice_features = self.slice_processor.extract_slice(mid_features, idx // 4, depth_dim_idx)
+                
+                # Process with SAM2
+                result = self.process_slice_with_sam2(x, idx, slice_features, depth_dim_idx, device)
+                
+                if result is not None:
+                    sam2_results[idx] = result
+                    self.performance_metrics["sam2_slices_processed"] += 1
+            except Exception as e:
+                logger.error(f"Error processing slice {idx}: {e}")
+        
+        # Store SAM2 results for visualization
+        self.last_sam2_slices = sam2_results
+        
+        # Mode 2: SAM2 only (without UNet decoder)
+        if not self.enable_unet_decoder:
+            # Create 3D volume from SAM2 slice results
+            final_output = self.create_3d_from_slices(
+                x.shape, sam2_results, depth_dim_idx, device
+            )
+        
+        # Mode 3: Hybrid mode (UNet + SAM2)
+        else:
+            # Combine UNet output with SAM2 results
+            final_output = self.combine_results(
+                unet_output, sam2_results, depth_dim_idx, 
+                bg_blend=0.9,    # Background relies more on UNet
+                tumor_blend=0.5  # Tumor relies more on SAM2
+            )
+        
+        # Store combined output for visualization
+        self.last_combined_output = final_output
+        
+        # Update timing metrics
+        total_time = time.time() - start_time
+        self.performance_metrics["total_time"].append(total_time)
+        
+        return final_output# Standard library imports
 import os
 import time
 import gc
@@ -24,7 +167,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("AutoSAM2")
 
-print("=== LOADING AUTOSAM2 WITH FLEXIBLE ARCHITECTURE ===")
+print("=== LOADING AUTOSAM2 WITH FLEXIBLE ARCHITECTURE FOR MULTI-CLASS SEGMENTATION ===")
 
 # Import SAM2 with error handling
 try:
@@ -203,8 +346,9 @@ class FlexibleUNet3D(nn.Module):
     """
     UNet3D architecture with hooks for mid-decoder features at 64x64 resolution.
     Allows flexible configuration with enable/disable switches for different paths.
+    Modified to handle multi-class segmentation with proper output handling.
     """
-    def __init__(self, in_channels=4, n_classes=4, base_channels=16,trilinear=True):
+    def __init__(self, in_channels=4, n_classes=4, base_channels=16, trilinear=True):
         super(FlexibleUNet3D, self).__init__()
         
         # Configuration
@@ -241,30 +385,27 @@ class FlexibleUNet3D(nn.Module):
         # Projection for SAM2 embeddings (from mid-decoder features)
         self.sam_projection = nn.Conv3d(base_channels * 2, 256, kernel_size=1)
 
-        self.dropout = nn.Dropout3d
-
-
+        # Dropout for regularization
+        self.dropout = nn.Dropout3d(0.15)
+        
+        # Debug counters
+        self.debug_counter = 0
+    
     def forward(self, x, use_full_decoder=True):
-        """
-        Forward pass with flexible options and consistent axial orientation handling
-        """
-        # Get batch dimensions - using consistent naming to avoid confusion
+        """Forward pass with multi-class output handling"""
+        # Get batch dimensions
         batch_size, channels, dim1, dim2, dim3 = x.shape
         
-        # For axial view, the depth dimension is now at position 2 (after channels)
-        # No need to identify it dynamically
+        # For axial view, depth dimension should be first spatial dimension
         depth_dim_idx = 2
-        depth = dim1  # First spatial dimension is depth for axial orientation
+        depth = dim1
         
-        # Ultra-defensive slice selection
-        # Select only slices that are guaranteed to be within bounds
-        max_slice_idx = depth - 1  # Maximum valid index
-        
-        # Generate slices based on the actual depth
+        # Ultra-defensive slice selection for SAM2
+        max_slice_idx = depth - 1
         key_indices = get_strategic_slices(depth, percentage=0.3)
         key_indices.sort()
         
-        # Add extra slices around the middle if possible
+        # Add extra slices around the middle
         middle = depth // 2
         extra_indices = []
         for offset in [-5, -3, -2, -1, 1, 2, 3, 5]:
@@ -272,7 +413,6 @@ class FlexibleUNet3D(nn.Module):
             if 0 <= idx <= max_slice_idx and idx not in key_indices:
                 extra_indices.append(idx)
         
-        # Sort all indices
         key_indices.extend(extra_indices)
         key_indices.sort()
         
@@ -285,16 +425,16 @@ class FlexibleUNet3D(nn.Module):
         
         # Early decoder stages
         dec_out1 = self.dec1(x5, x4)
-        dec_out1 = self.dropout(0.05)(dec_out1)
+        dec_out1 = self.dropout(dec_out1)
         
         dec_out2 = self.dec2(dec_out1, x3)
-        dec_out2 = self.dropout(0.1)(dec_out2)
+        dec_out2 = self.dropout(dec_out2)
         
         # Generate SAM2 embeddings
         sam_embeddings = self.sam_projection(dec_out2)
         
-        # Calculate downsampled indices safely
-        downsampled_depth = max(1, depth // 4)  # Prevent divide by zero
+        # Calculate downsampled indices
+        downsampled_depth = max(1, depth // 4)
         ds_key_indices = [min(idx // 4, downsampled_depth-1) for idx in key_indices]
         
         # Store metadata
@@ -311,27 +451,68 @@ class FlexibleUNet3D(nn.Module):
         
         # Late decoder stages
         dec_out3 = self.dec3(dec_out2, x2)
-        dec_out3 = self.dropout(0.15)(dec_out3)
+        dec_out3 = self.dropout(dec_out3)
         
         dec_out4 = self.dec4(dec_out3, x1)
     
-        # Final convolution
+        # Final convolution (returns logits)
         logits = self.output_conv(dec_out4)
         
-        # Apply sigmoid
-        segmentation = F.softmax(logits, dim=1)
+        # MULTI-CLASS HANDLING: Use a binary-style approach for tumor classes
+        # For BraTS: class 0=background, class 1=NCR, class 2=ED, class 3=ET
+        
+        # Use sigmoid for tumor classes (1, 2, 3) independently
+        tumor_probs = torch.sigmoid(logits[:, 1:])
+        
+        # Background is inverse of combined tumor probability
+        # First get the combined tumor probability (clamp to avoid >1)
+        combined_tumor_prob = torch.clamp(tumor_probs.sum(dim=1, keepdim=True), max=1.0)
+        background_prob = 1.0 - combined_tumor_prob
+        
+        # Combine for final output
+        segmentation = torch.cat([background_prob, tumor_probs], dim=1)
+        
+        # Debug output distribution occasionally
+        self.debug_counter += 1
+        if self.debug_counter % 100 == 0:  # Every 100 forward passes
+            class_percentages = []
+            total_pixels = torch.prod(torch.tensor(segmentation.shape[2:]))
+            for c in range(segmentation.shape[1]):
+                percent = (segmentation[:, c] > 0.5).sum().item() / (batch_size * total_pixels) * 100
+                class_percentages.append(f"{percent:.2f}%")
+            print(f"DEBUG - Output class distribution: {class_percentages}")
         
         return segmentation, dec_out2, sam_embeddings, metadata
 
+
+class EnhancedPromptGenerator:
+    """Enhanced prompt generator with comprehensive metrics tracking for SAM2"""
+    def __init__(self, 
+                 num_positive_points=10,  # Increased from 5 for better coverage
+                 num_negative_points=3,  
+                 edge_detection=True,    
+                 use_confidence=True,    
+                 use_mask_prompt=True):
+        self.num_positive_points = num_positive_points
+        self.num_negative_points = num_negative_points
+        self.edge_detection = edge_detection
+        self.use_confidence = use_confidence
+        self.use_mask_prompt = use_mask_prompt
+        self.prompt_stats = {
+            'boxes_generated': 0,
+            'points_generated': 0,
+            'masks_generated': 0,
+            'multi_region_cases': 0
+        }
+
 class MultiPointPromptGenerator:
     """Generates strategic point prompts for SAM2 based on probability maps"""
-    def __init__(self, num_points=3):
-        self.num_points = num_points
+    def __init__(self, num_positive_points=5, num_negative_points=3):
+        self.num_positive_points = num_positive_points
+        self.num_negative_points = num_negative_points
         
     def _get_strategic_points(self, region_mask, num_points, prob_map):
         """Get strategic points within a specific region"""
-
-        
         points = []
         
         # Get distance transform (distance from boundary)
@@ -460,27 +641,25 @@ class MultiPointPromptGenerator:
             points: np.array of point coordinates
             labels: np.array of point labels (1=foreground, 0=background)
         """
-
-        
-        # Extract tumor probability (combine tumor classes with weighted importance)
-        if probability_maps.shape[1] >= 4:
-            # Equal weighting of all tumor classes
-            tumor_prob = torch.zeros((height, width), device=probability_maps.device)
-            for c in range(1, probability_maps.shape[1]):
-                tumor_prob += torch.sigmoid(probability_maps[0, c])
-            # Normalize to 0-1 range and increase contrast
-            tumor_prob = tumor_prob / (probability_maps.shape[1] - 1) 
-            tumor_prob = tumor_prob * 1.5  # Boost signal
-            tumor_prob = tumor_prob.cpu().detach().numpy()
+        # Extract tumor probability using binary-style approach
+        # For BraTS with multi-class: combine all tumor classes with weighted sum
+        if probability_maps.shape[1] >= 4:  # Check if we have enough channels
+            # Combine tumor classes (1,2,3) with weighted importance
+            tumor_prob = (
+                0.3 * torch.sigmoid(probability_maps[0, 1]) +  # NCR
+                0.3 * torch.sigmoid(probability_maps[0, 2]) +  # ED
+                0.4 * torch.sigmoid(probability_maps[0, 3])    # ET (enhancing tumor)
+            ).cpu().detach().numpy()
         else:
-            tumor_prob = torch.sigmoid(probability_maps[0, 1]).cpu().detach().numpy() * 1.5
+            # Fallback to first non-background channel
+            tumor_prob = torch.sigmoid(probability_maps[0, min(1, probability_maps.shape[1]-1)]).cpu().detach().numpy()
         
         # Resize to target dimensions if necessary
         if tumor_prob.shape != (height, width):
             tumor_prob = zoom(tumor_prob, (height / tumor_prob.shape[0], width / tumor_prob.shape[1]), order=1)
         
         # Create binary mask from probability map
-        binary_mask = tumor_prob > 0.4
+        binary_mask = tumor_prob > 0.5
         
         # Initialize points lists
         foreground_points = []
@@ -488,8 +667,6 @@ class MultiPointPromptGenerator:
         
         # Only proceed if we have a non-empty tumor mask
         if np.sum(binary_mask) > 10:
-            # ===== REGION-BASED POINT SELECTION =====
-            
             # Find tumor regions and their centers
             labeled_mask, num_regions = label(binary_mask)
             
@@ -519,8 +696,6 @@ class MultiPointPromptGenerator:
                     if points_remaining <= 0:
                         break
             
-            # ===== DISTANCE-BASED POINT SELECTION =====
-            
             # If we need more points, use distance transform to find points far from boundaries
             if len(foreground_points) < self.num_positive_points:
                 distance = distance_transform_edt(binary_mask)
@@ -542,8 +717,6 @@ class MultiPointPromptGenerator:
                 # Add selected high-confidence points
                 for idx in selected_indices:
                     foreground_points.append([int(high_conf_x[idx]), int(high_conf_y[idx])])
-            
-            # ===== BOUNDARY POINT SELECTION =====
             
             # If we still need more points, add boundary points
             if len(foreground_points) < self.num_positive_points:
@@ -567,8 +740,6 @@ class MultiPointPromptGenerator:
                     for idx in indices:
                         foreground_points.append([int(boundary_x[idx]), int(boundary_y[idx])])
             
-            # ===== NEGATIVE (BACKGROUND) POINT SELECTION =====
-            
             # Add strategic background points near boundary
             background_points = self._get_negative_points(binary_mask, tumor_prob, self.num_negative_points)
         
@@ -588,11 +759,490 @@ class MultiPointPromptGenerator:
         return np.array(all_points), np.array(all_labels)
 
 
+# ======= Bridge components for UNet to SAM2 =======
+
+class UNet3DtoSAM2Bridge(nn.Module):
+    """Bridge network that connects UNet3D features to SAM2 input format with enhanced attention"""
+    def __init__(self, input_channels=32, output_channels=256):
+        super(UNet3DtoSAM2Bridge, self).__init__()
+        
+        # Channel Attention module to emphasize important feature channels
+        self.channel_attention = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1),
+            nn.Conv2d(input_channels, input_channels // 4, kernel_size=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(input_channels // 4, input_channels, kernel_size=1),
+            nn.Sigmoid()
+        )
+        
+        # Spatial Attention module to focus on relevant regions
+        self.spatial_attention = nn.Sequential(
+            nn.Conv2d(input_channels, 1, kernel_size=7, padding=3),
+            nn.BatchNorm2d(1),
+            nn.Sigmoid()
+        )
+        
+        # Shortcut branch to match dimensions for residual connection
+        self.shortcut = nn.Conv2d(input_channels, 128, kernel_size=1)
+        
+        # Transformer branch: two convolutional layers with GroupNorm and ReLU
+        self.conv1 = nn.Conv2d(input_channels, 128, kernel_size=3, padding=1)
+        self.norm1 = nn.GroupNorm(16, 128)
+        self.conv2 = nn.Conv2d(128, 128, kernel_size=3, padding=1)
+        self.norm2 = nn.GroupNorm(16, 128)
+        self.relu = nn.ReLU(inplace=True)
+        
+        # Final layer to convert features to SAM2 expected dimensions
+        self.final_conv = nn.Conv2d(128, output_channels, kernel_size=1)
+        self.final_norm = nn.GroupNorm(32, output_channels)
+        
+        # Learnable parameters for dynamic scaling of the output
+        self.scale_factor = nn.Parameter(torch.tensor(1.5))
+
+    def forward(self, x):
+        # Apply channel attention and weight the input accordingly
+        att_channels = self.channel_attention(x)
+        x_ca = x * att_channels
+
+        # Apply spatial attention on the channel-attended features
+        att_spatial = self.spatial_attention(x_ca)
+        x_sa = x_ca * att_spatial
+
+        # Transformer branch: process features through two convolution layers
+        out = self.conv1(x_sa)
+        out = self.norm1(out)
+        out = self.relu(out)
+        out = self.conv2(out)
+        out = self.norm2(out)
+        
+        # Compute shortcut projection for residual connection
+        shortcut = self.shortcut(x_sa)
+        out = self.relu(out + shortcut)
+
+        # Final transformation to match SAM2 input dimensions
+        out = self.final_conv(out)
+        out = self.final_norm(out)
+
+        # Apply learnable scaling (importance) with adaptive scaling factor
+        out = out * self.scale_factor
+
+        return out
 
 # ======= SAM2 integration components =======
 
+# ======= Main AutoSAM2 model =======
+
+class AutoSAM2(nn.Module):
+    """
+    AutoSAM2 with flexible architecture configurations for multi-class segmentation.
+    Supports multiple modes:
+    1. Full UNet3D only (SAM2 disabled)
+    2. SAM2 only using mid-decoder features (UNet3D decoder disabled)
+    3. Hybrid mode with both paths
+    """
+    def __init__(
+        self, 
+        num_classes=4, 
+        base_channels=16, 
+        trilinear=True,
+        enable_unet_decoder=True,
+        enable_sam2=True,
+        sam2_model_id="facebook/sam2-hiera-small"
+    ):
+        super().__init__()
+        
+        # Initialize prompt generator for SAM2
+        self.prompt_generator = EnhancedPromptGenerator(
+            num_positive_points=5,
+            num_negative_points=3,
+            edge_detection=True,
+            use_confidence=True,
+            use_mask_prompt=True
+        )
+        
+        # Bridge network for connecting UNet features to SAM2
+        self.unet_sam_bridge = UNet3DtoSAM2Bridge(
+            input_channels=base_channels*2, 
+            output_channels=256
+        )
+        
+        # Configuration
+        self.num_classes = num_classes
+        self.enable_unet_decoder = enable_unet_decoder
+        self.enable_sam2 = enable_sam2
+        self.sam2_model_id = sam2_model_id
+        
+        # Create flexible UNet3D
+        self.unet3d = FlexibleUNet3D(
+            in_channels=4,
+            n_classes=num_classes,
+            base_channels=base_channels,
+            trilinear=trilinear
+        )
+        
+        # Slice processor for SAM2 integration
+        self.slice_processor = SliceProcessor(
+            input_channels=256,
+            output_size=(64, 64)
+        )
+        
+        # MRI to RGB converter for SAM2
+        self.mri_to_rgb = MRItoRGBMapper()
+        
+        # For compatibility with train.py
+        self.encoder = self.unet3d
+        
+        # Initialize tracking variables
+        self.has_sam2 = False
+        self.has_sam2_enabled = False
+        self.sam2 = None
+        
+        # Performance tracking
+        self.performance_metrics = defaultdict(list)
+        self.performance_metrics["sam2_slices_processed"] = 0
+        
+        # Store latest outputs for visualization
+        self.last_unet_output = None
+        self.last_sam2_slices = None
+        self.last_combined_output = None
+        
+        # Initialize SAM2 if enabled
+        if enable_sam2:
+            self.initialize_sam2()
+    
+    def initialize_sam2(self):
+        """Initialize SAM2 with appropriate error handling."""
+        if not HAS_SAM2:
+            logger.warning("SAM2 package not available. Running in fallback mode.")
+            return
+            
+        try:
+            # Initialize SAM2
+            logger.info(f"Building SAM2 with model_id: {self.sam2_model_id}")
+            sam2_model = build_sam2_hf(self.sam2_model_id)
+            self.sam2 = SAM2ImagePredictor(sam2_model)
+            
+            # Freeze SAM2 weights
+            for param in self.sam2.model.parameters():
+                param.requires_grad = False
+            
+            self.has_sam2 = True
+            logger.info("SAM2 initialized successfully")
+        except Exception as e:
+            logger.error(f"Error initializing SAM2: {e}")
+            self.has_sam2 = False
+            self.sam2 = None
+    
+    def set_mode(self, enable_unet_decoder=None, enable_sam2=None):
+        """Change the processing mode dynamically."""
+        if enable_unet_decoder is not None:
+            self.enable_unet_decoder = enable_unet_decoder
+        
+        if enable_sam2 is not None:
+            self.enable_sam2 = enable_sam2
+            
+        logger.info(f"Mode set to: UNet Decoder={self.enable_unet_decoder}, SAM2={self.enable_sam2}")
+    
+    def generate_optimal_box(self, binary_mask_or_probability_maps, prob_map_or_slice_idx=None, height=None, width=None):
+        """Generate optimal bounding box for tumor region."""
+        # Handle different parameter patterns
+        if height is not None and width is not None:
+            probability_maps = binary_mask_or_probability_maps
+            slice_idx = prob_map_or_slice_idx
+            
+            # Extract tumor probability (weighted combination)
+            if probability_maps.shape[1] >= 4:
+                # Use binary-style approach - combine all tumor classes (BraTS-specific)
+                tumor_prob = (
+                    0.3 * torch.sigmoid(probability_maps[0, 1]) +  # NCR
+                    0.3 * torch.sigmoid(probability_maps[0, 2]) +  # ED
+                    0.4 * torch.sigmoid(probability_maps[0, 3])    # ET
+                ).cpu().detach().numpy()
+            else:
+                # Fallback for fewer channels
+                tumor_prob = torch.sigmoid(probability_maps[0, min(1, probability_maps.shape[1]-1)]).cpu().detach().numpy()
+            
+            # Resize if necessary
+            curr_h, curr_w = tumor_prob.shape
+            if curr_h != height or curr_w != width:
+                tumor_prob = zoom(tumor_prob, (height / curr_h, width / curr_w), order=1)
+            
+            # Create binary mask
+            binary_mask = tumor_prob > 0.4
+            prob_map = tumor_prob
+        else:
+            # Direct input of mask and probability map
+            binary_mask = binary_mask_or_probability_maps
+            prob_map = prob_map_or_slice_idx
+            height, width = prob_map.shape
+        
+        # If no tumor detected, return None
+        if np.sum(binary_mask) < 10:
+            return None
+        
+        # Apply dilation to create a more inclusive box
+        dilated_mask = binary_dilation(binary_mask, iterations=3)
+        
+        # Find coordinates of tumor region
+        y_coords, x_coords = np.where(dilated_mask)
+        if len(y_coords) == 0:
+            return None
+        
+        min_x, max_x = np.min(x_coords), np.max(x_coords)
+        min_y, max_y = np.min(y_coords), np.max(y_coords)
+        
+        # Add small padding (10% of tumor size)
+        padding_x = max(5, int((max_x - min_x) * 0.10))
+        padding_y = max(5, int((max_y - min_y) * 0.10))
+        
+        x1 = max(0, min_x - padding_x)
+        y1 = max(0, min_y - padding_y)
+        x2 = min(width - 1, max_x + padding_x)
+        y2 = min(height - 1, max_y + padding_y)
+        
+        # Update tracking statistics
+        if hasattr(self, 'prompt_generator'):
+            self.prompt_generator.prompt_stats['boxes_generated'] += 1
+            
+        return np.array([x1, y1, x2, y2])
+    
+    def process_slice_with_sam2(self, input_vol, slice_idx, slice_features, depth_dim_idx, device):
+        """Process a single slice with SAM2 for multi-class segmentation."""
+        if not self.has_sam2:
+            logger.warning(f"SAM2 not available for slice {slice_idx}")
+            return None
+                
+        try:
+            # Extract original slice (always along dimension 2 for axial view)
+            orig_slice = self._extract_slice(input_vol, slice_idx, depth_dim_idx)
+            
+            # Convert MRI to RGB using our hybrid mapper
+            rgb_tensor = self.mri_to_rgb(orig_slice)
+            
+            # Convert to numpy array in the format SAM2 expects: [H, W, 3]
+            rgb_image = rgb_tensor[0].permute(1, 2, 0).detach().cpu().numpy()
+            
+            # Get image dimensions
+            h, w = rgb_image.shape[:2]
+            
+            # Process through bridge network to get enhanced features
+            enhanced_features = self.unet_sam_bridge(slice_features)
+        
+            # Generate point prompts
+            points, labels, box, _ = self.prompt_generator.generate_prompts(
+                enhanced_features, slice_idx, h, w
+            )
+            
+            # Set image in SAM2
+            self.sam2.set_image(rgb_image)
+            
+            # Call SAM2 with both point and box prompts (if box exists)
+            masks, scores, _ = self.sam2.predict(
+                point_coords=points,
+                point_labels=labels,
+                box=box,
+                multimask_output=True
+            )
+            
+            # Select best mask based on score
+            if len(masks) > 0:
+                best_idx = scores.argmax()
+                best_mask = masks[best_idx]
+                
+                # Convert to tensor and format
+                mask_tensor = torch.from_numpy(best_mask).float().to(device)
+                mask_tensor = mask_tensor.unsqueeze(0).unsqueeze(0)  # [1, 1, H, W]
+                
+                # Create multi-class output using the binary-style approach
+                # For BraTS: Background at channel 0, tumor classes at 1,2,3
+                height, width = mask_tensor.shape[2:]
+                multi_class_mask = torch.zeros((1, self.num_classes, height, width), device=device)
+                
+                # Background (class 0) is inverse of the tumor mask
+                multi_class_mask[:, 0] = 1.0 - mask_tensor[:, 0]
+                
+                # Distribute tumor mask among classes 1, 2, 3
+                # Use either class-distribution from UNet or typical class distribution
+                
+                # Option 1: Use UNet's class distribution (if available)
+                if hasattr(self, 'last_unet_output') and self.last_unet_output is not None:
+                    # Extract UNet's slice for this position
+                    unet_slice = self._extract_slice(self.last_unet_output, slice_idx, depth_dim_idx)
+                    
+                    # Get class proportions from UNet (for tumor classes only)
+                    unet_tumor_probs = torch.sigmoid(unet_slice[:, 1:])
+                    class_weights = F.normalize(unet_tumor_probs.sum(dim=(2, 3)), p=1, dim=1)
+                    
+                    # If valid weights found, use them to distribute SAM2 mask
+                    if not torch.isnan(class_weights).any() and not torch.isinf(class_weights).any():
+                        for c in range(1, self.num_classes):
+                            weight = class_weights[0, c-1].item()
+                            multi_class_mask[:, c] = mask_tensor[:, 0] * weight
+                    else:
+                        # Fallback to equal distribution
+                        for c in range(1, self.num_classes):
+                            multi_class_mask[:, c] = mask_tensor[:, 0] / (self.num_classes - 1)
+                else:
+                    # Option 2: Use typical BraTS class distribution
+                    # For BraTS: NCR ~30%, ED ~40%, ET ~30%
+                    typical_dist = [0.0, 0.3, 0.4, 0.3]  # Background + 3 tumor classes
+                    for c in range(1, self.num_classes):
+                        multi_class_mask[:, c] = mask_tensor[:, 0] * typical_dist[c]
+                        
+                # Ensure the class probabilities sum to 1.0
+                total_prob = multi_class_mask.sum(dim=1, keepdim=True)
+                multi_class_mask = multi_class_mask / total_prob.clamp(min=1e-5)
+                
+                # Debug: check that we have a valid probability distribution
+                if torch.rand(1).item() < 0.01:  # Print occasionally
+                    class_percentages = [(multi_class_mask[:, c] > 0.5).sum().item() / (h * w) * 100 for c in range(self.num_classes)]
+                    print(f"SAM2 Slice {slice_idx} - Class distribution: {class_percentages}")
+                
+                return multi_class_mask
+            else:
+                # No valid masks found
+                logger.warning(f"SAM2 failed to generate masks for slice {slice_idx}")
+                return None
+                    
+        except Exception as e:
+            logger.error(f"Error processing slice {slice_idx} with SAM2: {e}")
+            return None
+            
+    def _extract_slice(self, volume, idx, depth_dim=2):
+        """Extract a specific slice from a 3D volume."""
+        if depth_dim == 2:
+            slice_data = volume[:, :, idx]
+        elif depth_dim == 3:
+            slice_data = volume[:, :, :, idx]
+        elif depth_dim == 4:
+            slice_data = volume[:, :, :, :, idx]
+        else:
+            raise ValueError(f"Unsupported depth_dim: {depth_dim}")
+            
+        # If we have a batch, ensure it's handled correctly
+        if len(slice_data.shape) > 3 and slice_data.shape[0] > 1:
+            slice_data = slice_data[0:1]
+            
+        return slice_data
+    
+    def create_3d_from_slices(self, input_shape, sam2_slices, depth_dim_idx, device):
+        """
+        Create a 3D volume from 2D slice results.
+        For axial view, slices are always along dimension 2.
+        """
+        # Create empty volume matching the expected output size
+        batch_size = input_shape[0]
+        output_shape = list(input_shape)
+        output_shape[1] = self.num_classes  # Change channel dimension to match num_classes
+        
+        volume = torch.zeros(output_shape, device=device)
+        
+        # Create boolean mask of processed slices
+        processed_slices_mask = torch.zeros(output_shape[depth_dim_idx], dtype=torch.bool, device=device)
+        
+        # Insert each slice result into the appropriate position
+        for slice_idx, mask in sam2_slices.items():
+            if mask is not None:
+                if depth_dim_idx == 2:
+                    volume[:, :, slice_idx] = mask
+                elif depth_dim_idx == 3:
+                    volume[:, :, :, slice_idx] = mask
+                elif depth_dim_idx == 4:
+                    volume[:, :, :, :, slice_idx] = mask
+                    
+                processed_slices_mask[slice_idx] = True
+        
+        # Interpolate between processed slices for smoother transitions
+        if sum(processed_slices_mask) > 1:
+            # Create an index tensor for interpolation reference
+            slice_indices = torch.nonzero(processed_slices_mask).squeeze(-1)
+            
+            # Find gaps between processed slices
+            for i in range(len(slice_indices) - 1):
+                start_idx = slice_indices[i].item()
+                end_idx = slice_indices[i + 1].item()
+                
+                # If there's a gap, interpolate
+                if end_idx - start_idx > 1:
+                    # Get start and end slices
+                    if depth_dim_idx == 2:
+                        start_slice = volume[:, :, start_idx].clone()
+                        end_slice = volume[:, :, end_idx].clone()
+                    elif depth_dim_idx == 3:
+                        start_slice = volume[:, :, :, start_idx].clone()
+                        end_slice = volume[:, :, :, end_idx].clone()
+                    elif depth_dim_idx == 4:
+                        start_slice = volume[:, :, :, :, start_idx].clone()
+                        end_slice = volume[:, :, :, :, end_idx].clone()
+                    
+                    # Linear interpolation weights
+                    for j in range(1, end_idx - start_idx):
+                        alpha = j / (end_idx - start_idx)
+                        interp_slice = (1 - alpha) * start_slice + alpha * end_slice
+                        
+                        # Ensure probability distribution sums to 1
+                        interp_slice = F.normalize(interp_slice, p=1, dim=1)
+                        
+                        # Insert interpolated slice
+                        if depth_dim_idx == 2:
+                            volume[:, :, start_idx + j] = interp_slice
+                        elif depth_dim_idx == 3:
+                            volume[:, :, :, start_idx + j] = interp_slice
+                        elif depth_dim_idx == 4:
+                            volume[:, :, :, :, start_idx + j] = interp_slice
+        
+        return volume
+    
+    def combine_results(self, unet_output, sam2_slices, depth_dim_idx, bg_blend=0.9, tumor_blend=0.5):
+        """
+        Combine UNet output with SAM2 results using adaptive blending.
+        Modified for multi-class segmentation with class-specific blending.
+        """
+        # Start with UNet output
+        combined = unet_output.clone()
+        
+        # Adaptive blending weights for different classes
+        # Use stronger influence from SAM2 for tumor boundaries
+        # bg_blend = 0.9 passed as param  # Background relies more on UNet
+        # tumor_blend = 0.5 passed as param  # Tumor relies more on SAM2
+        
+        # Replace or blend slices with SAM2 results
+        for slice_idx, mask in sam2_slices.items():
+            if mask is not None:
+                # Get UNet slice
+                if depth_dim_idx == 2:
+                    unet_slice = combined[:, :, slice_idx]
+                elif depth_dim_idx == 3:
+                    unet_slice = combined[:, :, :, slice_idx]
+                elif depth_dim_idx == 4:
+                    unet_slice = combined[:, :, :, :, slice_idx]
+                
+                # Calculate blended result with class-specific weights
+                bg_result = bg_blend * unet_slice[:, 0:1] + (1 - bg_blend) * mask[:, 0:1]
+                tumor_result = tumor_blend * unet_slice[:, 1:] + (1 - tumor_blend) * mask[:, 1:]
+                
+                # Combine background and tumor results
+                blended_result = torch.cat([bg_result, tumor_result], dim=1)
+                
+                # Debug: Occasionally print class distribution
+                if torch.rand(1).item() < 0.01:  # 1% chance
+                    class_distribution = [(blended_result[:, c] > 0.5).sum().item() / blended_result[:, c].numel() * 100 for c in range(blended_result.shape[1])]
+                    print(f"Slice {slice_idx} blended class distribution: {class_distribution}")
+                
+                # Normalize to ensure valid probability distribution
+                total_prob = blended_result.sum(dim=1, keepdim=True)
+                blended_result = blended_result / total_prob.clamp(min=1e-5)
+                
+                # Update the combined output
+                if depth_dim_idx == 2:
+                    combined[:, :, slice_idx] = blended_result
+                elif depth_dim_idx == 3:
+                    combined[:, :, :, slice_idx] = blended_result
+                elif depth_dim_idx == 4:
+                    combined[:, :, :, :, slice_idx] = blended_result
+
 class SliceProcessor(nn.Module):
-    """Process 3D volume slices for SAM2 integration."""
+    """Process 3D volume slices for SAM2 integration with multi-class support."""
     def __init__(self, input_channels=256, output_size=(64, 64)):
         super().__init__()
         
@@ -613,7 +1263,20 @@ class SliceProcessor(nn.Module):
     
     def extract_slice(self, volume, idx, depth_dim=2):
         """Extract a specific slice from a 3D volume."""
-        return volume[:, :, idx]
+        if depth_dim == 2:
+            slice_data = volume[:, :, idx]
+        elif depth_dim == 3:
+            slice_data = volume[:, :, :, idx]
+        elif depth_dim == 4:
+            slice_data = volume[:, :, :, :, idx]
+        else:
+            raise ValueError(f"Unsupported depth_dim: {depth_dim}")
+            
+        # If we have a batch, ensure it's handled correctly
+        if len(slice_data.shape) > 3 and slice_data.shape[0] > 1:
+            slice_data = slice_data[0:1]
+            
+        return slice_data
     
     def forward(self, features, indices, depth_dim):
         """Process slices for SAM2."""
@@ -633,7 +1296,7 @@ class SliceProcessor(nn.Module):
             # Store processed slice
             processed_slices[idx] = refined_slice
         
-        return processed_slices
+        return processed_slices, [idx for idx in indices]
 
 class MRItoRGBMapper(nn.Module):
     """Advanced mapping from 4 MRI channels to 3 RGB channels with attention"""
@@ -684,866 +1347,3 @@ class MRItoRGBMapper(nn.Module):
         enhanced_rgb = torch.sigmoid(rgb)
         
         return enhanced_rgb
-
-class UNet3DtoSAM2Bridge(nn.Module):
-    def __init__(self, input_channels=32, output_channels=256):
-        super(UNet3DtoSAM2Bridge, self).__init__()
-        # Channel Attention module to emphasize important feature channels
-        self.channel_attention = nn.Sequential(
-            nn.AdaptiveAvgPool2d(1),
-            nn.Conv2d(input_channels, input_channels // 4, kernel_size=1),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(input_channels // 4, input_channels, kernel_size=1),
-            nn.Sigmoid()
-        )
-        # Spatial Attention module to focus on relevant regions
-        self.spatial_attention = nn.Sequential(
-            nn.Conv2d(input_channels, 1, kernel_size=7, padding=3),
-            nn.BatchNorm2d(1),
-            nn.Sigmoid()
-        )
-        # Shortcut branch to match dimensions for residual connection
-        self.shortcut = nn.Conv2d(input_channels, 128, kernel_size=1)
-        # Transformer branch: two convolutional layers with GroupNorm and ReLU
-        self.conv1 = nn.Conv2d(input_channels, 128, kernel_size=3, padding=1)
-        self.norm1 = nn.GroupNorm(16, 128)
-        self.conv2 = nn.Conv2d(128, 128, kernel_size=3, padding=1)
-        self.norm2 = nn.GroupNorm(16, 128)
-        self.relu = nn.ReLU(inplace=True)
-        # Final layer to convert features to SAM2 expected dimensions
-        self.final_conv = nn.Conv2d(128, output_channels, kernel_size=1)
-        self.final_norm = nn.GroupNorm(32, output_channels)
-        # Learnable parameters for dynamic scaling of the output
-        self.scale_factor = 1.5
-
-    def forward(self, x):
-        # Apply channel attention and weight the input accordingly
-        att_channels = self.channel_attention(x)
-        x_ca = x * att_channels
-
-        # Apply spatial attention on the channel-attended features
-        att_spatial = self.spatial_attention(x_ca)
-        x_sa = x_ca * att_spatial
-
-        # Transformer branch: process features through two convolution layers
-        out = self.conv1(x_sa)
-        out = self.norm1(out)
-        out = self.relu(out)
-        out = self.conv2(out)
-        out = self.norm2(out)
-        
-        # Compute shortcut projection for residual connection
-        shortcut = self.shortcut(x_sa)
-        out = self.relu(out + shortcut)
-
-        # Final transformation to match SAM2 input dimensions
-        out = self.final_conv(out)
-        out = self.final_norm(out)
-
-        # Apply learnable scaling (importance) with adaptive scaling factor
-        out = out * self.scale_factor
-
-        return out
-
-class EnhancedPromptGenerator:
-    def __init__(self, 
-                 num_positive_points=10,  # Increased from 5 for better coverage
-                 num_negative_points=3,  
-                 edge_detection=True,    
-                 use_confidence=True,    
-                 use_mask_prompt=True):
-        self.num_positive_points = num_positive_points
-        self.num_negative_points = num_negative_points
-        self.edge_detection = edge_detection
-        self.use_confidence = use_confidence
-        self.use_mask_prompt = use_mask_prompt
-        self.prompt_stats = {
-            'boxes_generated': 0,
-            'points_generated': 0,
-            'masks_generated': 0,
-            'multi_region_cases': 0
-        }
-
-    def generate_optimal_box(self, binary_mask_or_probability_maps, prob_map_or_slice_idx=None, height=None, width=None):
-        # Handle different parameter patterns
-        if height is not None and width is not None:
-            probability_maps = binary_mask_or_probability_maps
-            slice_idx = prob_map_or_slice_idx
-            
-            # Extract tumor probability (weighted combination)
-            if probability_maps.shape[1] >= 4:
-                tumor_prob = torch.sigmoid(probability_maps[0, 1:4]).sum(dim=0).cpu().detach().numpy()
-            else:
-                tumor_prob = torch.sigmoid(probability_maps[0, min(1, probability_maps.shape[1]-1)]).cpu().detach().numpy()
-            
-            # Resize if necessary
-            curr_h, curr_w = tumor_prob.shape
-            if curr_h != height or curr_w != width:
-                tumor_prob = zoom(tumor_prob, (height / curr_h, width / curr_w), order=1)
-            
-            # Create binary mask
-            binary_mask = tumor_prob > 0.4
-            prob_map = tumor_prob
-        else:
-            binary_mask = binary_mask_or_probability_maps
-            prob_map = prob_map_or_slice_idx
-            height, width = prob_map.shape
-        
-        # If no tumor detected, return None
-        if np.sum(binary_mask) < 10:
-            return None
-        
-        # Apply dilation to create a more inclusive box
-        dilated_mask = binary_dilation(binary_mask, iterations=3)
-        
-        # Find coordinates of tumor region
-        y_coords, x_coords = np.where(dilated_mask)
-        if len(y_coords) == 0:
-            return None
-        
-        min_x, max_x = np.min(x_coords), np.max(x_coords)
-        min_y, max_y = np.min(y_coords), np.max(y_coords)
-        
-        # Reduce padding factor from 15% to 10% for tighter bounding box
-        padding_x = max(5, int((max_x - min_x) * 0.10))
-        padding_y = max(5, int((max_y - min_y) * 0.10))
-        
-        x1 = max(0, min_x - padding_x)
-        y1 = max(0, min_y - padding_y)
-        x2 = min(width - 1, max_x + padding_x)
-        y2 = min(height - 1, max_y + padding_y)
-        
-        self.prompt_stats['boxes_generated'] += 1
-        return np.array([x1, y1, x2, y2])
-    
-    def generate_prompts(self, probability_maps, slice_idx, height, width):
-        """
-        Generate optimized point prompts for SAM2 based on probability maps.
-        Returns:
-            - all_points: numpy array of point coordinates.
-            - all_labels: numpy array of corresponding labels (1=foreground, 0=background).
-            - bounding_box: optimal bounding box computed from the probability map.
-            - tumor_prob: the processed tumor probability map.
-        """
-        # Extract tumor probability with increased intensity multiplier
-        if probability_maps.shape[1] >= 4:
-            tumor_prob = (
-                0.3 * torch.sigmoid(probability_maps[0, 1]) +  
-                0.3 * torch.sigmoid(probability_maps[0, 2]) +  
-                0.4 * torch.sigmoid(probability_maps[0, 3])
-            ).cpu().detach().numpy() * 2  # Increase intensity by factor of 2
-        else:
-            tumor_prob = torch.sigmoid(probability_maps[0, min(1, probability_maps.shape[1]-1)]).cpu().detach().numpy() * 1.5
-
-        # Resize probability map to target dimensions if necessary
-        if tumor_prob.shape != (height, width):
-            tumor_prob = zoom(tumor_prob, (height / tumor_prob.shape[0], width / tumor_prob.shape[1]), order=1)
-        
-        binary_mask = tumor_prob > 0.6
-        
-        # Initialize lists for foreground and background points
-        foreground_points = []
-        background_points = []
-        
-        # Process tumor regions and generate strategic positive points
-        if np.sum(binary_mask) > 10:
-            labeled_mask, num_regions = label(binary_mask)
-            if num_regions > 1:
-                region_sizes = [(i+1, np.sum(labeled_mask == (i+1))) for i in range(num_regions)]
-                region_sizes.sort(key=lambda x: x[1], reverse=True)
-                points_remaining = self.num_positive_points
-                for region_id, size in region_sizes[:3]:
-                    if size < 20:
-                        continue
-                    region_mask = (labeled_mask == region_id)
-                    region_points = self._get_strategic_points(region_mask, min(3, points_remaining), tumor_prob)
-                    foreground_points.extend(region_points)
-                    points_remaining -= len(region_points)
-                    if points_remaining <= 0:
-                        break
-
-            # If additional points needed, use confidence-based selection
-            if len(foreground_points) < self.num_positive_points:
-                distance = distance_transform_edt(binary_mask)
-                confidence = distance * tumor_prob * binary_mask
-                flat_idx = np.argsort(confidence.flatten())[-10:]
-                high_conf_y, high_conf_x = np.unravel_index(flat_idx, confidence.shape)
-                selected_indices = self._select_diverse_points(high_conf_x, high_conf_y, 
-                                                                self.num_positive_points - len(foreground_points), 5)
-                for idx in selected_indices:
-                    foreground_points.append([int(high_conf_x[idx]), int(high_conf_y[idx])])
-            
-            # Generate background (negative) points
-            background_points = self._get_negative_points(binary_mask, tumor_prob, self.num_negative_points)
-        
-        if not foreground_points:
-            foreground_points.append([width // 2, height // 2])
-        if not background_points:
-            background_points.append([width // 4, height // 4])
-            background_points.append([width * 3 // 4, height * 3 // 4])
-        
-        all_points = foreground_points + background_points
-        all_labels = [1] * len(foreground_points) + [0] * len(background_points)
-        self.prompt_stats['points_generated'] += len(all_points)
-        
-        bounding_box = self.generate_optimal_box(binary_mask, tumor_prob)
-        return np.array(all_points), np.array(all_labels), bounding_box, tumor_prob
-
-    def _get_strategic_points(self, region_mask, num_points, prob_map):
-        """Get strategic points within a specific region using distance transform and probability weighting."""
-        points = []
-        distance_map = distance_transform_edt(region_mask)
-        weighted_map = distance_map * prob_map * region_mask
-        flat_idx = np.argsort(weighted_map.flatten())[-num_points * 2:]  # Get more candidates
-        y_coords, x_coords = np.unravel_index(flat_idx, weighted_map.shape)
-        
-        if len(y_coords) > 0:
-            selected_indices = [len(y_coords) - 1]  # Start with the highest value point
-            for _ in range(min(num_points - 1, len(y_coords) - 1)):
-                remaining_indices = [i for i in range(len(y_coords)) if i not in selected_indices]
-                if not remaining_indices:
-                    break
-                max_min_dist = -1
-                best_idx = -1
-                for i in remaining_indices:
-                    min_dist = float('inf')
-                    for sel in selected_indices:
-                        dist = (x_coords[i] - x_coords[sel]) ** 2 + (y_coords[i] - y_coords[sel]) ** 2
-                        min_dist = min(min_dist, dist)
-                    if min_dist > max_min_dist:
-                        max_min_dist = min_dist
-                        best_idx = i
-                if best_idx != -1:
-                    selected_indices.append(best_idx)
-            for idx in selected_indices:
-                points.append([int(x_coords[idx]), int(y_coords[idx])])
-        return points
-
-    def _select_diverse_points(self, x_coords, y_coords, num_points, min_distance):
-        """
-        Select a diverse set of points ensuring that each selected point is at least
-        min_distance away from the others.
-        """
-        if len(x_coords) <= num_points:
-            return list(range(len(x_coords)))
-        
-        selected_indices = [len(x_coords) - 1]  # Start with the highest confidence point
-        
-        while len(selected_indices) < num_points:
-            max_min_dist = -1
-            best_idx = None
-            for i in range(len(x_coords)):
-                if i in selected_indices:
-                    continue
-                # Calculate minimum distance from i to already selected points
-                dists = [((x_coords[i] - x_coords[j])**2 + (y_coords[i] - y_coords[j])**2) for j in selected_indices]
-                min_dist = min(dists)
-                if min_dist > max_min_dist:
-                    max_min_dist = min_dist
-                    best_idx = i
-            if best_idx is not None and max_min_dist >= min_distance**2:
-                selected_indices.append(best_idx)
-            else:
-                break
-        return selected_indices
-
-    def _get_negative_points(self, binary_mask, prob_map, num_points):
-        """Generate strategic negative points near the tumor boundary."""
-        dilated = binary_dilation(binary_mask, iterations=3)
-        dilated_bool = np.bool_(dilated)
-        binary_mask_bool = np.bool_(binary_mask)
-        near_boundary = dilated_bool & ~binary_mask_bool
-        background_regions = (prob_map < 0.3) & near_boundary
-        
-        points = []
-        if np.sum(background_regions) > 0:
-            bg_y, bg_x = np.where(background_regions)
-            num_to_select = min(num_points, len(bg_y))
-            if num_to_select > 0:
-                indices = np.random.choice(len(bg_y), num_to_select, replace=False)
-                for idx in indices:
-                    points.append([int(bg_x[idx]), int(bg_y[idx])])
-        
-        if len(points) < num_points:
-            far_bg_mask = ~dilated_bool
-            if np.sum(far_bg_mask) > 0:
-                far_y, far_x = np.where(far_bg_mask)
-                remaining = num_points - len(points)
-                num_to_select = min(remaining, len(far_y))
-                if num_to_select > 0:
-                    indices = np.random.choice(len(far_y), num_to_select, replace=False)
-                    for idx in indices:
-                        points.append([int(far_x[idx]), int(far_y[idx])])
-        return points
-
-    
-
-
-
-# ======= Main AutoSAM2 model =======
-
-class AutoSAM2(nn.Module):
-    """
-    AutoSAM2 with flexible architecture configurations.
-    Supports multiple modes:
-    1. Full UNet3D only (SAM2 disabled)
-    2. SAM2 only using mid-decoder features (UNet3D decoder disabled)
-    3. Hybrid mode with both paths
-    """
-    def __init__(
-        self, 
-        num_classes=4, 
-        base_channels=16, 
-        trilinear=True,
-        enable_unet_decoder=True,
-        enable_sam2=True,
-        sam2_model_id="facebook/sam2-hiera-small"
-    ):
-        super().__init__()
-
-        self.prompt_generator = EnhancedPromptGenerator(
-            num_positive_points=5,
-            num_negative_points=3,
-            edge_detection=True,
-            use_confidence=True,
-            use_mask_prompt=True
-        )
-
-        self.unet_sam_bridge = UNet3DtoSAM2Bridge(
-            input_channels=32, 
-            output_channels=256 
-        )
-        
-        # Configuration
-        self.num_classes = num_classes
-        self.enable_unet_decoder = enable_unet_decoder
-        self.enable_sam2 = enable_sam2
-        self.sam2_model_id = sam2_model_id
-        
-        
-        # Create flexible UNet3D
-        self.unet3d = FlexibleUNet3D(
-            in_channels=4,
-            n_classes=num_classes,
-            base_channels=base_channels,
-            trilinear=trilinear
-        )
-        
-        # Slice processor for SAM2 integration
-        self.slice_processor = SliceProcessor(
-            input_channels=256,
-            output_size=(64, 64)
-        )
-
-        self.mri_to_rgb = MRItoRGBMapper()
-        
-        # For compatibility with train.py
-        self.encoder = self.unet3d  # Point to the UNet3D model
-        
-        # Initialize tracking variables
-        self.has_sam2 = False
-        self.has_sam2_enabled = False
-        self.sam2 = None
-        
-        # Performance tracking
-        self.performance_metrics = defaultdict(list)
-        self.performance_metrics["sam2_slices_processed"] = 0
-        
-        # Initialize SAM2 if enabled
-        if enable_sam2:
-            self.initialize_sam2()
-    
-    def initialize_sam2(self):
-        """Initialize SAM2."""
-        if not HAS_SAM2:
-            logger.warning("SAM2 package not available. Running in fallback mode.")
-            return
-            
-        try:
-            # Initialize SAM2
-            logger.info(f"Building SAM2 with model_id: {self.sam2_model_id}")
-            sam2_model = build_sam2_hf(self.sam2_model_id)
-            self.sam2 = SAM2ImagePredictor(sam2_model)
-            
-            # Freeze SAM2 weights
-            for param in self.sam2.model.parameters():
-                param.requires_grad = False
-            
-            self.has_sam2 = True
-            logger.info("SAM2 initialized successfully")
-        except Exception as e:
-            logger.error(f"Error initializing SAM2: {e}")
-            self.has_sam2 = False
-            self.sam2 = None
-    
-    def set_mode(self, enable_unet_decoder=None, enable_sam2=None):
-        """
-        Change the processing mode dynamically.
-        
-        Args:
-            enable_unet_decoder: Whether to use the full UNet3D decoder
-            enable_sam2: Whether to use SAM2 for selected slices
-        """
-        if enable_unet_decoder is not None:
-            self.enable_unet_decoder = enable_unet_decoder
-        
-        if enable_sam2 is not None:
-            self.enable_sam2 = enable_sam2
-            
-        logger.info(f"Mode set to: UNet Decoder={self.enable_unet_decoder}, SAM2={self.enable_sam2}")
-
-    
-    def extract_tumor_box(self, prob_map, threshold=0.5):
-        # Threshold the probability map
-        binary_mask = prob_map > threshold
-        
-        # Find coordinates of non-zero elements
-        y_indices, x_indices = np.where(binary_mask)
-        
-        # If no tumor found, return None
-        if len(y_indices) == 0:
-            return None
-        
-        # Find bbox coordinates
-        x1, x2 = np.min(x_indices), np.max(x_indices)
-        y1, y2 = np.min(y_indices), np.max(y_indices)
-        
-        # Return as [x1, y1, x2, y2] format
-        return np.array([x1, y1, x2, y2])
-    
-    def create_mask_prompt(self, prob_map, threshold=0.5):
-        # Create binary mask
-        mask = (prob_map > threshold).astype(np.float32)
-        
-        # Ensure correct shape for SAM2
-        return mask
-        
-    
-    def preprocess_slice_for_sam2(self, img_slice):
-        """Preprocess a slice for SAM2."""
-        # Convert to numpy and standardize
-        img_np = img_slice[0, 0].detach().cpu().numpy()
-        
-        # Apply contrast enhancement
-        try:
-            p1, p99 = np.percentile(img_np, (1, 99))
-            if p99 > p1:
-                img_np = np.clip((img_np - p1) / (p99 - p1), 0, 1)
-            else:
-                # If percentile fails, use min-max normalization
-                min_val, max_val = np.min(img_np), np.max(img_np)
-                if max_val > min_val:
-                    img_np = (img_np - min_val) / (max_val - min_val)
-                else:
-                    img_np = np.zeros_like(img_np)
-        except Exception as e:
-            logger.warning(f"Error in contrast enhancement: {e}. Using basic normalization.")
-            min_val, max_val = np.min(img_np), np.max(img_np)
-            if max_val > min_val:
-                img_np = (img_np - min_val) / (max_val - min_val)
-            else:
-                img_np = np.zeros_like(img_np)
-        
-        # Create RGB image for SAM2
-        img_rgb = np.stack([img_np, img_np, img_np], axis=2)
-        
-        return img_rgb
-    
-    def process_slice_with_sam2(self, input_vol, slice_idx, slice_features, depth_dim_idx, device):
-        """Process a single slice with SAM2 using both point and box prompts"""
-        if not self.has_sam2:
-            logger.warning(f"SAM2 not available for slice {slice_idx}")
-            return None
-                
-        try:
-            # Extract original slice (always along dimension 2 for axial view)
-            orig_slice = input_vol[:, :, slice_idx]
-            
-            # If we have a batch, just take the first item
-            if orig_slice.shape[0] > 1:
-                orig_slice = orig_slice[0:1]
-            
-            # Convert MRI to RGB using our hybrid mapper
-            rgb_tensor = self.mri_to_rgb(orig_slice)
-            
-            # Convert to numpy array in the format SAM2 expects: [H, W, 3]
-            rgb_image = rgb_tensor[0].permute(1, 2, 0).detach().cpu().numpy()
-            
-            # Get image dimensions
-            h, w = rgb_image.shape[:2]
-            
-            # Process through bridge network to get enhanced features
-            enhanced_features = self.unet_sam_bridge(slice_features)
-        
-            # Generate point prompts for whole tumor detection
-            points, labels, box, _ = self.prompt_generator.generate_prompts(
-                enhanced_features, slice_idx, h, w
-            )
-            
-            # Set image in SAM2
-            self.sam2.set_image(rgb_image)
-            
-            # Call SAM2 with both point and box prompts to get whole tumor mask
-            masks, scores, _ = self.sam2.predict(
-                point_coords=points,
-                point_labels=labels,
-                box=box,
-                multimask_output=True
-            )
-            
-            # Select best mask based on score
-            if len(masks) > 0:
-                best_idx = scores.argmax()
-                best_mask = masks[best_idx]
-                
-                # Convert to tensor and format
-                mask_tensor = torch.from_numpy(best_mask).float().to(device)
-                mask_tensor = mask_tensor.unsqueeze(0).unsqueeze(0)  # [1, 1, H, W]
-                
-                # Create multi-class output
-                height, width = mask_tensor.shape[2:]
-                multi_class_mask = torch.zeros((1, self.num_classes, height, width), device=device)
-                
-                # Strategy 1: Anatomical distribution approach
-                # Background (class 0) is inverse of tumor mask
-                multi_class_mask[:, 0] = 1.0 - mask_tensor[:, 0]
-                
-                # Anatomical distribution for tumor regions
-                # Class 2 (ED) - Most common, typically surrounds other classes
-                multi_class_mask[:, 2] = mask_tensor[:, 0].clone() 
-                
-                # Get smaller "core" region for NCR (class 1) and ET (class 3)
-                # Use erosion via max pooling on inverted mask to simulate
-                kernel_size = max(3, int(min(h, w) * 0.05))
-                padded_mask = F.pad(mask_tensor, (kernel_size//2, kernel_size//2, kernel_size//2, kernel_size//2), mode='constant', value=0)
-                eroded_mask = F.max_pool2d(padded_mask, kernel_size=kernel_size, stride=1)
-                
-                # Further erosion for ET (class 3)
-                kernel_size_small = max(3, int(min(h, w) * 0.025))
-                padded_eroded = F.pad(eroded_mask, (kernel_size_small//2, kernel_size_small//2, kernel_size_small//2, kernel_size_small//2), mode='constant', value=0)
-                double_eroded = F.max_pool2d(padded_eroded, kernel_size=kernel_size_small, stride=1)
-                
-                # Distribute to classes
-                # NCR (class 1) is core minus inner core
-                multi_class_mask[:, 1] = eroded_mask - double_eroded
-                # ET (class 3) is the innermost region
-                multi_class_mask[:, 3] = double_eroded
-                
-                # Make classes mutually exclusive
-                # Enforce only one active class per pixel by taking the argmax
-                indices = multi_class_mask.argmax(dim=1, keepdim=True)
-                one_hot = torch.zeros_like(multi_class_mask)
-                one_hot.scatter_(1, indices, 1.0)
-                
-                return one_hot
-            else:
-                # No valid masks found
-                logger.warning(f"SAM2 failed to generate masks for slice {slice_idx}")
-                return None
-                    
-        except Exception as e:
-            logger.error(f"Error processing slice {slice_idx} with SAM2: {e}")
-            return None
-    
-    def create_3d_from_slices(self, input_shape, sam2_slices, depth_dim_idx, device):
-        """Create a 3D volume from 2D slice results with multi-class awareness"""
-        # Create empty volume matching the expected output size
-        batch_size = input_shape[0]
-        output_shape = list(input_shape)
-        output_shape[1] = self.num_classes  # Change channel dimension to match num_classes
-        
-        volume = torch.zeros(output_shape, device=device)
-        
-        # Insert each slice result into the appropriate position
-        for slice_idx, mask in sam2_slices.items():
-            if mask is not None:
-                # For axial view, slices are always along dimension 2
-                volume[:, :, slice_idx] = mask
-        
-        # Fill gaps between processed slices
-        if len(sam2_slices) > 1:
-            # Get sorted slice indices
-            processed_indices = sorted(sam2_slices.keys())
-            
-            # For each gap between processed slices
-            for i in range(len(processed_indices) - 1):
-                current_idx = processed_indices[i]
-                next_idx = processed_indices[i + 1]
-                
-                # Skip if slices are adjacent
-                if next_idx - current_idx <= 1:
-                    continue
-                
-                # Interpolate for each gap slice
-                start_mask = volume[:, :, current_idx]
-                end_mask = volume[:, :, next_idx]
-                
-                for j in range(current_idx + 1, next_idx):
-                    # Calculate interpolation weight
-                    alpha = (j - current_idx) / (next_idx - current_idx)
-                    
-                    # Linear interpolation between masks
-                    interp_mask = (1 - alpha) * start_mask + alpha * end_mask
-                    
-                    # Make mutually exclusive if needed
-                    if not self.training:
-                        indices = interp_mask.argmax(dim=1, keepdim=True)
-                        interp_mask = torch.zeros_like(interp_mask)
-                        interp_mask.scatter_(1, indices, 1.0)
-                    
-                    # Assign interpolated mask
-                    volume[:, :, j] = interp_mask
-        
-        return volume
-
-    def process_volume_with_3d_context(self, input_vol, features, metadata, device):
-        """Process volume using a sliding window approach for 3D context"""
-        depth_dim_idx = metadata["depth_dim_idx"]
-        key_indices = sorted(metadata["key_indices"])
-        
-        # Results dictionary
-        sam2_results = {}
-        
-        # Process slices in overlapping groups of 3
-        context_window = 3
-        
-        # Track previous masks for continuity
-        previous_masks = {}  # Store masks by slice index
-        
-        # Process each slice with context from neighbors
-        for i in range(len(key_indices)):
-            center_idx = key_indices[i]
-            
-            # Get context indices (current slice plus neighbors)
-            context_indices = []
-            for offset in range(-context_window//2, context_window//2 + 1):
-                neighbor_pos = i + offset
-                if neighbor_pos >= 0 and neighbor_pos < len(key_indices):
-                    context_indices.append(key_indices[neighbor_pos])
-            
-            # Process this slice with context
-            result = self._process_slice_with_context(
-                input_vol, context_indices, center_idx, features, 
-                depth_dim_idx, previous_masks, device
-            )
-            
-            if result is not None:
-                # Store the result
-                sam2_results[center_idx] = result
-                
-                # Store mask for future context (just class 1, flattened to 2D)
-                mask_np = result.detach().cpu().numpy()[0, 1].squeeze() > 0.5
-                previous_masks[center_idx] = mask_np.astype(bool)
-                
-                # Limit memory usage by keeping only recent slices
-                if len(previous_masks) > context_window*2:
-                    oldest_key = min(k for k in previous_masks.keys() if k != center_idx)
-                    del previous_masks[oldest_key]
-        
-        return sam2_results
-
-    
-    def _process_slice_with_context(self, input_vol, context_indices, center_idx, 
-                                  features, depth_dim_idx, previous_masks, device):
-        """Process a slice with context from neighboring slices"""
-        try:
-            # Extract and process the center slice (same as before)
-            orig_slice = self._extract_slice(input_vol, center_idx, depth_dim_idx)
-            rgb_tensor = self.mri_to_rgb(orig_slice)
-            rgb_image = rgb_tensor[0].permute(1, 2, 0).detach().cpu().numpy()
-            h, w = rgb_image.shape[:2]
-            
-            slice_features = self.slice_processor.extract_slice(features, center_idx // 4, depth_dim_idx)
-            enhanced_features = self.unet_sam_bridge(slice_features)
-            points, labels, box, _ = self.prompt_generator.generate_prompts(enhanced_features, center_idx, h, w)
-            
-            # Set image in SAM2
-            self.sam2.set_image(rgb_image)
-            
-            # Just use points and box without mask_input for now
-            masks, scores, _ = self.sam2.predict(
-                point_coords=points,
-                point_labels=labels,
-                box=box,
-                multimask_output=True
-            )
-            
-            # Process results (same as before)
-            if len(masks) > 0:
-                best_idx = scores.argmax()
-                best_mask = masks[best_idx]
-                mask_tensor = torch.from_numpy(best_mask).float().to(device)
-                mask_tensor = mask_tensor.unsqueeze(0).unsqueeze(0)
-                multi_class_mask = torch.zeros((1, self.num_classes, h, w), device=device)
-                for c in range(1, self.num_classes):
-                    multi_class_mask[:, c] = mask_tensor[:, 0]
-                return multi_class_mask
-            
-            return None
-        except Exception as e:
-            logger.error(f"Error processing slice {center_idx} with context: {e}")
-            return None
-                                   
-    
-    def _extract_slice(self, volume, idx, depth_dim=2):
-        """Extract a specific slice from a 3D volume."""
-        slice_data = volume[:, :, idx]
-        
-        # If we have a batch, just take the first item
-        if slice_data.shape[0] > 1:
-            slice_data = slice_data[0:1]
-        
-        return slice_data
-
-    def debug_mask_distribution(self, mask):
-        """Debug helper to check mask class distribution"""
-        if torch.is_tensor(mask):
-            # Get percentage of each class
-            total_pixels = torch.prod(torch.tensor(mask.shape[2:]))
-            class_percentages = []
-            
-            for c in range(mask.shape[1]):
-                pixels_in_class = torch.sum(mask[:, c] > 0.5)
-                percentage = (pixels_in_class / total_pixels) * 100
-                class_percentages.append(percentage.item())
-            
-            print(f"Class distribution: {class_percentages}")
-        return mask
-
-    
-    def combine_results(self, unet_output, sam2_slices, depth_dim_idx, blend_weight=0.7):
-        """Combines UNet and SAM2 outputs with proper multi-class handling"""
-        # Start with UNet output 
-        combined = unet_output.clone()
-        
-        # Debug the UNet output distribution
-        self.debug_mask_distribution(combined)
-        
-        # For each slice processed by SAM2
-        for slice_idx, mask in sam2_slices.items():
-            if mask is not None:
-                # Debug SAM2 output
-                self.debug_mask_distribution(mask.unsqueeze(0))
-                
-                # Get UNet slice
-                unet_slice = combined[:, :, slice_idx]
-                
-                # Blend each class separately
-                for c in range(combined.shape[1]):
-                    # Weighted average of probabilities (not argmax yet)
-                    combined[:, c, slice_idx] = blend_weight * unet_slice[:, c] + (1 - blend_weight) * mask[:, c]
-        
-        # Apply softmax again to ensure valid probability distribution
-        # Reshape for softmax
-        b, c, *spatial_dims = combined.shape
-        flat_shape = (b, c, -1)
-        combined_flat = combined.reshape(flat_shape)
-        
-        # Apply softmax along class dimension
-        combined_flat = F.softmax(combined_flat, dim=1)
-        
-        # Reshape back
-        combined = combined_flat.reshape(combined.shape)
-        
-        return combined
-        
-    def get_boundary_pixels(self, mask, threshold=0.5):
-        """Get boundary pixels of a mask for comparing segmentation boundaries"""
-        mask_binary = (mask[:, 1:] > threshold).float()
-        mask_sum = torch.sum(mask_binary, dim=1, keepdim=True)
-        
-        # Apply erosion to get inner region
-        kernel_size = 3
-        padding = kernel_size // 2
-        pooled = F.max_pool2d(
-            -mask_sum, kernel_size=kernel_size, stride=1, padding=padding
-        )
-        eroded = (-pooled > -0.5).float()
-        
-        # Boundary is the difference between mask and eroded mask
-        boundary = mask_sum - eroded
-        
-        return boundary
-    
-    def forward(self, x):
-        """Forward pass with multi-class aware processing"""
-        start_time = time.time()
-        device = x.device
-        
-        # Flag for SAM2 usage tracking
-        self.has_sam2_enabled = self.enable_sam2 and self.has_sam2
-        
-        # Process with UNet3D to get mid-decoder features
-        unet_output, mid_features, sam_embeddings, metadata = self.unet3d(
-            x, 
-            use_full_decoder=self.enable_unet_decoder
-        )
-        
-        # Store UNet output for use in SAM2 processing
-        if self.enable_sam2:
-            self.last_unet_output = unet_output
-        
-        # Mode 1: UNet3D only
-        if not self.enable_sam2 or not self.has_sam2:
-            self.performance_metrics["total_time"].append(time.time() - start_time)
-            return unet_output
-        
-        # Process slices with SAM2 - now multi-class aware
-        sam2_results = self.process_volume_with_3d_context(
-            x, mid_features, metadata, device
-        )
-        
-        # Mode 2: SAM2 only (without UNet decoder)
-        if not self.enable_unet_decoder:
-            # Create 3D volume from SAM2 slice results
-            final_output = self.create_3d_from_slices(
-                x.shape, sam2_results, metadata["depth_dim_idx"], device
-            )
-        
-        # Mode 3: Hybrid mode (UNet + SAM2)
-        else:
-            # Combine UNet output with SAM2 results
-            final_output = self.combine_results(
-                unet_output, sam2_results, metadata["depth_dim_idx"]
-            )
-        
-        # Update timing metrics
-        total_time = time.time() - start_time
-        self.performance_metrics["total_time"].append(total_time)
-    
-        # Store results for visualization/debugging
-        self.last_unet_output = unet_output
-        self.last_sam2_slices = sam2_results
-        self.last_combined_output = final_output
-        
-        return final_output
-    
-    def get_performance_stats(self):
-        """Return performance statistics."""
-        stats = {
-            "has_sam2": self.has_sam2,
-            "sam2_enabled": self.has_sam2_enabled,
-            "unet_enabled": self.enable_unet_decoder,
-            "sam2_slices_processed": self.performance_metrics["sam2_slices_processed"],
-            "model_mode": self._get_current_mode()
-        }
-        
-        if self.performance_metrics["total_time"]:
-            stats["avg_time_per_forward"] = np.mean(self.performance_metrics["total_time"])
-            stats["total_forward_passes"] = len(self.performance_metrics["total_time"])
-        
-        return stats
-    
-    def _get_current_mode(self):
-        """Return string describing current mode."""
-        if self.enable_unet_decoder and not self.has_sam2_enabled:
-            return "unet3d_only"
-        elif not self.enable_unet_decoder and self.has_sam2_enabled:
-            return "sam2_only"
-        elif self.enable_unet_decoder and self.has_sam2_enabled:
-            return "hybrid"
-        else:
-            return "invalid_config"
-
-
-print("=== AUTOSAM2 WITH FLEXIBLE ARCHITECTURE LOADED SUCCESSFULLY ===")
