@@ -670,12 +670,12 @@ def save_training_history(history, filename):
 
 
 def preprocess_batch(batch, device=None):
-   """
-   Preprocess batch for BraTS segmentation with class labels 0, 1, 2, 4
-   """
+    """
+    Preprocess batch for BraTS segmentation with class labels 0, 1, 2, 4
+    """
     images, masks = batch
     print(f"Batch images shape: {images.shape}, masks shape: {masks.shape}")
-   
+    
     # Convert binary masks to multi-class format if needed
     if masks.shape[1] == 1:
        # For binary masks, create proper BraTS format with classes 0, 1, 2, 4
