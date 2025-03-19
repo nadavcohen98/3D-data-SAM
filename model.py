@@ -249,7 +249,7 @@ class FlexibleUNet3D(nn.Module):
         Forward pass with flexible options
         """
         # Get batch dimensions
-        batch_size, channels, dim1, dim2, dim3 = x.shape
+        batch_size, channels, depth, height, width = x.shape
         
         # For axial view, the depth dimension is now at position 2 (after channels)
         # No need to identify it dynamically
