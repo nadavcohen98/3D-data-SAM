@@ -196,6 +196,10 @@ class BraTSDataset(Dataset):
             
             if os.path.exists(label_path):
                 mask_data = nib.load(label_path).get_fdata()
+                
+                # CRITICAL FIX: Transpose mask to match image orientation
+                # The mask should have the same orientation as the image
+                mask_data = np.transpose(mask_data, (2, 0, 1))
     
                 multi_class_mask = np.zeros((4,) + mask_data.shape, dtype=np.float32)
                 multi_class_mask[0] = (mask_data == 0).astype(np.float32)
@@ -205,7 +209,7 @@ class BraTSDataset(Dataset):
                 mask_data = multi_class_mask
     
             else:
-                mask_data = np.zeros((1,) + image_data.shape[1:])
+                mask_data = np.zeros((4,) + image_data.shape[1:], dtype=np.float32)
             
             # Convert to PyTorch tensors
             image = torch.tensor(image_data, dtype=torch.float32)
@@ -220,8 +224,8 @@ class BraTSDataset(Dataset):
             if self.verbose:
                 print(f"Error loading image {self.image_files[idx]}: {e}")
             # Return dummy data
-            dummy_shape = (4, 240, 240, 155) 
-            return torch.zeros(dummy_shape, dtype=torch.float32), torch.zeros((1, *dummy_shape[1:]), dtype=torch.float32)
+            dummy_shape = (4, 155, 240, 240)  # Corrected standard BraTS shape 
+            return torch.zeros(dummy_shape, dtype=torch.float32), torch.zeros((4,) + dummy_shape[1:], dtype=torch.float32)
 
     
     def __getitem__(self, idx):
