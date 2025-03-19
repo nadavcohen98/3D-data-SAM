@@ -671,42 +671,54 @@ def save_training_history(history, filename):
 
 def preprocess_batch(batch, device=None):
    """
-   Preprocess batch for BraTS segmentation
+   Preprocess batch for BraTS segmentation with robust orientation handling
    """
    images, masks = batch
    
+   print(f"Original batch shapes - images: {images.shape}, masks: {masks.shape}")
    
-   # Transpose masks to match the axial orientation of images
-   # If images are [B, C, D, H, W] but masks are [B, C, H, W, D]
-   # we need to permute masks to match
-   if images.shape[2:] != masks.shape[2:]:
-       # Permute to match [B, C, D, H, W]
-       masks = masks.permute(0, 1, 4, 2, 3)
+   # Find the depth dimension (smallest one, usually 155)
+   img_dims = images.shape[2:]
+   mask_dims = masks.shape[2:]
    
-   # Rest of the preprocessing as before...
+   # Find which dimension is the depth dimension (smallest)
+   img_min_dim_idx = img_dims.index(min(img_dims)) + 2  # +2 for batch & channel dims
+   mask_min_dim_idx = mask_dims.index(min(mask_dims)) + 2
    
-   # Convert binary masks to multi-class format if needed
-   if masks.shape[1] == 1:
-       # For binary masks, create proper BraTS format with classes 0, 1, 2, 4
-       multi_class_masks = torch.zeros((masks.shape[0], 4, *masks.shape[2:]), dtype=torch.float32)
-       
-       # Class 0: Background (where mask is 0)
-       multi_class_masks[:, 0] = (masks[:, 0] == 0).float()
-       
-       # If we have a binary tumor mask, distribute it to the three tumor classes
-       if torch.sum(masks[:, 0]) > 0:
-           # Use percentages of the tumor mask for each class
-           # Class 1: NCR (Necrotic tumor core)
-           multi_class_masks[:, 1] = (masks[:, 0] * (torch.rand_like(masks[:, 0]) < 0.3)).float()
-           
-           # Class 2: ED (Peritumoral edema)
-           multi_class_masks[:, 2] = (masks[:, 0] * (torch.rand_like(masks[:, 0]) < 0.5)).float()
-           
-           # Class 4 (at index 3): ET (Enhancing tumor)
-           multi_class_masks[:, 3] = (masks[:, 0] * (torch.rand_like(masks[:, 0]) < 0.2)).float()
-       
-       masks = multi_class_masks
+   print(f"Detected depth dimension - images: {img_min_dim_idx}, masks: {mask_min_dim_idx}")
    
+   # Define a target orientation [B, C, D, H, W] where D is always the smallest dimension
+   target_order = [0, 1]  # Always keep batch and channel dimensions first
+   
+   # Create the target permutation
+   for dim_idx in range(2, 5):  # For the spatial dimensions
+       if dim_idx == img_min_dim_idx:
+           target_order.append(2)  # Depth should be dimension 2
+       else:
+           target_order.append(3 if len(target_order) == 2 else 4)  # Height then Width
+   
+   # Permute images to target orientation if needed
+   if img_min_dim_idx != 2:
+       print(f"Permuting images using order: {target_order}")
+       images = images.permute(*target_order)
+   
+   # Create a similar permutation for masks
+   mask_target_order = [0, 1]
+   
+   for dim_idx in range(2, 5):
+       if dim_idx == mask_min_dim_idx:
+           mask_target_order.append(2)
+       else:
+           mask_target_order.append(3 if len(mask_target_order) == 2 else 4)
+   
+   # Permute masks to target orientation if needed
+   if mask_min_dim_idx != 2:
+       print(f"Permuting masks using order: {mask_target_order}")
+       masks = masks.permute(*mask_target_order)
+   
+   print(f"After orientation normalization - images: {images.shape}, masks: {masks.shape}")
+   
+   # Rest of your preprocessing code...
    # Ensure mask values are within expected range
    masks = torch.clamp(masks, 0, 1)
    
