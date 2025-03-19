@@ -232,8 +232,6 @@ def visualize_batch_comprehensive(images, masks, outputs, epoch, mode="hybrid", 
                 mask_slice = np.transpose(mask_slice, (0, 1, 2))
                 output_slice = np.transpose(output_slice, (0, 1, 2))
             
-            print(f"Slice {slice_idx} - Image shape: {image_slice.shape}, Mask shape: {mask_slice.shape}")
-            print(f"Image range: [{image_slice.min():.2f}, {image_slice.max():.2f}], Mask range: [{mask_slice.min():.2f}, {mask_slice.max():.2f}]")
             
             # Create main figure (2x3 grid)
             fig = plt.figure(figsize=(15, 10))
