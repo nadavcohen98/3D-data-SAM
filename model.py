@@ -245,11 +245,13 @@ class FlexibleUNet3D(nn.Module):
         """
         # Get batch dimensions
         batch_size, channels, dim1, dim2, dim3 = x.shape
+        print(f"Input shape: {x.shape} (expected: [B, C, D, H, W])")
         
         # For axial view, the depth dimension is now at position 2 (after channels)
         # No need to identify it dynamically
         depth_dim_idx = 2
         depth = dim1
+        print(f"Using depth dimension at index {depth_dim_idx} with {depth} slices")
         
         # Ultra-defensive slice selection
         # Select only slices that are guaranteed to be within bounds
