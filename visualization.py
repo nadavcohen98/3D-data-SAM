@@ -31,6 +31,8 @@ def create_segmentation_overlay(img_slice, seg_slice, alpha=0.7):
     Red: Necrotic Core (NCR) - Class 1
     Yellow: Enhancing Tumor (ET) - Class 4
     """
+    import numpy as np
+    
     # Create normalized background image
     p1, p99 = np.percentile(img_slice, (1, 99))
     img_normalized = np.clip((img_slice - p1) / (p99 - p1 + 1e-8), 0, 1)
@@ -78,7 +80,9 @@ def create_segmentation_overlay(img_slice, seg_slice, alpha=0.7):
     return blended
 
 def create_difference_map(gt_slice, pred_slice, img_slice):
-    """Create a map highlighting differences between ground truth and prediction - FIXED VERSION"""
+    """Create a map highlighting differences between ground truth and prediction"""
+    import numpy as np
+    
     # Extract tumor regions (any tumor vs no tumor)
     if gt_slice.shape[0] > 3 and pred_slice.shape[0] > 3:
         gt_any = (gt_slice[1:4].sum(axis=0) > 0.5).astype(float)
@@ -134,7 +138,7 @@ def get_boundary_pixels(mask, dilate=1):
 
 def visualize_batch_comprehensive(images, masks, outputs, epoch, mode="hybrid", prefix=""):
     """
-    Enhanced visualization of a batch with comprehensive views
+    Enhanced visualization of a batch with comprehensive views - robust to different orientations
     
     Args:
         images: Input MRI scans [B, C, D, H, W]
@@ -144,6 +148,13 @@ def visualize_batch_comprehensive(images, masks, outputs, epoch, mode="hybrid", 
         mode: Processing mode ("unet3d", "sam2", or "hybrid")
         prefix: Prefix for saved files
     """
+    import os
+    import numpy as np
+    import matplotlib.pyplot as plt
+    import torch
+    import matplotlib.gridspec as gridspec
+    import traceback
+    
     # Create output directory - use absolute paths
     current_dir = os.path.abspath(os.getcwd())
     results_dir = os.path.join(current_dir, "results")
@@ -166,8 +177,23 @@ def visualize_batch_comprehensive(images, masks, outputs, epoch, mode="hybrid", 
     else:
         probs = outputs
     
-    # Determine slice indices 
-    slice_indices = get_slice_indices(images, num_slices=5)
+    # Identify which dimension is the depth dimension (usually the smallest)
+    img_shape = list(images.shape[2:])  # Skip batch and channel dims
+    depth_dim = min(img_shape)
+    depth_dim_idx = img_shape.index(depth_dim) + 2  # +2 for batch and channel
+    
+    print(f"Detected depth dimension {depth_dim} at index {depth_dim_idx}")
+    
+    # Determine slice indices for this depth dimension
+    total_slices = images.shape[depth_dim_idx]
+    slice_indices = [
+        max(0, int(total_slices * 0.15)),
+        max(0, int(total_slices * 0.3)),
+        max(0, int(total_slices * 0.5)),
+        max(0, int(total_slices * 0.7)),
+        max(0, int(total_slices * 0.85))
+    ]
+    
     print(f"Visualizing slices at indices: {slice_indices}")
     
     # Set up figure properties for better visualization
@@ -184,15 +210,30 @@ def visualize_batch_comprehensive(images, masks, outputs, epoch, mode="hybrid", 
     # Process each slice
     for i, slice_idx in enumerate(slice_indices):
         try:
-            # Extract slice data
-            print(f"Extracting slice {slice_idx} from images shape: {images.shape}")
-            image_slice = images[b, :, slice_idx].cpu().detach().numpy()
-            print(f"Extracted image_slice with shape: {image_slice.shape}")
+            # Extract slice data based on detected depth dimension
+            if depth_dim_idx == 2:  # Depth is the first spatial dimension [B, C, D, H, W]
+                image_slice = images[b, :, slice_idx].cpu().detach().numpy()
+                mask_slice = masks[b, :, slice_idx].cpu().detach().numpy()
+                output_slice = probs[b, :, slice_idx].cpu().detach().numpy()
+            elif depth_dim_idx == 3:  # Depth is the second spatial dimension [B, C, H, D, W]
+                image_slice = images[b, :, :, slice_idx].cpu().detach().numpy()
+                mask_slice = masks[b, :, :, slice_idx].cpu().detach().numpy()
+                output_slice = probs[b, :, :, slice_idx].cpu().detach().numpy()
+                # Transpose to get [C, H, W] format
+                image_slice = np.transpose(image_slice, (0, 2, 1))
+                mask_slice = np.transpose(mask_slice, (0, 2, 1))
+                output_slice = np.transpose(output_slice, (0, 2, 1))
+            elif depth_dim_idx == 4:  # Depth is the third spatial dimension [B, C, H, W, D]
+                image_slice = images[b, :, :, :, slice_idx].cpu().detach().numpy()
+                mask_slice = masks[b, :, :, :, slice_idx].cpu().detach().numpy()
+                output_slice = probs[b, :, :, :, slice_idx].cpu().detach().numpy()
+                # Transpose to get [C, H, W] format
+                image_slice = np.transpose(image_slice, (0, 1, 2))
+                mask_slice = np.transpose(mask_slice, (0, 1, 2))
+                output_slice = np.transpose(output_slice, (0, 1, 2))
             
-            print(f"Extracting slice {slice_idx} from masks shape: {masks.shape}")
-            mask_slice = masks[b, :, slice_idx].cpu().detach().numpy()
-            print(f"Extracted mask_slice with shape: {mask_slice.shape}")
-            output_slice = probs[b, :, slice_idx].cpu().detach().numpy()
+            print(f"Slice {slice_idx} - Image shape: {image_slice.shape}, Mask shape: {mask_slice.shape}")
+            print(f"Image range: [{image_slice.min():.2f}, {image_slice.max():.2f}], Mask range: [{mask_slice.min():.2f}, {mask_slice.max():.2f}]")
             
             # Create main figure (2x3 grid)
             fig = plt.figure(figsize=(15, 10))
@@ -315,7 +356,6 @@ def visualize_batch_comprehensive(images, masks, outputs, epoch, mode="hybrid", 
             print(f"Saved visualization to: {slice_filename}")
         except Exception as e:
             print(f"Error visualizing slice {slice_idx}: {e}")
-            import traceback
             traceback.print_exc()
     
     # Create a summary figure with all slices side by side
@@ -324,30 +364,50 @@ def visualize_batch_comprehensive(images, masks, outputs, epoch, mode="hybrid", 
         
         # Add a row for each view: MRI, Ground Truth, Prediction
         for i, slice_idx in enumerate(slice_indices):
-
-            
-            # Extract slice data
-            image_slice = images[b, :, slice_idx].cpu().detach().numpy()
-            mask_slice = masks[b, :, slice_idx].cpu().detach().numpy()
-            output_slice = probs[b, :, slice_idx].cpu().detach().numpy()
-            
-            # Visualize FLAIR MRI (row 0)
-            flair_idx = min(3, image_slice.shape[0]-1)
-            p1, p99 = np.percentile(image_slice[flair_idx], (1, 99))
-            flair_normalized = np.clip((image_slice[flair_idx] - p1) / (p99 - p1 + 1e-8), 0, 1)
-            summary_axs[0, i].imshow(flair_normalized, cmap='gray')
-            summary_axs[0, i].set_title(f'Slice {slice_idx}')
-            summary_axs[0, i].axis('off')
-            
-            # Visualize Ground Truth (row 1)
-            gt_overlay = create_segmentation_overlay(image_slice[flair_idx], mask_slice)
-            summary_axs[1, i].imshow(gt_overlay)
-            summary_axs[1, i].axis('off')
-            
-            # Visualize Prediction (row 2)
-            pred_overlay = create_segmentation_overlay(image_slice[flair_idx], output_slice)
-            summary_axs[2, i].imshow(pred_overlay)
-            summary_axs[2, i].axis('off')
+            try:
+                # Extract slice data based on detected depth dimension
+                if depth_dim_idx == 2:
+                    image_slice = images[b, :, slice_idx].cpu().detach().numpy()
+                    mask_slice = masks[b, :, slice_idx].cpu().detach().numpy()
+                    output_slice = probs[b, :, slice_idx].cpu().detach().numpy()
+                elif depth_dim_idx == 3:
+                    image_slice = images[b, :, :, slice_idx].cpu().detach().numpy()
+                    mask_slice = masks[b, :, :, slice_idx].cpu().detach().numpy()
+                    output_slice = probs[b, :, :, slice_idx].cpu().detach().numpy()
+                    image_slice = np.transpose(image_slice, (0, 2, 1))
+                    mask_slice = np.transpose(mask_slice, (0, 2, 1))
+                    output_slice = np.transpose(output_slice, (0, 2, 1))
+                elif depth_dim_idx == 4:
+                    image_slice = images[b, :, :, :, slice_idx].cpu().detach().numpy()
+                    mask_slice = masks[b, :, :, :, slice_idx].cpu().detach().numpy()
+                    output_slice = probs[b, :, :, :, slice_idx].cpu().detach().numpy()
+                    image_slice = np.transpose(image_slice, (0, 1, 2))
+                    mask_slice = np.transpose(mask_slice, (0, 1, 2))
+                    output_slice = np.transpose(output_slice, (0, 1, 2))
+                
+                # Visualize FLAIR MRI (row 0)
+                flair_idx = min(3, image_slice.shape[0]-1)
+                p1, p99 = np.percentile(image_slice[flair_idx], (1, 99))
+                flair_normalized = np.clip((image_slice[flair_idx] - p1) / (p99 - p1 + 1e-8), 0, 1)
+                summary_axs[0, i].imshow(flair_normalized, cmap='gray')
+                summary_axs[0, i].set_title(f'Slice {slice_idx}')
+                summary_axs[0, i].axis('off')
+                
+                # Visualize Ground Truth (row 1)
+                gt_overlay = create_segmentation_overlay(image_slice[flair_idx], mask_slice)
+                summary_axs[1, i].imshow(gt_overlay)
+                summary_axs[1, i].axis('off')
+                
+                # Visualize Prediction (row 2)
+                pred_overlay = create_segmentation_overlay(image_slice[flair_idx], output_slice)
+                summary_axs[2, i].imshow(pred_overlay)
+                summary_axs[2, i].axis('off')
+            except Exception as e:
+                print(f"Error in summary visualization for slice {slice_idx}: {e}")
+                # Display error message in the plot
+                for row in range(3):
+                    summary_axs[row, i].text(0.5, 0.5, "Error", ha='center', va='center', color='red')
+                    summary_axs[row, i].axis('off')
         
         # Add row titles
         summary_axs[0, 0].set_ylabel('FLAIR MRI', fontsize=10)
@@ -364,9 +424,7 @@ def visualize_batch_comprehensive(images, masks, outputs, epoch, mode="hybrid", 
         plt.close(summary_fig)
     except Exception as e:
         print(f"Error creating summary visualization: {e}")
-
-# Additional function to visualize a comparison of UNet3D and SAM2 outputs
-
+        traceback.print_exc()
 
 def visualize_model_comparison(images, masks, unet_outputs, hybrid_outputs, epoch, slice_indices=None, output_dir="results/comparison"):
     """
@@ -381,6 +439,12 @@ def visualize_model_comparison(images, masks, unet_outputs, hybrid_outputs, epoc
         slice_indices: Specific slice indices to visualize (optional)
         output_dir: Directory to save comparison visualizations
     """
+    import os
+    import numpy as np
+    import matplotlib.pyplot as plt
+    import torch
+    import traceback
+    
     # Create output directory with absolute path
     current_dir = os.path.abspath(os.getcwd())
     comp_dir = os.path.join(current_dir, output_dir)
@@ -402,20 +466,59 @@ def visualize_model_comparison(images, masks, unet_outputs, hybrid_outputs, epoc
     else:
         hybrid_probs = hybrid_outputs
     
+    # Identify which dimension is the depth dimension (usually the smallest)
+    img_shape = list(images.shape[2:])  # Skip batch and channel dims
+    depth_dim = min(img_shape)
+    depth_dim_idx = img_shape.index(depth_dim) + 2  # +2 for batch and channel
+    
+    print(f"Detected depth dimension {depth_dim} at index {depth_dim_idx}")
+    
     # Determine slice indices if not provided
     if slice_indices is None:
-        slice_indices = get_slice_indices(images)
+        total_slices = images.shape[depth_dim_idx]
+        slice_indices = [
+            max(0, int(total_slices * 0.15)),
+            max(0, int(total_slices * 0.3)),
+            max(0, int(total_slices * 0.5)),
+            max(0, int(total_slices * 0.7)),
+            max(0, int(total_slices * 0.85))
+        ]
     
     # Process each slice
     for slice_idx in slice_indices:
         try:
-            # Extract slice data
-            image_slice = images[b, :, slice_idx].cpu().detach().numpy()
-            mask_slice = masks[b, :, slice_idx].cpu().detach().numpy()
+            # Extract slice data based on detected depth dimension
+            if depth_dim_idx == 2:  # Depth is the first spatial dimension [B, C, D, H, W]
+                image_slice = images[b, :, slice_idx].cpu().detach().numpy()
+                mask_slice = masks[b, :, slice_idx].cpu().detach().numpy()
+                unet_slice = unet_probs[b, :, slice_idx].cpu().detach().numpy() if torch.is_tensor(unet_probs) else None
+                hybrid_slice = hybrid_probs[b, :, slice_idx].cpu().detach().numpy() if torch.is_tensor(hybrid_probs) else None
+            elif depth_dim_idx == 3:  # Depth is the second spatial dimension [B, C, H, D, W]
+                image_slice = images[b, :, :, slice_idx].cpu().detach().numpy()
+                mask_slice = masks[b, :, :, slice_idx].cpu().detach().numpy()
+                unet_slice = unet_probs[b, :, :, slice_idx].cpu().detach().numpy() if torch.is_tensor(unet_probs) else None
+                hybrid_slice = hybrid_probs[b, :, :, slice_idx].cpu().detach().numpy() if torch.is_tensor(hybrid_probs) else None
+                # Transpose to get [C, H, W] format
+                image_slice = np.transpose(image_slice, (0, 2, 1))
+                mask_slice = np.transpose(mask_slice, (0, 2, 1))
+                if unet_slice is not None:
+                    unet_slice = np.transpose(unet_slice, (0, 2, 1))
+                if hybrid_slice is not None:
+                    hybrid_slice = np.transpose(hybrid_slice, (0, 2, 1))
+            elif depth_dim_idx == 4:  # Depth is the third spatial dimension [B, C, H, W, D]
+                image_slice = images[b, :, :, :, slice_idx].cpu().detach().numpy()
+                mask_slice = masks[b, :, :, :, slice_idx].cpu().detach().numpy()
+                unet_slice = unet_probs[b, :, :, :, slice_idx].cpu().detach().numpy() if torch.is_tensor(unet_probs) else None
+                hybrid_slice = hybrid_probs[b, :, :, :, slice_idx].cpu().detach().numpy() if torch.is_tensor(hybrid_probs) else None
+                # Transpose to get [C, H, W] format
+                image_slice = np.transpose(image_slice, (0, 1, 2))
+                mask_slice = np.transpose(mask_slice, (0, 1, 2))
+                if unet_slice is not None:
+                    unet_slice = np.transpose(unet_slice, (0, 1, 2))
+                if hybrid_slice is not None:
+                    hybrid_slice = np.transpose(hybrid_slice, (0, 1, 2))
             
-            # Get outputs from each model
-            unet_slice = unet_probs[b, :, slice_idx].cpu().detach().numpy() if torch.is_tensor(unet_probs) else None
-            hybrid_slice = hybrid_probs[b, :, slice_idx].cpu().detach().numpy() if torch.is_tensor(hybrid_probs) else None
+            print(f"Slice {slice_idx} - Image shape: {image_slice.shape}, Mask shape: {mask_slice.shape}")
             
             # Create figure (2x2 grid)
             fig, axs = plt.subplots(2, 2, figsize=(14, 12))
@@ -474,5 +577,4 @@ def visualize_model_comparison(images, masks, unet_outputs, hybrid_outputs, epoc
             
         except Exception as e:
             print(f"Error creating comparison visualization for slice {slice_idx}: {e}")
-            import traceback
             traceback.print_exc()
