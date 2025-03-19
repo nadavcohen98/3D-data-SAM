@@ -673,10 +673,11 @@ def preprocess_batch(batch, device=None):
    """
    Preprocess batch for BraTS segmentation with class labels 0, 1, 2, 4
    """
-   images, masks = batch
+    images, masks = batch
+    print(f"Batch images shape: {images.shape}, masks shape: {masks.shape}")
    
-   # Convert binary masks to multi-class format if needed
-   if masks.shape[1] == 1:
+    # Convert binary masks to multi-class format if needed
+    if masks.shape[1] == 1:
        # For binary masks, create proper BraTS format with classes 0, 1, 2, 4
        multi_class_masks = torch.zeros((masks.shape[0], 4, *masks.shape[2:]), dtype=torch.float32)
        
@@ -697,16 +698,16 @@ def preprocess_batch(batch, device=None):
            multi_class_masks[:, 3] = (masks[:, 0] * (torch.rand_like(masks[:, 0]) < 0.2)).float()
        
        masks = multi_class_masks
-   
-   # Ensure mask values are within expected range
-   masks = torch.clamp(masks, 0, 1)
-   
-   # Move to device if specified
-   if device is not None:
+    
+    # Ensure mask values are within expected range
+    masks = torch.clamp(masks, 0, 1)
+    
+    # Move to device if specified
+    if device is not None:
        images = images.to(device)
        masks = masks.to(device)
-   
-   return images, masks
+    
+    return images, masks
 
 
 def train_model(data_path, batch_size=1, epochs=20, learning_rate=1e-3,
