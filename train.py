@@ -747,7 +747,7 @@ def train_model(data_path, batch_size=1, epochs=20, learning_rate=1e-3,
         print("No existing checkpoint found. Starting from epoch 0.")
     
     # Define loss criterion - use our new BraTS-specific loss
-    criterion = BraTSCombinedLoss(dice_weight=0.75, bce_weight=0.15, focal_weight=0.1,
+    criterion = BraTSCombinedLoss(dice_weight=0.8, bce_weight=0.1, focal_weight=0.1,
                                 region_weights={'ET': 1.6, 'WT': 1.0, 'TC': 1.3})
     
     # Define optimizer
@@ -766,7 +766,7 @@ def train_model(data_path, batch_size=1, epochs=20, learning_rate=1e-3,
             print(f"Error loading optimizer state: {e}. Using fresh optimizer.")
     
     # Get data loaders
-    max_samples = 16 if test_run else None
+    max_samples = 64 if test_run else None
     
     train_loader = get_brats_dataloader(
         data_path, batch_size=batch_size, train=True,
@@ -791,7 +791,7 @@ def train_model(data_path, batch_size=1, epochs=20, learning_rate=1e-3,
         epochs=epochs,
         pct_start=0.4,
         div_factor=10,
-        final_div_factor=200  
+        final_div_factor=400  
     )
     
     # Initialize history with all BraTS-specific metrics
@@ -976,7 +976,7 @@ def main():
     parser = argparse.ArgumentParser(description="Train AutoSAM2 for brain tumor segmentation")
     parser.add_argument('--data_path', type=str, default="/home/erezhuberman/data/Task01_BrainTumour",
                         help='Path to the dataset directory')
-    parser.add_argument('--epochs', type=int, default=5,
+    parser.add_argument('--epochs', type=int, default=15,
                         help='Number of epochs to train')
     parser.add_argument('--batch_size', type=int, default=1,
                         help='Batch size for training')
