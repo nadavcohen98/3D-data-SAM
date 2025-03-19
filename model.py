@@ -361,12 +361,6 @@ class EnhancedPromptGenerator:
             'masks_generated': 0,
             'multi_region_cases': 0
         }
-
-class MultiPointPromptGenerator:
-    """Generates strategic point prompts for SAM2 based on probability maps"""
-    def __init__(self, num_positive_points=5, num_negative_points=3):
-        self.num_positive_points = num_positive_points
-        self.num_negative_points = num_negative_points
         
     def _get_strategic_points(self, region_mask, num_points, prob_map):
         """Get strategic points within a specific region"""
@@ -820,6 +814,9 @@ class AutoSAM2(nn.Module):
         self.prompt_generator = EnhancedPromptGenerator(
             num_positive_points=5,
             num_negative_points=3,
+            edge_detection=True,
+            use_confidence=True,
+            use_mask_prompt=True
         )
         
         # Bridge network for connecting UNet features to SAM2
@@ -1361,5 +1358,4 @@ class AutoSAM2(nn.Module):
         else:
             return "invalid_config"
 
-print("=== AUTOSAM2 WITH MULTI-CLASS SEGMENTATION SUPPORT LOADED SUCCESSFULLY ===")
 
