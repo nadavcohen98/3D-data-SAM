@@ -207,7 +207,7 @@ class BraTSDataset(Dataset):
                 multi_class_mask[0] = (mask_data == 0).astype(np.float32)  # Background
                 multi_class_mask[1] = (mask_data == 1).astype(np.float32)  # NCR (class 1)
                 multi_class_mask[2] = (mask_data == 2).astype(np.float32)  # ED (class 2)
-                multi_class_mask[3] = (mask_data == 4).astype(np.float32)  # ET (class 4)
+                multi_class_mask[3] = (mask_data == 3).astype(np.float32)  # ET (class 4)
                 
                 mask_data = multi_class_mask
             else:
