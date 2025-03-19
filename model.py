@@ -24,8 +24,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger("AutoSAM2")
 
-print("=== LOADING AUTOSAM2 WITH FLEXIBLE ARCHITECTURE FOR MULTI-CLASS SEGMENTATION ===")
-
 # Import SAM2 with error handling
 try:
     from sam2.sam2_image_predictor import SAM2ImagePredictor
@@ -329,15 +327,7 @@ class FlexibleUNet3D(nn.Module):
         # Combine for final output
         segmentation = torch.cat([background_prob, tumor_probs], dim=1)
         
-        # Debug output distribution occasionally
-        self.debug_counter += 1
-        if self.debug_counter % 100 == 0:  # Every 100 forward passes
-            class_percentages = []
-            total_pixels = torch.prod(torch.tensor(segmentation.shape[2:]))
-            for c in range(segmentation.shape[1]):
-                percent = (segmentation[:, c] > 0.5).sum().item() / (batch_size * total_pixels) * 100
-                class_percentages.append(f"{percent:.2f}%")
-            print(f"DEBUG - Output class distribution: {class_percentages}")
+
         
         return segmentation, dec_out2, sam_embeddings, metadata
 
