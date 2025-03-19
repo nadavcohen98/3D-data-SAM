@@ -671,52 +671,46 @@ def save_training_history(history, filename):
 
 def preprocess_batch(batch, device=None):
     """
-    Robust preprocessing function that guarantees consistent orientation
-    between images and masks by forcing both to have the same shape.
+    Ensure both images and masks are in consistent axial orientation
     """
     images, masks = batch
     
     print(f"Original batch shapes - images: {images.shape}, masks: {masks.shape}")
     
-    # First: determine which dimension is the depth dimension for each
-    img_dims = images.shape[2:]  # Spatial dimensions only
-    mask_dims = masks.shape[2:]
+    # Step 1: First ensure images and masks have matching dimensions
+    # For BraTS, standard axial view should be [B, C, D, H, W] where D is the shortest dimension (155)
     
-    # Find the smallest dimension index (likely the depth)
-    img_min_dim = min(img_dims)
-    img_min_dim_idx = img_dims.index(img_min_dim) + 2  # +2 for batch & channel dims
+    # Find which dimension contains the depth (155) in both tensors
+    img_dims = list(images.shape[2:])
+    mask_dims = list(masks.shape[2:])
     
-    mask_min_dim = min(mask_dims)
-    mask_min_dim_idx = mask_dims.index(mask_min_dim) + 2
+    # For BraTS, the depth is 155, the other two dimensions are usually 240
+    # Identify which dimension is most likely the depth dimension (smallest)
+    img_depth_idx = img_dims.index(min(img_dims)) + 2  # +2 for batch & channel dims
+    mask_depth_idx = mask_dims.index(min(mask_dims)) + 2
     
-    print(f"Detected dimensions - images depth: {img_min_dim} at index {img_min_dim_idx}, "
-          f"masks depth: {mask_min_dim} at index {mask_min_dim_idx}")
+    # Define the desired order: [B, C, D, H, W] where D is the smallest dimension
+    # The smallest dimension should always be the 3rd dimension (index 2)
+    desired_img_order = list(range(len(images.shape)))
+    if img_depth_idx != 2:
+        # Swap depth dimension with dimension at index 2
+        desired_img_order[2], desired_img_order[img_depth_idx] = desired_img_order[img_depth_idx], desired_img_order[2]
+        images = images.permute(*desired_img_order)
     
-    # Standard orientation: [B, C, D, H, W] where D is the smallest dimension
-    # For BraTS, typically D=155, H=W=240
+    desired_mask_order = list(range(len(masks.shape)))
+    if mask_depth_idx != 2:
+        # Swap depth dimension with dimension at index 2
+        desired_mask_order[2], desired_mask_order[mask_depth_idx] = desired_mask_order[mask_depth_idx], desired_mask_order[2]
+        masks = masks.permute(*desired_mask_order)
     
-    # Step 1: Choose the orientation of the IMAGE as the reference
-    # This means we'll permute the MASK to match the IMAGE
-    mask_permutation = list(range(len(masks.shape)))  # Start with identity
-    
-    # Step 2: Determine which spatial dimension in mask corresponds to depth in image
-    if img_min_dim_idx != mask_min_dim_idx:
-        print(f"Permuting masks to match image orientation...")
-        # Swap the depth dimension in mask with the depth dimension in image
-        mask_permutation[img_min_dim_idx], mask_permutation[mask_min_dim_idx] = \
-            mask_permutation[mask_min_dim_idx], mask_permutation[img_min_dim_idx]
-        
-        masks = masks.permute(*mask_permutation)
-    
-    # Ensure we have matching shapes (width and height should be same if depths match)
+    # Make sure mask has same shape as image - they should both be [B, C, 155, 240, 240] for BraTS
     if images.shape != masks.shape:
-        print(f"Shape mismatch after orientation correction. Reshaping mask...")
-        # Create a new mask tensor with the same shape as images
+        # Reshape mask to match image dimensions
         new_masks = torch.zeros_like(images)
         
-        # Copy data from old mask to new mask - common dimensions only
+        # Copy data for common dimensions
         min_dims = [min(i, m) for i, m in zip(images.shape, masks.shape)]
-        if len(min_dims) == 5:  # Should be 5D tensors
+        if len(min_dims) == 5:
             new_masks[:, :, :min_dims[2], :min_dims[3], :min_dims[4]] = \
                 masks[:, :, :min_dims[2], :min_dims[3], :min_dims[4]]
         
