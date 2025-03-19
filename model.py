@@ -344,7 +344,7 @@ class FlexibleUNet3D(nn.Module):
 class EnhancedPromptGenerator:
     """Enhanced prompt generator with comprehensive metrics tracking for SAM2"""
     def __init__(self, 
-                 num_positive_points=10,  # Increased from 5 for better coverage
+                 num_positive_points=10,
                  num_negative_points=3,  
                  edge_detection=True,    
                  use_confidence=True,    
@@ -1274,7 +1274,7 @@ class AutoSAM2(nn.Module):
             # Combine UNet output with SAM2 results
             final_output = self.combine_results(
                 unet_output, sam2_results, depth_dim_idx, 
-                bg_blend=0.9,    # Background relies more on UNet
+                bg_blend=0.5,    # Background relies more on UNet
                 tumor_blend=0.5  # Tumor relies more on SAM2
             )
         
