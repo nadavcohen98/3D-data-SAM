@@ -475,16 +475,11 @@ def validate(model, val_loader, criterion, device, epoch):
                 
                 # Visualize batch
                 if batch_idx in [1, 2, 3]:
-                    print(f"Creating visualizations for validation batch {batch_idx}")
-                    try:
-                        # Add batch_idx to the prefix to create unique filenames
-                        batch_prefix = f"val_batch{batch_idx}"
-                        visualize_batch_comprehensive(images, masks, outputs, epoch, mode="hybrid", prefix=batch_prefix)
-                        print(f"Visualization complete for batch {batch_idx}")
-                    except Exception as e:
-                        print(f"Error in visualization for batch {batch_idx}: {e}")
-                        import traceback
-                        traceback.print_exc()
+                    # Add batch_idx to the prefix to create unique filenames
+                    batch_prefix = f"val_batch{batch_idx}"
+                    visualize_batch_comprehensive(images, masks, outputs, epoch, mode="hybrid", prefix=batch_prefix)
+                    print(f"Visualization complete for batch {batch_idx}")
+
                
                 
                 # Update total loss
