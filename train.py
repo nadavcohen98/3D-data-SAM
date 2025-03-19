@@ -56,24 +56,24 @@ def calculate_dice_score(y_pred, y_true):
     for b in range(batch_size):
         # Calculate per-class Dice
         # Class 1 (NCR) - at index 1
-        pred_ncr = preds[b, 1].
-        true_ncr = y_true[b, 1].
+        pred_ncr = preds[b, 1]
+        true_ncr = y_true[b, 1]
         if true_ncr.sum() > 0 or pred_ncr.sum() > 0:
             intersection_ncr = (pred_ncr * true_ncr).sum()
             dice_ncr = (2.0 * intersection_ncr / (pred_ncr.sum() + true_ncr.sum() + 1e-5)).item() * 100
             all_dice_scores['class_1'].append(dice_ncr)
             
         # Class 2 (ED) - at index 2
-        pred_ed = preds[b, 2].
-        true_ed = y_true[b, 2].
+        pred_ed = preds[b, 2]
+        true_ed = y_true[b, 2]
         if true_ed.sum() > 0 or pred_ed.sum() > 0:
             intersection_ed = (pred_ed * true_ed).sum()
             dice_ed = (2.0 * intersection_ed / (pred_ed.sum() + true_ed.sum() + 1e-5)).item() * 100
             all_dice_scores['class_2'].append(dice_ed)
             
         # Class 4 (ET) - at index 3
-        pred_et = preds[b, 3].
-        true_et = y_true[b, 3].
+        pred_et = preds[b, 3]
+        true_et = y_true[b, 3]
         if true_et.sum() > 0 or pred_et.sum() > 0:
             intersection_et = (pred_et * true_et).sum()
             dice_et = (2.0 * intersection_et / (pred_et.sum() + true_et.sum() + 1e-5)).item() * 100
@@ -81,16 +81,16 @@ def calculate_dice_score(y_pred, y_true):
             all_dice_scores['ET'].append(dice_et)  # ET is the same as class 4
         
         # Calculate WT (Whole Tumor) - Classes 1+2+4 (indices 1,2,3)
-        pred_wt = (preds[b, 1:4].sum(dim=0) > 0).
-        true_wt = (y_true[b, 1:4].sum(dim=0) > 0).
+        pred_wt = (preds[b, 1:4].sum(dim=0) > 0).float()
+        true_wt = (y_true[b, 1:4].sum(dim=0) > 0).float()
         if true_wt.sum() > 0 or pred_wt.sum() > 0:
             intersection_wt = (pred_wt * true_wt).sum()
             dice_wt = (2.0 * intersection_wt / (pred_wt.sum() + true_wt.sum() + 1e-5)).item() * 100
             all_dice_scores['WT'].append(dice_wt)
         
         # Calculate TC (Tumor Core) - Classes 1+4 (indices 1,3)
-        pred_tc = ((preds[b, 1] + preds[b, 3]) > 0).float().
-        true_tc = ((y_true[b, 1] + y_true[b, 3]) > 0).float().
+        pred_tc = ((preds[b, 1] + preds[b, 3]) > 0).float()
+        true_tc = ((y_true[b, 1] + y_true[b, 3]) > 0).float()
         if true_tc.sum() > 0 or pred_tc.sum() > 0:
             intersection_tc = (pred_tc * true_tc).sum()
             dice_tc = (2.0 * intersection_tc / (pred_tc.sum() + true_tc.sum() + 1e-5)).item() * 100
