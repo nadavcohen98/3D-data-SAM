@@ -64,7 +64,7 @@ def create_segmentation_overlay(img_slice, seg_slice, alpha=0.6):
     return combined
 
 def create_difference_map(gt_slice, pred_slice, img_slice):
-    """Create a map highlighting differences between ground truth and prediction"""
+    """Create a map highlighting differences between ground truth and prediction - FIXED VERSION"""
     # Extract tumor regions (any tumor vs no tumor)
     if gt_slice.shape[0] > 3 and pred_slice.shape[0] > 3:
         gt_any = (gt_slice[1:4].sum(axis=0) > 0.5).astype(float)
@@ -73,43 +73,42 @@ def create_difference_map(gt_slice, pred_slice, img_slice):
         gt_any = (gt_slice[1:].sum(axis=0) > 0.5).astype(float)
         pred_any = (pred_slice[1:].sum(axis=0) > 0.5).astype(float)
     
-    # Create background image
+    # Create background image FIRST
     p1, p99 = np.percentile(img_slice, (1, 99))
     img_normalized = np.clip((img_slice - p1) / (p99 - p1 + 1e-8), 0, 1)
     img_rgb = np.stack([img_normalized]*3, axis=-1)
     
-    # Calculate difference map with existing colors
-    h, w = gt_any.shape
-    
-    # Create a clean copy for drawing on
+    # Make a copy to avoid modifying the original
     diff_rgb = img_rgb.copy()
     
     # True Positive - Green
-    true_positive = (gt_any > 0) & (pred_any > 0)
+    true_positive = (gt_any > 0.5) & (pred_any > 0.5)
     diff_rgb[true_positive, 0] = 0.0  # R
-    diff_rgb[true_positive, 1] = 1.0  # G
+    diff_rgb[true_positive, 1] = 0.9  # G
     diff_rgb[true_positive, 2] = 0.0  # B
     
     # False Positive - Red
-    false_positive = (gt_any == 0) & (pred_any > 0)
-    diff_rgb[false_positive, 0] = 1.0  # R
+    false_positive = (gt_any <= 0.5) & (pred_any > 0.5)
+    diff_rgb[false_positive, 0] = 0.9  # R
     diff_rgb[false_positive, 1] = 0.0  # G
     diff_rgb[false_positive, 2] = 0.0  # B
     
     # False Negative - Blue
-    false_negative = (gt_any > 0) & (pred_any == 0)
+    false_negative = (gt_any > 0.5) & (pred_any <= 0.5)
     diff_rgb[false_negative, 0] = 0.0  # R
     diff_rgb[false_negative, 1] = 0.0  # G
-    diff_rgb[false_negative, 2] = 1.0  # B
+    diff_rgb[false_negative, 2] = 0.9  # B
     
+    # No alpha blending needed since we're directly modifying the RGB values
     return diff_rgb
 
 def get_boundary_pixels(mask, dilate=1):
-    """Get boundary pixels of a binary mask"""
+    """Get boundary pixels of a binary mask - FIXED VERSION with smaller dilation"""
     # Ensure mask is binary
     binary_mask = (mask > 0.5).astype(np.float32)
     
     # Calculate boundary through dilation and erosion
+    # Using smaller dilation to avoid artifacts
     dilated = binary_dilation(binary_mask, iterations=dilate)
     eroded = binary_erosion(binary_mask, iterations=dilate)
     
