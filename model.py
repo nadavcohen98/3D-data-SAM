@@ -213,7 +213,12 @@ class FlexibleUNet3D(nn.Module):
         self.base_channels = base_channels
         
         # Initial convolution block
-        self.initial_conv = ResidualBlock3D(in_channels, base_channels)
+        self.initial_conv = nn.Sequential(
+            nn.Conv3d(in_channels, base_channels, kernel_size=5, padding=2),
+            nn.GroupNorm(min(8, base_channels), base_channels),
+            nn.ReLU(inplace=True),
+            ResidualBlock3D(base_channels, base_channels)
+        )
         
         # Encoder pathway
         self.enc1 = EncoderBlock3D(base_channels, base_channels * 2)
