@@ -361,7 +361,7 @@ class EnhancedPromptGenerator:
             'masks_generated': 0,
             'multi_region_cases': 0
         }
-        
+    
     def _get_strategic_points(self, region_mask, num_points, prob_map):
         """Get strategic points within a specific region"""
         points = []
@@ -607,7 +607,70 @@ class EnhancedPromptGenerator:
         all_points = foreground_points + background_points
         all_labels = [1] * len(foreground_points) + [0] * len(background_points)
         
+        # Update statistics
+        self.prompt_stats['points_generated'] += len(all_points)
+        
         return np.array(all_points), np.array(all_labels)
+    
+    def generate_optimal_box(self, binary_mask_or_probability_maps, prob_map_or_slice_idx=None, height=None, width=None):
+        """Generate optimal bounding box for tumor region."""
+        # Handle different parameter patterns
+        if height is not None and width is not None:
+            probability_maps = binary_mask_or_probability_maps
+            slice_idx = prob_map_or_slice_idx
+            
+            # Extract tumor probability (weighted combination)
+            if probability_maps.shape[1] >= 4:
+                # Use binary-style approach - combine all tumor classes (BraTS-specific)
+                tumor_prob = (
+                    0.3 * torch.sigmoid(probability_maps[0, 1]) +  # NCR
+                    0.3 * torch.sigmoid(probability_maps[0, 2]) +  # ED
+                    0.4 * torch.sigmoid(probability_maps[0, 3])    # ET
+                ).cpu().detach().numpy()
+            else:
+                # Fallback for fewer channels
+                tumor_prob = torch.sigmoid(probability_maps[0, min(1, probability_maps.shape[1]-1)]).cpu().detach().numpy()
+            
+            # Resize if necessary
+            curr_h, curr_w = tumor_prob.shape
+            if curr_h != height or curr_w != width:
+                tumor_prob = zoom(tumor_prob, (height / curr_h, width / curr_w), order=1)
+            
+            # Create binary mask
+            binary_mask = tumor_prob > 0.4
+            prob_map = tumor_prob
+        else:
+            # Direct input of mask and probability map
+            binary_mask = binary_mask_or_probability_maps
+            prob_map = prob_map_or_slice_idx
+            height, width = prob_map.shape
+        
+        # If no tumor detected, return None
+        if np.sum(binary_mask) < 10:
+            return None
+        
+        # Apply dilation to create a more inclusive box
+        dilated_mask = binary_dilation(binary_mask, iterations=3)
+        
+        # Find coordinates of tumor region
+        y_coords, x_coords = np.where(dilated_mask)
+        if len(y_coords) == 0:
+            return None
+        
+        min_x, max_x = np.min(x_coords), np.max(x_coords)
+        min_y, max_y = np.min(y_coords), np.max(y_coords)
+        
+        # Add small padding (10% of tumor size)
+        padding_x = max(5, int((max_x - min_x) * 0.10))
+        padding_y = max(5, int((max_y - min_y) * 0.10))
+        
+        x1 = max(0, min_x - padding_x)
+        y1 = max(0, min_y - padding_y)
+        x2 = min(width - 1, max_x + padding_x)
+        y2 = min(height - 1, max_y + padding_y)
+        
+        self.prompt_stats['boxes_generated'] += 1
+        return np.array([x1, y1, x2, y2])
 
 
 # ======= Bridge components for UNet to SAM2 =======
