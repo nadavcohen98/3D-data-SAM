@@ -196,9 +196,14 @@ class BraTSDataset(Dataset):
             
             if os.path.exists(label_path):
                 mask_data = nib.load(label_path).get_fdata()
-                # Convert to binary mask (any tumor class = 1)
-                mask_data = (mask_data > 0).astype(np.float32)
-                mask_data = np.expand_dims(mask_data, axis=0)  # Add channel dimension
+
+                multi_class_mask = np.zeros((4,) + mask_data.shape, dtype=np.float32)
+                multi_class_mask[0] = (mask_data == 0).astype(np.float32)
+                multi_class_mask[1] = (mask_data == 1).astype(np.float32)
+                multi_class_mask[2] = (mask_data == 2).astype(np.float32)
+                multi_class_mask[3] = (mask_data == 4).astype(np.float32)    
+                mask_data = multi_class_mask
+
             else:
                 mask_data = np.zeros((1,) + image_data.shape[1:])
             
