@@ -305,7 +305,9 @@ def train_epoch(model, train_loader, optimizer, criterion, device, epoch, schedu
     model.train()
     total_loss = 0
     all_metrics = []
-    
+    batch_times = []
+
+    epoch_start_time = time.time()
     # Progress bar
     pbar = tqdm(train_loader, desc=f"Epoch {epoch+1} Training")
     
@@ -404,6 +406,10 @@ def train_epoch(model, train_loader, optimizer, criterion, device, epoch, schedu
         'iou_wt': np.mean([m['iou_wt'] for m in all_metrics]) if all_metrics else 0.0,
         'iou_tc': np.mean([m['iou_tc'] for m in all_metrics]) if all_metrics else 0.0
     }
+
+    epoch_time = time.time() - epoch_start_time
+    avg_metrics['epoch_time'] = epoch_time
+    avg_metrics['batch_time'] = epoch_time / len(train_loader)
 
     return avg_loss, avg_metrics
 
@@ -618,6 +624,34 @@ def save_training_history(history, filename):
    plt.savefig(f"results/{filename.replace('.png', '_iou.png')}")
    plt.close()
 
+    
+    #running time plots
+   plt.figure(figsize=(12, 6))
+   
+   plt.subplot(1, 2, 1)
+   plt.plot(history['epoch_time'])
+   plt.xlabel('Epoch')
+   plt.ylabel('Time (seconds)')
+   plt.title('Time per Epoch')
+   
+   plt.subplot(1, 2, 2)
+   plt.plot(history['batch_time'])
+   plt.xlabel('Epoch')
+   plt.ylabel('Time (seconds)')
+   plt.title('Average Time per Batch')
+   
+   plt.tight_layout()
+   plt.savefig(f"results/{filename.replace('.png', '_timing.png')}")
+   plt.close()
+   
+   # saving in text
+   with open(f"results/{filename.replace('.png', '_timing_summary.txt')}", 'w') as f:
+       f.write(f"Total training time: {sum(history['epoch_time']):.2f} seconds\n")
+       f.write(f"Average epoch time: {np.mean(history['epoch_time']):.2f} seconds\n")
+       f.write(f"Average batch time: {np.mean(history['batch_time']):.2f} seconds\n")
+       f.write(f"First epoch time: {history['epoch_time'][0]:.2f} seconds\n")
+       f.write(f"Last epoch time: {history['epoch_time'][-1]:.2f} seconds\n"
+
 def preprocess_batch(batch, device=None):
     """
     Simplified preprocessing function that ensures consistent orientation
@@ -732,7 +766,7 @@ def train_model(data_path, batch_size=1, epochs=20, learning_rate=1e-3,
             print(f"Error loading optimizer state: {e}. Using fresh optimizer.")
     
     # Get data loaders
-    max_samples = 64 if test_run else None
+    max_samples = 16 if test_run else None
     
     train_loader = get_brats_dataloader(
         data_path, batch_size=batch_size, train=True,
@@ -772,7 +806,9 @@ def train_model(data_path, batch_size=1, epochs=20, learning_rate=1e-3,
         'train_iou_et': [], 'val_iou_et': [],
         'train_iou_wt': [], 'val_iou_wt': [],
         'train_iou_tc': [], 'val_iou_tc': [],
-        'lr': []
+        'lr': [],
+        'epoch_time': [],
+        'batch_time': []
     }
     
     # Early stopping parameters
@@ -788,6 +824,9 @@ def train_model(data_path, batch_size=1, epochs=20, learning_rate=1e-3,
         
         # Train
         train_loss, train_metrics = train_epoch(model, train_loader, optimizer, criterion, device, epoch, scheduler)
+
+        history['epoch_time'].append(train_metrics.get('epoch_time', 0.0))
+        history['batch_time'].append(train_metrics.get('batch_time', 0.0))
         
         # Update history
         history['train_loss'].append(train_loss)
@@ -937,7 +976,7 @@ def main():
     parser = argparse.ArgumentParser(description="Train AutoSAM2 for brain tumor segmentation")
     parser.add_argument('--data_path', type=str, default="/home/erezhuberman/data/Task01_BrainTumour",
                         help='Path to the dataset directory')
-    parser.add_argument('--epochs', type=int, default=15,
+    parser.add_argument('--epochs', type=int, default=5,
                         help='Number of epochs to train')
     parser.add_argument('--batch_size', type=int, default=1,
                         help='Batch size for training')
