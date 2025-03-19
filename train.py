@@ -512,7 +512,7 @@ def validate(model, val_loader, criterion, device, epoch):
                 
                 # Visualize first batch
                 
-                if (batch_idx == 28):
+                if (batch_idx == 6):
                     visualize_batch_comprehensive(images, masks, outputs, epoch, mode="hybrid", prefix="val")
                
                 
