@@ -650,7 +650,7 @@ def save_training_history(history, filename):
        f.write(f"Average epoch time: {np.mean(history['epoch_time']):.2f} seconds\n")
        f.write(f"Average batch time: {np.mean(history['batch_time']):.2f} seconds\n")
        f.write(f"First epoch time: {history['epoch_time'][0]:.2f} seconds\n")
-       f.write(f"Last epoch time: {history['epoch_time'][-1]:.2f} seconds\n"
+       f.write(f"Last epoch time: {history['epoch_time'][-1]:.2f} seconds\n")
 
 def preprocess_batch(batch, device=None):
     """
