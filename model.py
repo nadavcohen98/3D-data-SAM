@@ -246,15 +246,15 @@ class FlexibleUNet3D(nn.Module):
 
     def forward(self, x, use_full_decoder=True):
         """
-        Forward pass with flexible options
+        Forward pass with flexible options and consistent axial orientation handling
         """
-        # Get batch dimensions
-        batch_size, channels, depth, height, width = x.shape
+        # Get batch dimensions - using consistent naming to avoid confusion
+        batch_size, channels, dim1, dim2, dim3 = x.shape
         
         # For axial view, the depth dimension is now at position 2 (after channels)
         # No need to identify it dynamically
         depth_dim_idx = 2
-        depth = dim1
+        depth = dim1  # First spatial dimension is depth for axial orientation
         
         # Ultra-defensive slice selection
         # Select only slices that are guaranteed to be within bounds
@@ -322,7 +322,6 @@ class FlexibleUNet3D(nn.Module):
         segmentation = torch.sigmoid(output)
         
         return segmentation, dec_out2, sam_embeddings, metadata
-
 
 class MultiPointPromptGenerator:
     """Generates strategic point prompts for SAM2 based on probability maps"""
@@ -1151,7 +1150,7 @@ class AutoSAM2(nn.Module):
         return img_rgb
     
     def process_slice_with_sam2(self, input_vol, slice_idx, slice_features, depth_dim_idx, device):
-        """Process a single slice with SAM2 using both point and box prompts"""
+        """Process a single slice with SAM2 using both point and box prompts with improved multi-class handling"""
         if not self.has_sam2:
             logger.warning(f"SAM2 not available for slice {slice_idx}")
             return None
@@ -1164,7 +1163,6 @@ class AutoSAM2(nn.Module):
             if orig_slice.shape[0] > 1:
                 orig_slice = orig_slice[0:1]
             
-            # Rest of the function remains the same...
             # Convert MRI to RGB using our hybrid mapper
             rgb_tensor = self.mri_to_rgb(orig_slice)
             
@@ -1178,7 +1176,7 @@ class AutoSAM2(nn.Module):
             enhanced_features = self.unet_sam_bridge(slice_features)
         
             # Generate point prompts
-            points, labels, box, _ = self.prompt_generator.generate_prompts(
+            points, labels, box, tumor_prob = self.prompt_generator.generate_prompts(
                 enhanced_features, slice_idx, h, w
             )
             
@@ -1198,25 +1196,54 @@ class AutoSAM2(nn.Module):
                 best_idx = scores.argmax()
                 best_mask = masks[best_idx]
                 
-                # Convert to tensor
+                # Convert to tensor and format
                 mask_tensor = torch.from_numpy(best_mask).float().to(device)
                 mask_tensor = mask_tensor.unsqueeze(0).unsqueeze(0)  # [1, 1, H, W]
                 
-                # Create multi-class output with class-specific weighting
-                multi_class_mask = torch.zeros((1, self.num_classes, height, width), device=device)
+                # Create multi-class output with proper BraTS class distribution
+                multi_class_mask = torch.zeros((1, self.num_classes, h, w), device=device)
                 
-                # Background (inverse of mask)
+                # Determine tumor region characteristics
+                tumor_size = mask_tensor.sum().item() / (h * w)
+                
+                # Background is 1 - tumor
                 multi_class_mask[:, 0] = 1.0 - mask_tensor[:, 0]
                 
-                # Class distribution based on region probabilities
-                # Get region probability maps for each class
-                class_probs = torch.sigmoid(enhanced_features[0, 1:])
+                # Use biomedical knowledge for tumor class distribution:
+                # 1. Smaller tumors are more likely to be focused in one class
+                # 2. Larger tumors tend to have more edema (class 2)
+                # 3. Enhanced tumor (class 4/index 3) is usually smaller and central
                 
-                # For each tumor class, apply mask with class-specific weighting
-                for c in range(1, self.num_classes):
-                    # Weight the mask by the class probability
-                    class_weight = torch.mean(class_probs[c-1]).item()
-                    multi_class_mask[:, c] = mask_tensor[:, 0] * (0.5 + 0.5 * class_weight)
+                if tumor_size > 0.001:  # Only if we have meaningful tumor prediction
+                    # Calculate tumor distribution based on size
+                    if tumor_size < 0.05:  # Small tumor
+                        # Small tumors more likely to be predominantly one class
+                        # Choose dominant class based on probability map
+                        if torch.tensor(tumor_prob).max() > 0.8:
+                            # Higher confidence - more likely to be enhancing tumor (ET)
+                            class_weights = [0.2, 0.2, 0.6]  # [NCR, ED, ET]
+                        else:
+                            # Lower confidence - more likely to be edema (ED)
+                            class_weights = [0.1, 0.8, 0.1]  # [NCR, ED, ET]
+                    elif tumor_size < 0.15:  # Medium tumor
+                        # Medium tumors typically have more balanced distribution
+                        class_weights = [0.3, 0.5, 0.2]  # [NCR, ED, ET]
+                    else:  # Large tumor
+                        # Large tumors often have more edema and necrotic core
+                        class_weights = [0.4, 0.5, 0.1]  # [NCR, ED, ET]
+                    
+                    # Apply distribution to tumor classes
+                    multi_class_mask[:, 1] = mask_tensor[:, 0] * class_weights[0]  # NCR (class 1)
+                    multi_class_mask[:, 2] = mask_tensor[:, 0] * class_weights[1]  # ED (class 2)
+                    multi_class_mask[:, 3] = mask_tensor[:, 0] * class_weights[2]  # ET (class 4)
+                    
+                    # Ensure we don't lose tumor signal in the process
+                    # Calculate total tumor signal after distribution
+                    tumor_signal = multi_class_mask[:, 1:].sum(dim=1, keepdim=True)
+                    # If we lost tumor signal, rescale to preserve it
+                    signal_ratio = mask_tensor.sum() / (tumor_signal.sum() + 1e-8)
+                    if signal_ratio > 1.1:  # We lost more than 10% signal
+                        multi_class_mask[:, 1:] *= signal_ratio
                 
                 return multi_class_mask
             else:
@@ -1227,7 +1254,6 @@ class AutoSAM2(nn.Module):
         except Exception as e:
             logger.error(f"Error processing slice {slice_idx} with SAM2: {e}")
             return None
-
     
     def create_3d_from_slices(self, input_shape, sam2_slices, depth_dim_idx, device):
         """
