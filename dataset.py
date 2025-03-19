@@ -188,7 +188,7 @@ class BraTSDataset(Dataset):
             image_data = nib.load(image_path).get_fdata()
             
             # The Task01_BrainTumour dataset has 4 modalities in the 4th dimension
-            image_data = np.transpose(image_data, (3, 2, 0, 1))
+            image_data = np.transpose(image_data, (2, 0, 1))
             
             # Load mask
             label_file = self.image_files[idx].replace('_0000.nii.gz', '.nii.gz')
@@ -197,22 +197,37 @@ class BraTSDataset(Dataset):
             if os.path.exists(label_path):
                 mask_data = nib.load(label_path).get_fdata()
                 
-                # CRITICAL FIX: Transpose mask to match image orientation
-                # The mask should have the same orientation as the image
+                # CRITICAL: Print mask analysis
+                unique, counts = np.unique(mask_data, return_counts=True)
+                print("Mask Analysis:")
+                print("==============")
+                print(f"Unique values: {unique}")
+                for value, count in zip(unique, counts):
+                    percentage = (count / mask_data.size) * 100
+                    print(f"Value {value}: {count} pixels ({percentage:.2f}%)")
+                
+                # Transpose mask to match image orientation
                 mask_data = np.transpose(mask_data, (2, 0, 1))
-    
+        
                 # Create multi-class mask with proper BraTS class mapping
                 # BraTS labels: 0=background, 1=NCR, 2=ED, 4=ET
                 multi_class_mask = np.zeros((4,) + mask_data.shape, dtype=np.float32)
                 multi_class_mask[0] = (mask_data == 0).astype(np.float32)  # Background
                 multi_class_mask[1] = (mask_data == 1).astype(np.float32)  # NCR (class 1)
                 multi_class_mask[2] = (mask_data == 2).astype(np.float32)  # ED (class 2)
-                multi_class_mask[3] = (mask_data == 3).astype(np.float32)  # ET (class 4)
+                multi_class_mask[3] = (mask_data == 4).astype(np.float32)  # ET (class 4)
+                
+                # CRITICAL: Print multi-class mask analysis
+                print("\nMulti-Class Mask Analysis:")
+                for i, label in enumerate(['Background', 'NCR', 'ED', 'ET']):
+                    pixels = np.sum(multi_class_mask[i])
+                    percentage = (pixels / multi_class_mask[i].size) * 100
+                    print(f"{label} (Class {i}): {pixels} pixels ({percentage:.2f}%)")
                 
                 mask_data = multi_class_mask
             else:
                 # If no label file exists, create empty mask with 100% background
-                mask_data = np.zeros((4,) + image_data.shape[1:], dtype=np.float32)
+                mask_data = np.zeros((4,) + image_data.shape, dtype=np.float32)
                 mask_data[0] = 1.0  # All background
             
             # Convert to PyTorch tensors
@@ -224,12 +239,13 @@ class BraTSDataset(Dataset):
                 self.data_cache[idx] = (image, mask)
             
             return image, mask
+        
         except Exception as e:
             if self.verbose:
                 print(f"Error loading image {self.image_files[idx]}: {e}")
             # Return dummy data
-            dummy_shape = (4, 155, 240, 240)  # Corrected standard BraTS shape 
-            dummy_mask = torch.zeros((4,) + dummy_shape[1:], dtype=torch.float32)
+            dummy_shape = (4, 240, 240)  # Adjusted shape 
+            dummy_mask = torch.zeros((4,) + dummy_shape, dtype=torch.float32)
             dummy_mask[0] = 1.0  # All background
             return torch.zeros(dummy_shape, dtype=torch.float32), dummy_mask
 
