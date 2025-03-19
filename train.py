@@ -675,16 +675,13 @@ def preprocess_batch(batch, device=None):
    """
    images, masks = batch
    
-   print(f"Original batch shapes - images: {images.shape}, masks: {masks.shape}")
    
    # Transpose masks to match the axial orientation of images
    # If images are [B, C, D, H, W] but masks are [B, C, H, W, D]
    # we need to permute masks to match
    if images.shape[2:] != masks.shape[2:]:
-       print("Transposing masks to match image orientation")
        # Permute to match [B, C, D, H, W]
        masks = masks.permute(0, 1, 4, 2, 3)
-       print(f"After transpose - masks: {masks.shape}")
    
    # Rest of the preprocessing as before...
    
