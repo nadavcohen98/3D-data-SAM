@@ -178,6 +178,8 @@ class BraTSDataset(Dataset):
             return len(self.patient_dirs)
     
     def _load_monai_data(self, idx):
+        """Load data from MONAI's Task01_BrainTumour structure with error handling"""
+        # Check if data is in cache
         if self.cache_data and idx in self.data_cache:
             return self.data_cache[idx]
         
@@ -185,97 +187,85 @@ class BraTSDataset(Dataset):
             image_path = os.path.join(self.data_dir, self.image_files[idx])
             image_data = nib.load(image_path).get_fdata()
             
-            # Transpose image data
+            # The Task01_BrainTumour dataset has 4 modalities in the 4th dimension
             image_data = np.transpose(image_data, (3, 2, 0, 1))
             
-            # Prepare label path
+            # Load mask
             label_file = self.image_files[idx].replace('_0000.nii.gz', '.nii.gz')
             label_path = os.path.join(self.label_dir, label_file)
             
             if os.path.exists(label_path):
-                # Load mask data
                 mask_data = nib.load(label_path).get_fdata()
                 
-                # Unique values analysis ONLY if interesting
-                unique_values, value_counts = np.unique(mask_data, return_counts=True)
-                total_non_zero = sum(count for val, count in zip(unique_values, value_counts) if val != 0)
-                
-                # Only print if we have unusual distribution
-                if len(unique_values) > 4 or total_non_zero == 0:
-                    print(f"\nUnusual mask for {self.image_files[idx]}:")
-                    for value, count in zip(unique_values, value_counts):
-                        if value != 0:
-                            percentage = (count / mask_data.size) * 100
-                            print(f"Value {value}: {count} pixels ({percentage:.2f}%)")
-                
-                # Transpose mask
+                # Transpose mask to match image orientation
                 mask_data = np.transpose(mask_data, (2, 0, 1))
         
-                # Create multi-class mask
+                # Create multi-class mask with proper BraTS class mapping
                 multi_class_mask = np.zeros((4,) + mask_data.shape, dtype=np.float32)
                 
-                # Mapping with extra flexibility for ET
-                class_mappings = [
-                    (0, 'Background', 0),
-                    (1, 'NCR', 1),
-                    (2, 'ED', 2),
-                    (4, 'ET - Primary', 3)
-                ]
+                # Background
+                multi_class_mask[0] = (mask_data == 0).astype(np.float32)
                 
-                for class_val, class_name, class_idx in class_mappings:
-                    class_mask = (mask_data == class_val).astype(np.float32)
-                    multi_class_mask[class_idx] = class_mask
+                # NCR
+                multi_class_mask[1] = (mask_data == 1).astype(np.float32)
                 
-                # Comprehensive ET check
+                # ED
+                multi_class_mask[2] = (mask_data == 2).astype(np.float32)
+                
+                # ET - Primary mapping with fallback
+                multi_class_mask[3] = (mask_data == 4).astype(np.float32)
                 if np.sum(multi_class_mask[3]) == 0:
-                    # Try alternative mappings
-                    alternative_mappings = [3, 255]
-                    for alt_val in alternative_mappings:
-                        alt_mask = (mask_data == alt_val).astype(np.float32)
-                        if np.sum(alt_mask) > 0:
-                            print(f"Found ET pixels using alternative value {alt_val}")
-                            multi_class_mask[3] = alt_mask
-                            break
+                    multi_class_mask[3] = (mask_data == 3).astype(np.float32)
             
             else:
-                # Empty mask if no label
+                # If no label file exists, create empty mask with 100% background
                 multi_class_mask = np.zeros((4,) + image_data.shape[1:], dtype=np.float32)
-                multi_class_mask[0] = 1.0
+                multi_class_mask[0] = 1.0  # All background
             
-            # Convert to tensors
+            # Convert to PyTorch tensors
             image = torch.tensor(image_data, dtype=torch.float32)
             mask = torch.tensor(multi_class_mask, dtype=torch.float32)
             
-            # Cache if enabled
+            # Store in cache if enabled
             if self.cache_data:
                 self.data_cache[idx] = (image, mask)
             
             return image, mask
         
         except Exception as e:
-            print(f"Error loading {self.image_files[idx]}: {e}")
+            if self.verbose:
+                print(f"Error loading image {self.image_files[idx]}: {e}")
             
-            # Dummy data
+            # Return dummy data
             dummy_shape = (4, 155, 240, 240)
             dummy_mask = torch.zeros((4,) + dummy_shape[1:], dtype=torch.float32)
-            dummy_mask[0] = 1.0
+            dummy_mask[0] = 1.0  # All background
             return torch.zeros(dummy_shape, dtype=torch.float32), dummy_mask
-
+            
+            except Exception as e:
+                print(f"Error loading {self.image_files[idx]}: {e}")
+                
+                # Dummy data
+                dummy_shape = (4, 155, 240, 240)
+                dummy_mask = torch.zeros((4,) + dummy_shape[1:], dtype=torch.float32)
+                dummy_mask[0] = 1.0
+                return torch.zeros(dummy_shape, dtype=torch.float32), dummy_mask
     
-    def __getitem__(self, idx):
-        # Only use MONAI data loader for simplicity
-        image, mask = self._load_monai_data(idx)
         
-        # Apply preprocessing with improved normalization
-        if self.normalize:
-            image = preprocess_brats_data(image, normalize=True)
-        
-        
-        # Apply data augmentation in training mode
-        if self.use_augmentation:
-            image, mask = apply_augmentations(image, mask)
-        
-        return image, mask
+        def __getitem__(self, idx):
+            # Only use MONAI data loader for simplicity
+            image, mask = self._load_monai_data(idx)
+            
+            # Apply preprocessing with improved normalization
+            if self.normalize:
+                image = preprocess_brats_data(image, normalize=True)
+            
+            
+            # Apply data augmentation in training mode
+            if self.use_augmentation:
+                image, mask = apply_augmentations(image, mask)
+            
+            return image, mask
 
 def get_brats_dataloader(root_dir, batch_size=1, train=True, normalize=True, max_samples=None, 
                          num_workers=4, filter_empty=False, use_augmentation=False, 
