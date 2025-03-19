@@ -201,13 +201,11 @@ class BraTSDataset(Dataset):
                 # The mask should have the same orientation as the image
                 mask_data = np.transpose(mask_data, (2, 0, 1))
     
-                binary_mask = (mask_data > 0).astype(np.float32)
-                binary_mask = np.expand_dims(binary_mask, axis=0)
-                
-                # Create 4-channel mask but use binary information
-                multi_class_mask = np.zeros((4,) + binary_mask.shape[1:], dtype=np.float32)
-                multi_class_mask[0] = (binary_mask == 0).astype(np.float32)
-                multi_class_mask[1:] = binary_mask  # Put tumor signal in all tumor classes
+                multi_class_mask = np.zeros((4,) + mask_data.shape, dtype=np.float32)
+                multi_class_mask[0] = (mask_data == 0).astype(np.float32)
+                multi_class_mask[1] = (mask_data == 1).astype(np.float32)
+                multi_class_mask[2] = (mask_data == 2).astype(np.float32)
+                multi_class_mask[3] = (mask_data == 4).astype(np.float32)    
                 mask_data = multi_class_mask
     
             else:
