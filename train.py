@@ -631,9 +631,7 @@ def preprocess_batch(batch, device=None):
     between images and masks while preserving data integrity.
     """
     images, masks = batch
-    
-    print(f"Original batch shapes - images: {images.shape}, masks: {masks.shape}")
-    
+        
     # If shapes are different, we need to align them
     if images.shape != masks.shape:
         # Find which dimension in masks is 155 (standard BraTS depth)
@@ -664,9 +662,7 @@ def preprocess_batch(batch, device=None):
     if images.shape != masks.shape:
         print(f"Warning: Image shape {images.shape} doesn't match mask shape {masks.shape}")
         print("Cannot safely reshape - using original masks")
-    
-    print(f"After orientation normalization - images: {images.shape}, masks: {masks.shape}")
-    
+        
     # Ensure mask values are within expected range
     masks = torch.clamp(masks, 0, 1)
     
