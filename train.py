@@ -16,7 +16,7 @@ import torch.nn.functional as F
 # Local imports
 from model import AutoSAM2
 from dataset import get_brats_dataloader
-from visualization import visualize_batch_comprehensive, visualize_model_comparison
+from visualization import visualize_batch_comprehensive
 torch.serialization.add_safe_globals([np.core.multiarray.scalar])
 
 
@@ -471,15 +471,6 @@ def validate(model, val_loader, criterion, device, epoch):
                 if (batch_idx == 6):
                     print("Creating visualizations for validation batch")
                     try:
-                        if hasattr(model, 'last_unet_output'):
-                            unet_output = model.last_unet_output
-                            visualize_model_comparison(
-                                images=images,
-                                masks=masks,
-                                unet_outputs=unet_output,
-                                hybrid_outputs=outputs,
-                                epoch=epoch
-                            )
                         visualize_batch_comprehensive(images, masks, outputs, epoch, mode="hybrid", prefix="val")
                         print("Visualization complete")
                     except Exception as e:
