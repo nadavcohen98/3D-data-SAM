@@ -47,7 +47,7 @@ def create_segmentation_overlay(img_slice, seg_slice, alpha=0.7):
         # Extract each tumor class separately
         ncr_mask = (seg_slice[1] > 0.5)
         ed_mask = (seg_slice[2] > 0.5)
-        et_mask = (seg_slice[3] > 0.5)
+        et_mask = (seg_slice[4] > 0.5)
         
         # Apply colors one by one, each overwrites the previous
         # Apply edema first (blue) - outermost layer
