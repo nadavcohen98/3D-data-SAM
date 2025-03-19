@@ -246,19 +246,16 @@ class FlexibleUNet3D(nn.Module):
         # Get batch dimensions
         batch_size, channels, dim1, dim2, dim3 = x.shape
         
-        # Identify depth dimension (smallest one)
-        dims = [dim1, dim2, dim3]
-        depth_idx = dims.index(min(dims))
-        depth = dims[depth_idx]
+        # For axial view, the depth dimension is now at position 2 (after channels)
+        # No need to identify it dynamically
+        depth_dim_idx = 2
+        depth = dim1
         
         # Ultra-defensive slice selection
         # Select only slices that are guaranteed to be within bounds
         max_slice_idx = depth - 1  # Maximum valid index
         
         # Generate slices based on the actual depth
-        key_indices = []
-        
-        # Add slices at fixed percentages of the depth
         key_indices = get_strategic_slices(depth, percentage=0.3)
         key_indices.sort()
         
@@ -274,7 +271,6 @@ class FlexibleUNet3D(nn.Module):
         key_indices.extend(extra_indices)
         key_indices.sort()
         
-    
         # Encoder pathway
         x1 = self.initial_conv(x)
         x2 = self.enc1(x1)
@@ -289,7 +285,6 @@ class FlexibleUNet3D(nn.Module):
         dec_out2 = self.dec2(dec_out1, x3)
         dec_out2 = self.dropout(0.1)(dec_out2)
         
-        
         # Generate SAM2 embeddings
         sam_embeddings = self.sam_projection(dec_out2)
         
@@ -301,7 +296,7 @@ class FlexibleUNet3D(nn.Module):
         metadata = {
             "key_indices": key_indices,
             "ds_key_indices": ds_key_indices,
-            "depth_dim_idx": depth_idx,
+            "depth_dim_idx": depth_dim_idx,
             "mid_decoder_shape": dec_out2.shape
         }
         
@@ -314,7 +309,7 @@ class FlexibleUNet3D(nn.Module):
         dec_out3 = self.dropout(0.15)(dec_out3)
         
         dec_out4 = self.dec4(dec_out3, x1)
-
+    
         # Final convolution
         output = self.output_conv(dec_out4)
         
@@ -614,12 +609,7 @@ class SliceProcessor(nn.Module):
     
     def extract_slice(self, volume, idx, depth_dim=2):
         """Extract a specific slice from a 3D volume."""
-        if depth_dim == 0:
-            return volume[:, :, idx]
-        elif depth_dim == 1:
-            return volume[:, :, :, idx]
-        else:  # default to dim 2
-            return volume[:, :, :, :, idx]
+        return volume[:, :, idx]
     
     def forward(self, features, indices, depth_dim):
         """Process slices for SAM2."""
@@ -1162,18 +1152,14 @@ class AutoSAM2(nn.Module):
             return None
                 
         try:
-            # Extract original slice
-            if depth_dim_idx == 0:
-                orig_slice = input_vol[:, :, slice_idx]
-            elif depth_dim_idx == 1:
-                orig_slice = input_vol[:, :, :, slice_idx]
-            else:  # depth_dim_idx == 2
-                orig_slice = input_vol[:, :, :, :, slice_idx]
+            # Extract original slice (always along dimension 2 for axial view)
+            orig_slice = input_vol[:, :, slice_idx]
             
             # If we have a batch, just take the first item
             if orig_slice.shape[0] > 1:
                 orig_slice = orig_slice[0:1]
             
+            # Rest of the function remains the same...
             # Convert MRI to RGB using our hybrid mapper
             rgb_tensor = self.mri_to_rgb(orig_slice)
             
@@ -1186,13 +1172,11 @@ class AutoSAM2(nn.Module):
             # Process through bridge network to get enhanced features
             enhanced_features = self.unet_sam_bridge(slice_features)
         
-            
             # Generate point prompts
             points, labels, box, _ = self.prompt_generator.generate_prompts(
                 enhanced_features, slice_idx, h, w
             )
             
-           
             # Set image in SAM2
             self.sam2.set_image(rgb_image)
             
@@ -1235,7 +1219,7 @@ class AutoSAM2(nn.Module):
     def create_3d_from_slices(self, input_shape, sam2_slices, depth_dim_idx, device):
         """
         Create a 3D volume from 2D slice results.
-        For mode 2 (SAM2 only) where we need to build a volume from individual slices.
+        For axial view, slices are always along dimension 2.
         """
         # Create empty volume matching the expected output size
         batch_size = input_shape[0]
@@ -1247,12 +1231,8 @@ class AutoSAM2(nn.Module):
         # Insert each slice result into the appropriate position
         for slice_idx, mask in sam2_slices.items():
             if mask is not None:
-                if depth_dim_idx == 0:
-                    volume[:, :, slice_idx] = mask
-                elif depth_dim_idx == 1:
-                    volume[:, :, :, slice_idx] = mask
-                else:  # depth_dim_idx == 2
-                    volume[:, :, :, :, slice_idx] = mask
+                # For axial view, always use first dimension after channels
+                volume[:, :, slice_idx] = mask
         
         return volume
 
@@ -1347,12 +1327,7 @@ class AutoSAM2(nn.Module):
     
     def _extract_slice(self, volume, idx, depth_dim=2):
         """Extract a specific slice from a 3D volume."""
-        if depth_dim == 0:
-            slice_data = volume[:, :, idx]
-        elif depth_dim == 1:
-            slice_data = volume[:, :, :, idx]
-        else:  # default to dim 2
-            slice_data = volume[:, :, :, :, idx]
+        slice_data = volume[:, :, idx]
         
         # If we have a batch, just take the first item
         if slice_data.shape[0] > 1:
@@ -1364,15 +1339,7 @@ class AutoSAM2(nn.Module):
     def combine_results(self, unet_output, sam2_slices, depth_dim_idx, blend_weight=0.7):
         """
         Combine UNet output with SAM2 results using a 70-30 blend.
-        
-        Args:
-            unet_output: Full volume output from UNet3D
-            sam2_slices: Dictionary of slice results from SAM2
-            depth_dim_idx: Which dimension is the depth dimension
-            blend_weight: Weight for UNet result (default 0.7)
-        
-        Returns:
-            Combined segmentation volume
+        For axial view, slices are always along dimension 2.
         """
         # Start with UNet output
         combined = unet_output.clone()
@@ -1380,16 +1347,9 @@ class AutoSAM2(nn.Module):
         # Replace or blend slices with SAM2 results
         for slice_idx, mask in sam2_slices.items():
             if mask is not None:
-                # Get UNet slice
-                if depth_dim_idx == 0:
-                    unet_slice = combined[:, :, slice_idx]
-                    combined[:, :, slice_idx] = blend_weight * unet_slice + (1 - blend_weight) * mask
-                elif depth_dim_idx == 1:
-                    unet_slice = combined[:, :, :, slice_idx]
-                    combined[:, :, :, slice_idx] = blend_weight * unet_slice + (1 - blend_weight) * mask
-                else:  # depth_dim_idx == 2
-                    unet_slice = combined[:, :, :, :, slice_idx]
-                    combined[:, :, :, :, slice_idx] = blend_weight * unet_slice + (1 - blend_weight) * mask
+                # Get UNet slice (for axial view, always use first dimension after channels)
+                unet_slice = combined[:, :, slice_idx]
+                combined[:, :, slice_idx] = blend_weight * unet_slice + (1 - blend_weight) * mask
         
         return combined
     
