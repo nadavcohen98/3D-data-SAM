@@ -1255,7 +1255,7 @@ class AutoSAM2(nn.Module):
             # Process ALL slices with SAM2
             sam2_results = {}
             for idx in range(x.shape[depth_dim_idx]):  # iterate through ALL slices
-                slice_features = self.slice_processor.extract_slice(mid_features, idx // 4, depth_dim_idx)
+                slice_features = self.slice_processor.extract_slice(mid_features, min(mid_features.shape[depth_dim_idx]-1, idx // 4), depth_dim_idx)
                 result = self.process_slice_with_sam2(x, idx, slice_features, depth_dim_idx, device)
                 
                 if result is not None:
