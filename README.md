@@ -130,6 +130,40 @@ Performance on BraTS dataset with different slice percentages:
 | 60% | 72.1 | 81.5 | 87.9 | 8.5 | 6.6 | 9.1 |
 
 
+## Requirements
+
+### System Requirements
+* Python 3.8+
+* CUDA-capable NVIDIA GPU (recommended)
+* Minimum 16GB RAM
+* Minimum 50GB free disk space for data and checkpoints
+
+### Installation
+
+```bash
+# Create virtual environment
+python -m venv autosam2_env
+source autosam2_env/bin/activate  # On Windows use `autosam2_env\Scripts\activate`
+
+# Install dependencies
+pip install torch torchvision torchaudio --extra-index-url https://download.pytorch.org/whl/cu117
+pip install -r requirements.txt
+```
+
+### Core Dependencies
+* PyTorch (torch) ≥ 1.10.0
+* torchvision ≥ 0.11.0
+* numpy ≥ 1.20.0
+* scipy ≥ 1.7.0
+* nibabel ≥ 3.2.1
+* segment-anything-v2
+* transformers
+
+### Dataset Preparation
+* BraTS dataset (Task01_BrainTumour format)
+* Ensure dataset is preprocessed and organized in the correct directory structure
+
+
 References
 This implementation builds upon:
 
