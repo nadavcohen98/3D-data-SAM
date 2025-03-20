@@ -866,7 +866,7 @@ class AutoSAM2(nn.Module):
         trilinear=True,
         enable_unet_decoder=False,
         enable_sam2=True,
-        process_all_slices=False,
+        process_all_slices=True,
         sam2_model_id="facebook/sam2-hiera-small"
     ):
         super().__init__()
