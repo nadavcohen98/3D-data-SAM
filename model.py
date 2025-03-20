@@ -1351,7 +1351,7 @@ class AutoSAM2(nn.Module):
             # Ensure gradient flow for training
             if self.training:
                 # Connect to computational graph through sam_embeddings
-                dummy = sam_embeddings.sum() * 0.0
+                dummy = sam_embeddings.sum() * 0.01
                 final_output = final_output + dummy
         
         # Mode 3: Hybrid mode (UNet + SAM2)
