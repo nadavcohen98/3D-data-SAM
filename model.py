@@ -203,7 +203,7 @@ class FlexibleUNet3D(nn.Module):
     Allows flexible configuration with enable/disable switches for different paths.
     Modified to handle multi-class segmentation with proper output handling.
     """
-    def __init__(self, in_channels=4, n_classes=4, base_channels=16, trilinear=True):
+    def __init__(self, in_channels=4, n_classes=4, base_channels=16, trilinear=True, process_all_slices=False):
         super(FlexibleUNet3D, self).__init__()
         
         # Configuration
