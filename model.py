@@ -1138,10 +1138,10 @@ class AutoSAM2(nn.Module):
                 # No valid masks found
                 logger.warning(f"SAM2 failed to generate masks for slice {slice_idx}")
                 return None, None
-                
-    except Exception as e:
-        logger.error(f"Error processing slice {slice_idx} with SAM2: {e}")
-        return None, None
+                    
+        except Exception as e:
+            logger.error(f"Error processing slice {slice_idx} with SAM2: {e}")
+            return None, None
             
     def _extract_slice(self, volume, idx, depth_dim=2):
         """Extract a specific slice from a 3D volume."""
