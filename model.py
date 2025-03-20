@@ -210,6 +210,7 @@ class FlexibleUNet3D(nn.Module):
         self.in_channels = in_channels
         self.n_classes = n_classes
         self.base_channels = base_channels
+        self.process_all_slices = process_all_slices
         
         # Initial convolution block
         self.initial_conv = nn.Sequential(
@@ -218,7 +219,6 @@ class FlexibleUNet3D(nn.Module):
             nn.ReLU(inplace=True),
             ResidualBlock3D(base_channels, base_channels)
         )
-        self.process_all_slices = process_all_slices
         
         # Encoder pathway
         self.enc1 = EncoderBlock3D(base_channels, base_channels * 2)
