@@ -670,7 +670,7 @@ class EnhancedPromptGenerator:
 # ======= Bridge components for UNet to SAM2 =======
 
 class UNet3DtoSAM2Bridge(nn.Module):
-    """Bridge network that connects UNet3D features to SAM2 input format with enhanced attention"""
+    """Bridge network that connects UNet3D features to SAM2 with bidirectional feedback"""
     def __init__(self, input_channels=32, output_channels=256):
         super(UNet3DtoSAM2Bridge, self).__init__()
         
@@ -690,7 +690,7 @@ class UNet3DtoSAM2Bridge(nn.Module):
             nn.Sigmoid()
         )
         
-        # Shortcut branch to match dimensions for residual connection
+        # Shortcut branch for residual connection
         self.shortcut = nn.Conv2d(input_channels, 128, kernel_size=1)
         
         # Transformer branch: two convolutional layers with GroupNorm and ReLU
@@ -704,10 +704,55 @@ class UNet3DtoSAM2Bridge(nn.Module):
         self.final_conv = nn.Conv2d(128, output_channels, kernel_size=1)
         self.final_norm = nn.GroupNorm(32, output_channels)
         
+        # === NEW: Feedback Pathway Components ===
+        
+        # Feedback feature integration module
+        self.feedback_integration = nn.Sequential(
+            nn.Conv2d(output_channels, 64, kernel_size=3, padding=1),
+            nn.GroupNorm(8, 64),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(64, input_channels, kernel_size=1),
+            nn.Sigmoid()
+        )
+        
+        # Quality assessment module - predicts how good the current features are
+        self.quality_assessment = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1),
+            nn.Conv2d(output_channels, 16, kernel_size=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(16, 1, kernel_size=1),
+            nn.Sigmoid()
+        )
+        
+        # Spatial confidence map - where the model is confident/uncertain
+        self.confidence_map = nn.Sequential(
+            nn.Conv2d(output_channels, 32, kernel_size=3, padding=1),
+            nn.GroupNorm(4, 32),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(32, 1, kernel_size=1),
+            nn.Sigmoid()
+        )
+        
         # Learnable parameters for dynamic scaling of the output
         self.scale_factor = nn.Parameter(torch.tensor(1.5))
+        
+        # Storage for monitoring
+        self.last_feedback = None
+        self.last_confidence = None
+        self.last_quality = None
 
-    def forward(self, x):
+    def forward(self, x, feedback=None):
+        original_x = x
+        
+        # === Apply feedback if provided ===
+        if feedback is not None:
+            # Generate enhancement weights from feedback
+            feedback_weights = self.feedback_integration(feedback)
+            # Apply feedback to input features as a soft attention mechanism
+            x = x * (1.0 + 0.5 * feedback_weights)
+            # Save for monitoring
+            self.last_feedback = feedback_weights
+        
         # Apply channel attention and weight the input accordingly
         att_channels = self.channel_attention(x)
         x_ca = x * att_channels
@@ -731,10 +776,18 @@ class UNet3DtoSAM2Bridge(nn.Module):
         out = self.final_conv(out)
         out = self.final_norm(out)
 
-        # Apply learnable scaling (importance) with adaptive scaling factor
+        # Apply learnable scaling factor
         out = out * self.scale_factor
+        
+        # === Generate quality metrics for this output ===
+        quality_score = self.quality_assessment(out)
+        confidence_map = self.confidence_map(out)
+        
+        # Store for monitoring and loss calculation
+        self.last_quality = quality_score
+        self.last_confidence = confidence_map
 
-        return out
+        return out, quality_score, confidence_map
 
 # ======= SAM2 integration components =======
 
@@ -989,11 +1042,11 @@ class AutoSAM2(nn.Module):
     
 
     
-    def process_slice_with_sam2(self, input_vol, slice_idx, slice_features, depth_dim_idx, device):
-        """Process a single slice with SAM2 for multi-class segmentation."""
+    def process_slice_with_sam2(self, input_vol, slice_idx, slice_features, depth_dim_idx, device, feedback=None):
+        """Process a single slice with SAM2 for multi-class segmentation with feedback mechanism."""
         if not self.has_sam2:
             logger.warning(f"SAM2 not available for slice {slice_idx}")
-            return None
+            return None, None
                 
         try:
             # Extract original slice (always along dimension 2 for axial view)
@@ -1008,8 +1061,8 @@ class AutoSAM2(nn.Module):
             # Get image dimensions
             h, w = rgb_image.shape[:2]
             
-            # Process through bridge network to get enhanced features
-            enhanced_features = self.unet_sam_bridge(slice_features)
+            # Process through bridge network to get enhanced features with feedback
+            enhanced_features, quality_score, confidence_map = self.unet_sam_bridge(slice_features, feedback)
         
             # Generate point prompts
             points, labels, box, _ = self.prompt_generator.generate_prompts(
@@ -1071,22 +1124,24 @@ class AutoSAM2(nn.Module):
                     typical_dist = [0.0, 0.3, 0.4, 0.3]  # Background + 3 tumor classes
                     for c in range(1, self.num_classes):
                         multi_class_mask[:, c] = mask_tensor[:, 0] * typical_dist[c]
-
+    
                                                 
                 # Ensure the class probabilities sum to 1.0
                 total_prob = multi_class_mask.sum(dim=1, keepdim=True)
                 multi_class_mask = multi_class_mask / total_prob.clamp(min=1e-5)
                 
-              
-                return multi_class_mask
+                # Calculate a feedback tensor based on confidence map and mask quality
+                sam_feedback = enhanced_features * confidence_map  # Weight features by confidence
+                
+                return multi_class_mask, sam_feedback
             else:
                 # No valid masks found
                 logger.warning(f"SAM2 failed to generate masks for slice {slice_idx}")
-                return None
-                    
-        except Exception as e:
-            logger.error(f"Error processing slice {slice_idx} with SAM2: {e}")
-            return None
+                return None, None
+                
+    except Exception as e:
+        logger.error(f"Error processing slice {slice_idx} with SAM2: {e}")
+        return None, None
             
     def _extract_slice(self, volume, idx, depth_dim=2):
         """Extract a specific slice from a 3D volume."""
@@ -1231,7 +1286,7 @@ class AutoSAM2(nn.Module):
 
     def forward(self, x):
         """
-        Forward pass with multi-class segmentation support
+        Forward pass with multi-class segmentation support and bidirectional feedback
         """
         start_time = time.time()
         device = x.device
@@ -1258,18 +1313,27 @@ class AutoSAM2(nn.Module):
         depth_dim_idx = metadata["depth_dim_idx"]
         key_indices = sorted(metadata["key_indices"])
         
-        # Process key slices with SAM2
+        # Initialize variables for feedback-based processing
         sam2_results = {}
+        feedback_maps = {}
+        current_feedback = None  # Start with no feedback
+        
+        # Process key slices with SAM2 in sequence, with feedback
         for idx in key_indices:
             try:
                 # Get features for this slice
                 slice_features = self.slice_processor.extract_slice(mid_features, idx // 4, depth_dim_idx)
                 
-                # Process with SAM2
-                result = self.process_slice_with_sam2(x, idx, slice_features, depth_dim_idx, device)
+                # Process with SAM2, providing any feedback from previous slice
+                result, new_feedback = self.process_slice_with_sam2(
+                    x, idx, slice_features, depth_dim_idx, device, feedback=current_feedback
+                )
                 
+                # Store results and update feedback for next slice
                 if result is not None:
                     sam2_results[idx] = result
+                    feedback_maps[idx] = new_feedback
+                    current_feedback = new_feedback  # Update feedback for next slice
                     self.performance_metrics["sam2_slices_processed"] += 1
             except Exception as e:
                 logger.error(f"Error processing slice {idx}: {e}")
@@ -1283,16 +1347,19 @@ class AutoSAM2(nn.Module):
             final_output = self.create_3d_from_slices(
                 x.shape, sam2_results, depth_dim_idx, device
             )
-            if self.training and not final_output.requires_grad:
-                    dummy = mid_features.mean() * 0.0
-                    final_output = final_output + dummy
+            
+            # Ensure gradient flow for training
+            if self.training:
+                # Connect to computational graph through sam_embeddings
+                dummy = sam_embeddings.sum() * 0.0
+                final_output = final_output + dummy
         
         # Mode 3: Hybrid mode (UNet + SAM2)
         else:
             # Combine UNet output with SAM2 results
             final_output = self.combine_results(
                 unet_output, sam2_results, depth_dim_idx, 
-                bg_blend=getattr(self, 'bg_blend', 0.9),       # Background relies more on UNet
+                bg_blend=getattr(self, 'bg_blend', 0.9),    # Background relies more on UNet
                 tumor_blend=getattr(self, 'tumor_blend', 0.5)  # Tumor relies more on SAM2
             )
         
