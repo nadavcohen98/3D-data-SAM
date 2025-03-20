@@ -38,7 +38,7 @@ except ImportError:
 # ======= Base model components =======
 
 # For selecting exactly 30% of slices with center concentration:
-def get_strategic_slices(depth, percentage=0.3):
+def get_strategic_slices(depth, percentage):
     """
     Select strategic slices making up exactly the requested percentage of total depth
     with higher concentration in the center regions.
