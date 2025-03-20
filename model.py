@@ -897,7 +897,7 @@ class AutoSAM2(nn.Module):
             in_channels=4,
             n_classes=num_classes,
             base_channels=base_channels,
-            trilinear=trilinear
+            trilinear=trilinear,
             process_all_slices=process_all_slices
         )
         
