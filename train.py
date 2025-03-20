@@ -474,7 +474,7 @@ def validate(model, val_loader, criterion, device, epoch):
                 })
                 
                 # Visualize batch
-                if batch_idx in [7, 12]:
+                if batch_idx in [1,2,3]:
                     # Add batch_idx to the prefix to create unique filenames
                     batch_prefix = f"val_batch{batch_idx}"
                     visualize_batch_comprehensive(images, masks, outputs, epoch, mode="hybrid", prefix=batch_prefix)
