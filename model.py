@@ -257,7 +257,7 @@ class FlexibleUNet3D(nn.Module):
         
         # Ultra-defensive slice selection for SAM2
         max_slice_idx = depth - 1
-        key_indices = get_strategic_slices(depth, percentage=0.3 if not self.process_all_slices else 1.0))
+        key_indices = get_strategic_slices(depth, percentage=0.3 if not self.process_all_slices else 1.0)
         key_indices.sort()
         
         # Add extra slices around the middle
