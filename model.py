@@ -863,8 +863,8 @@ class AutoSAM2(nn.Module):
         num_classes=4, 
         base_channels=16, 
         trilinear=True,
-        enable_unet_decoder=True,
-        enable_sam2=False,
+        enable_unet_decoder=False,
+        enable_sam2=True,
         sam2_model_id="facebook/sam2-hiera-small"
     ):
         super().__init__()
@@ -1252,7 +1252,17 @@ class AutoSAM2(nn.Module):
         
         # Mode 2: SAM2 only (without UNet decoder)
         if not self.enable_unet_decoder:
-            # Create 3D volume from SAM2 slice results
+            # Process ALL slices with SAM2
+            sam2_results = {}
+            for idx in range(x.shape[depth_dim_idx]):  # iterate through ALL slices
+                slice_features = self.slice_processor.extract_slice(mid_features, idx // 4, depth_dim_idx)
+                result = self.process_slice_with_sam2(x, idx, slice_features, depth_dim_idx, device)
+                
+                if result is not None:
+                    sam2_results[idx] = result
+                    self.performance_metrics["sam2_slices_processed"] += 1
+            
+            # Create 3D volume from ALL SAM2 slice results
             final_output = self.create_3d_from_slices(
                 x.shape, sam2_results, depth_dim_idx, device
             )
