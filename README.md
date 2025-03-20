@@ -110,7 +110,7 @@ Edit percentage parameter in model.py:
 def get_strategic_slices(depth, percentage=0.3): # Change to 0.0, 0.3, or 0.6
 
 # Inference
-'''python
+
 ### Load trained model
 model = AutoSAM2(num_classes=4)
 model.load_state_dict(torch.load("checkpoints/best_autosam2_model.pth")["model_state_dict"])
