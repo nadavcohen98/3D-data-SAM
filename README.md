@@ -34,10 +34,23 @@ The architecture combines two powerful segmentation approaches:
    - Volumetric reconstruction from SAM2 2D slices
    - Interpolation for unprocessed slices
    - Class-specific blending:
-     - Background: 90% UNet / 10% SAM2
+     - Background: 50% UNet / 50% SAM2
      - Tumor classes: 50% UNet / 50% SAM2
 
-![Architecture Diagram](assets/architecture.png)
+### Strategic Slice Selection Approach
+
+Our hybrid approach balances segmentation quality with computational efficiency. Processing all 3D volume slices through SAM2 would be prohibitively expensive, while UNet3D alone lacks precision at tumor boundaries.
+
+The slice percentage parameter provides three operating modes:
+- **0%**: UNet3D only - fastest processing, good for resource-limited environments
+- **30%**: Balanced hybrid - processes strategically selected slices (~30%) through SAM2
+- **60%**: High-precision hybrid - better boundary accuracy at higher computational cost
+
+The slice selection algorithm prioritizes slices with high information content, allowing effective customization based on available resources and required accuracy.
+
+![Architecture Diagram](![Block Diagram](https://github.com/user-attachments/assets/a92f4423-47e0-4b05-9a19-64292263601a)
+)
+itecture.png)
 
 ## Key Parameters
 
