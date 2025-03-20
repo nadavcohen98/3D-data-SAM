@@ -203,14 +203,13 @@ class FlexibleUNet3D(nn.Module):
     Allows flexible configuration with enable/disable switches for different paths.
     Modified to handle multi-class segmentation with proper output handling.
     """
-    def __init__(self, in_channels=4, n_classes=4, base_channels=16, trilinear=True, process_all_slices=False):
+    def __init__(self, in_channels=4, n_classes=4, base_channels=16, trilinear=True):
         super(FlexibleUNet3D, self).__init__()
         
         # Configuration
         self.in_channels = in_channels
         self.n_classes = n_classes
         self.base_channels = base_channels
-        self.process_all_slices = process_all_slices
         
         # Initial convolution block
         self.initial_conv = nn.Sequential(
@@ -243,9 +242,7 @@ class FlexibleUNet3D(nn.Module):
 
         # Dropout for regularization
         self.dropout = nn.Dropout3d(0.15)
-        
-        # Debug counters
-        self.debug_counter = 0
+    
     
     def forward(self, x, use_full_decoder=True):
         """Forward pass with multi-class output handling"""
@@ -258,7 +255,7 @@ class FlexibleUNet3D(nn.Module):
         
         # Ultra-defensive slice selection for SAM2
         max_slice_idx = depth - 1
-        key_indices = get_strategic_slices(depth, percentage=0.3 if not self.process_all_slices else 1.0)
+        key_indices = get_strategic_slices(depth, percentage=0.6)
         key_indices.sort()
         
         # Add extra slices around the middle
@@ -336,7 +333,7 @@ class FlexibleUNet3D(nn.Module):
 class EnhancedPromptGenerator:
     """Enhanced prompt generator with comprehensive metrics tracking for SAM2"""
     def __init__(self, 
-                 num_positive_points=10,
+                 num_positive_points=10,  # Increased from 5 for better coverage
                  num_negative_points=3,  
                  edge_detection=True,    
                  use_confidence=True,    
@@ -864,9 +861,8 @@ class AutoSAM2(nn.Module):
         num_classes=4, 
         base_channels=16, 
         trilinear=True,
-        enable_unet_decoder=False,
+        enable_unet_decoder=True,
         enable_sam2=True,
-        process_all_slices=True,
         sam2_model_id="facebook/sam2-hiera-small"
     ):
         super().__init__()
@@ -897,8 +893,7 @@ class AutoSAM2(nn.Module):
             in_channels=4,
             n_classes=num_classes,
             base_channels=base_channels,
-            trilinear=trilinear,
-            process_all_slices=process_all_slices
+            trilinear=trilinear
         )
         
         # Slice processor for SAM2 integration
@@ -930,8 +925,6 @@ class AutoSAM2(nn.Module):
         # Initialize SAM2 if enabled
         if enable_sam2:
             self.initialize_sam2()
-
-        self.process_all_slices = process_all_slices
     
     def initialize_sam2(self):
         """Initialize SAM2 with appropriate error handling."""
@@ -1050,6 +1043,7 @@ class AutoSAM2(nn.Module):
                     typical_dist = [0.0, 0.3, 0.4, 0.3]  # Background + 3 tumor classes
                     for c in range(1, self.num_classes):
                         multi_class_mask[:, c] = mask_tensor[:, 0] * typical_dist[c]
+
                                                 
                 # Ensure the class probabilities sum to 1.0
                 total_prob = multi_class_mask.sum(dim=1, keepdim=True)
@@ -1187,7 +1181,7 @@ class AutoSAM2(nn.Module):
                 # Combine background and tumor results
                 blended_result = torch.cat([bg_result, tumor_result], dim=1)
                 
-               
+                
                 # Normalize to ensure valid probability distribution
                 total_prob = blended_result.sum(dim=1, keepdim=True)
                 blended_result = blended_result / total_prob.clamp(min=1e-5)
@@ -1257,16 +1251,7 @@ class AutoSAM2(nn.Module):
         
         # Mode 2: SAM2 only (without UNet decoder)
         if not self.enable_unet_decoder:
-            # Process ALL slices with SAM2
-            sam2_results = {}
-            for idx in range(x.shape[depth_dim_idx]):  # iterate through ALL slices
-                slice_features = self.slice_processor.extract_slice(mid_features, idx // 4, depth_dim_idx)
-                result = self.process_slice_with_sam2(x, idx, slice_features, depth_dim_idx, device)
-                
-                if result is not None:
-                    sam2_results[idx] = result
-            
-            # Create 3D volume directly from SAM2 results without blending
+            # Create 3D volume from SAM2 slice results
             final_output = self.create_3d_from_slices(
                 x.shape, sam2_results, depth_dim_idx, device
             )
