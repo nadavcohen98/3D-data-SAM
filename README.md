@@ -10,19 +10,32 @@ Implementation of a hybrid 3D segmentation approach that integrates SAM2 (Segmen
 The architecture combines two powerful segmentation approaches:
 
 1. **3D UNet Backbone**:
-   - Extracts volumetric features from multi-modal MRI data
-   - Mid-level decoder features are extracted for SAM2 integration
-   - Can operate independently for full 3D segmentation
+   - **Input**: 4-channel 3D volumes (T1, T1ce, T2, FLAIR) of shape [B, 4, D, H, W]
+   - **Encoder**: 
+     - Initial Conv: 4→16 channels, 5×5×5 kernels, GroupNorm, ReLU
+     - 4 encoder blocks with residual connections and downsampling
+     - Channel progression: 16→32→64→128→128
+   - **Decoder**:
+     - Mirrored architecture with skip connections
+     - Upsampling via trilinear interpolation
+     - Multi-class segmentation head (4 classes for BraTS: background, NCR, ED, ET
 
 2. **SAM2 Integration**:
-   - Strategic selection of axial slices (configurable percentage)
-   - UNet to SAM2 bridge network with spatial and channel attention
-   - Point and box prompt generation based on UNet predictions
-   - Multi-class handling for tumor subregions
-
+   - **Slice Selection**: Strategic sampling from 3D volume (0-60% of total slices)
+   - **Bridge Network**:
+     - UNet mid-features (32 channels) → SAM2 input format (256 channels)
+     - Channel Attention + Spatial Attention modules
+     - Two Conv layers with GroupNorm and residual connection
+   - **Prompt Generation**:
+     - Automated points (10 positive, 3 negative) and bounding box
+     - Confidence-weighted selection for optimal prompting
+     - MRI-to-RGB mapper for SAM2 compatibility
 3. **Hybrid Fusion**:
-   - Adaptive blending of UNet and SAM2 predictions
-   - Class-specific weighting for optimal boundary precision
+   - Volumetric reconstruction from SAM2 2D slices
+   - Interpolation for unprocessed slices
+   - Class-specific blending:
+     - Background: 90% UNet / 10% SAM2
+     - Tumor classes: 50% UNet / 50% SAM2
 
 ![Architecture Diagram](assets/architecture.png)
 
@@ -53,31 +66,31 @@ The implementation supports BraTS dataset format with T1, T1ce, T2, and FLAIR mo
 
 ## Usage
 
-### Training
-# Full training
+# Training
+## Full training
 python train.py --data_path /path/to/brats --epochs 15
 
-# Test run with smaller dataset
+## Test run with smaller dataset
 python train.py --test_run --reset
 
 ## Model Configurations
 
-# UNet only (no SAM2)
+### UNet only (no SAM2)
 model = AutoSAM2(enable_sam2=False)
 
-# SAM2 only (no UNet decoder)
+### SAM2 only (no UNet decoder)
 model = AutoSAM2(enable_unet_decoder=False)
 
-# Hybrid mode (default)
+### Hybrid mode (default)
 model = AutoSAM2(enable_unet_decoder=True, enable_sam2=True)
 
-# Modify slice percentage (0%, 30%, 60%)
-# Edit percentage parameter in model.py:
-# def get_strategic_slices(depth, percentage=0.3): # Change to 0.0, 0.3, or 0.6
+## Modify slice percentage (0%, 30%, 60%)
+Edit percentage parameter in model.py:
+def get_strategic_slices(depth, percentage=0.3): # Change to 0.0, 0.3, or 0.6
 
 
 
-Results
+## Results
 Performance on BraTS dataset with different slice percentages:
 | Slice % | Dice_ET | Dice_TC | Dice_WT | IoU_ET | IoU_TC | IoU_WT |
 |---------|---------|---------|---------|--------|--------|--------|
