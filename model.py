@@ -255,7 +255,7 @@ class FlexibleUNet3D(nn.Module):
         
         # Ultra-defensive slice selection for SAM2
         max_slice_idx = depth - 1
-        key_indices = get_strategic_slices(depth, percentage=0.6)
+        key_indices = get_strategic_slices(depth, percentage=getattr(self, 'sam2_percentage', 0.3))
         key_indices.sort()
         
         # Add extra slices around the middle
@@ -948,16 +948,44 @@ class AutoSAM2(nn.Module):
             logger.error(f"Error initializing SAM2: {e}")
             self.has_sam2 = False
             self.sam2 = None
-    
-    def set_mode(self, enable_unet_decoder=None, enable_sam2=None):
-        """Change the processing mode dynamically."""
+        
+    def set_mode(self, enable_unet_decoder=None, enable_sam2=None, sam2_percentage=None, 
+                 bg_blend=None, tumor_blend=None):
+        """Change the processing mode dynamically with enhanced control over all parameters."""
         if enable_unet_decoder is not None:
             self.enable_unet_decoder = enable_unet_decoder
         
         if enable_sam2 is not None:
             self.enable_sam2 = enable_sam2
             
-        logger.info(f"Mode set to: UNet Decoder={self.enable_unet_decoder}, SAM2={self.enable_sam2}")
+        # Store SAM2 slice percentage
+        if sam2_percentage is not None:
+            self.sam2_percentage = sam2_percentage
+        elif not self.enable_unet_decoder and self.enable_sam2:
+            # In SAM2-only mode, default to maximum percentage
+            self.sam2_percentage = 1.0
+        else:
+            # Default percentage for hybrid mode
+            self.sam2_percentage = 0.3
+        
+        # Store blending weights
+        if bg_blend is not None:
+            self.bg_blend = bg_blend
+        elif not self.enable_unet_decoder:
+            self.bg_blend = 0.0  # SAM2-only mode: no UNet influence
+        else:
+            self.bg_blend = 0.9  # Default for hybrid mode
+            
+        if tumor_blend is not None:
+            self.tumor_blend = tumor_blend
+        elif not self.enable_unet_decoder:
+            self.tumor_blend = 0.0  # SAM2-only mode: no UNet influence
+        else:
+            self.tumor_blend = 0.5  # Default for hybrid mode
+                
+        logger.info(f"Mode set to: UNet Decoder={self.enable_unet_decoder}, "
+                    f"SAM2={self.enable_sam2}, SAM2 Percentage={self.sam2_percentage}, "
+                    f"BG Blend={self.bg_blend}, Tumor Blend={self.tumor_blend}")
     
 
     
@@ -1261,8 +1289,8 @@ class AutoSAM2(nn.Module):
             # Combine UNet output with SAM2 results
             final_output = self.combine_results(
                 unet_output, sam2_results, depth_dim_idx, 
-                bg_blend=0.9,    # Background relies more on UNet
-                tumor_blend=0.5  # Tumor relies more on SAM2
+                bg_blend=getattr(self, 'bg_blend', 0.9),       # Background relies more on UNet
+                tumor_blend=getattr(self, 'tumor_blend', 0.5)  # Tumor relies more on SAM2
             )
         
         # Store combined output for visualization
