@@ -696,7 +696,7 @@ def preprocess_batch(batch, device=None):
     return images, masks
 
 
-def train_model(data_path, batch_size=1, epochs=20, learning_rate=1e-3,
+def train_model(data_path, batch_size=1, epochs=15, learning_rate=1e-3,
                use_mixed_precision=False, test_run=False, reset=True):
     """
     Optimized train function with BraTS-specific metrics
