@@ -60,7 +60,7 @@ itecture.png)
 | `enable_unet_decoder` | Whether to use UNet decoder pathway | True |
 | `enable_sam2` | Whether to use SAM2 integration | True |
 | `num_positive_points` | Number of positive points for SAM2 prompts | 10 |
-| `bg_blend` | Background blending weight (UNet vs SAM2) | 0.5 |
+| `bg_blend` | Background blending weight (UNet vs SAM2) | 0.9 |
 | `tumor_blend` | Tumor region blending weight (UNet vs SAM2) | 0.5 |
 | `test_run` | Use reduced dataset for testing | True |
 | `learning_rate` | Initial learning rate | 1e-4 |
