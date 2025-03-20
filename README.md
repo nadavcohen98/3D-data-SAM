@@ -47,10 +47,10 @@ The architecture combines two powerful segmentation approaches:
 | `enable_unet_decoder` | Whether to use UNet decoder pathway | True |
 | `enable_sam2` | Whether to use SAM2 integration | True |
 | `num_positive_points` | Number of positive points for SAM2 prompts | 10 |
-| `bg_blend` | Background blending weight (UNet vs SAM2) | 0.9 |
+| `bg_blend` | Background blending weight (UNet vs SAM2) | 0.5 |
 | `tumor_blend` | Tumor region blending weight (UNet vs SAM2) | 0.5 |
-| `test_run` | Use reduced dataset for testing | False |
-| `learning_rate` | Initial learning rate | 1e-3 |
+| `test_run` | Use reduced dataset for testing | True |
+| `learning_rate` | Initial learning rate | 1e-4 |
 
 ## Implementation Details
 
@@ -62,32 +62,50 @@ The architecture combines two powerful segmentation approaches:
 - matplotlib, numpy, scipy
 
 ### Data Handling
-The implementation supports BraTS dataset format with T1, T1ce, T2, and FLAIR modalities, processing 3D volumes and handling multi-class segmentation for different tumor regions (ET, WT, TC).
+Our pipeline for BraTS dataset includes:
+- **Preprocessing**: Z-score normalization per modality (non-zero voxels), outlier clipping, instance normalization
+- **Augmentation**: Random flips/rotations and intensity shifts (50% probability)
+- **Multi-class Handling**: Background (0), NCR (1), ED (2), ET (3), with derived WT & TC metrics
+
+### Optimization
+- **Loss Function**: Weighted BCE (30%) + Dice Loss (70%) with class weighting
+- **Training Strategy**: AdamW (weight decay 1e-4), OneCycle LR, early stopping (10-epoch patience)
+- **Performance**: Memory-efficient processing, strategic slice selection, CUDA OOM handling
+
 
 ## Usage
 
-# Training
-## Full training
-python train.py --data_path /path/to/brats --epochs 15
+### Full training
+python train.py --data_path /path/to/brats --reset
 
 ## Test run with smaller dataset
 python train.py --test_run --reset
 
 ## Model Configurations
 
-### UNet only (no SAM2)
-model = AutoSAM2(enable_sam2=False)
+### 1. UNet only mode (no SAM2)
+model = AutoSAM2(enable_sam2=False, enable_unet_decoder=True)
 
-### SAM2 only (no UNet decoder)
-model = AutoSAM2(enable_unet_decoder=False)
+### 2. SAM2 only mode (uses UNet features but not decoder)
+model = AutoSAM2(enable_unet_decoder=False, enable_sam2=True)
 
-### Hybrid mode (default)
+### 3. Hybrid mode (default)
 model = AutoSAM2(enable_unet_decoder=True, enable_sam2=True)
 
 ## Modify slice percentage (0%, 30%, 60%)
 Edit percentage parameter in model.py:
 def get_strategic_slices(depth, percentage=0.3): # Change to 0.0, 0.3, or 0.6
 
+# Inference
+'''pyth'''
+### Load trained model
+model = AutoSAM2(num_classes=4)
+model.load_state_dict(torch.load("checkpoints/best_autosam2_model.pth")["model_state_dict"])
+model.eval()
+
+### Run inference
+with torch.no_grad():
+    prediction = model(input_volume)  # Shape: [B, 4, D, H, W]
 
 
 ## Results
