@@ -97,7 +97,7 @@ Edit percentage parameter in model.py:
 def get_strategic_slices(depth, percentage=0.3): # Change to 0.0, 0.3, or 0.6
 
 # Inference
-'''pyth'''
+'''python
 ### Load trained model
 model = AutoSAM2(num_classes=4)
 model.load_state_dict(torch.load("checkpoints/best_autosam2_model.pth")["model_state_dict"])
@@ -108,7 +108,7 @@ with torch.no_grad():
     prediction = model(input_volume)  # Shape: [B, 4, D, H, W]
 
 
-## Results
+# Results
 Performance on BraTS dataset with different slice percentages:
 | Slice % | Dice_ET | Dice_TC | Dice_WT | IoU_ET | IoU_TC | IoU_WT |
 |---------|---------|---------|---------|--------|--------|--------|
