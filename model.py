@@ -242,9 +242,8 @@ class FlexibleUNet3D(nn.Module):
 
         # Dropout for regularization
         self.dropout = nn.Dropout3d(0.15)
-        
-        # Debug counters
-        self.debug_counter = 0
+
+        self.process_all_slices = process_all_slices
     
     def forward(self, x, use_full_decoder=True):
         """Forward pass with multi-class output handling"""
@@ -929,7 +928,6 @@ class AutoSAM2(nn.Module):
         if enable_sam2:
             self.initialize_sam2()
 
-        self.process_all_slices = process_all_slices
     
     def initialize_sam2(self):
         """Initialize SAM2 with appropriate error handling."""
