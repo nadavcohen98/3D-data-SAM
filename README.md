@@ -48,7 +48,7 @@ The slice percentage parameter provides three operating modes:
 
 The slice selection algorithm prioritizes slices with high information content, allowing effective customization based on available resources and required accuracy.
 
-![Architecture Diagram](![Block Diagram](https://github.com/user-attachments/assets/a92f4423-47e0-4b05-9a19-64292263601a)
+## Architecture Diagram(![Block Diagram](https://github.com/user-attachments/assets/a92f4423-47e0-4b05-9a19-64292263601a)
 )
 itecture.png)
 
