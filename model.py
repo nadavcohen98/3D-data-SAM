@@ -1283,6 +1283,9 @@ class AutoSAM2(nn.Module):
             final_output = self.create_3d_from_slices(
                 x.shape, sam2_results, depth_dim_idx, device
             )
+            if self.training and not final_output.requires_grad:
+                    dummy = mid_features.mean() * 0.0
+                    final_output = final_output + dummy
         
         # Mode 3: Hybrid mode (UNet + SAM2)
         else:
