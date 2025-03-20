@@ -298,6 +298,33 @@ class BraTSCombinedLoss(nn.Module):
         # Weighted sum of losses
         return self.dice_weight * dice + self.bce_weight * bce + self.focal_weight * focal
 
+def compute_auxiliary_losses(model, outputs):
+    """Compute auxiliary losses for bridge network training"""
+    auxiliary_losses = 0.0
+    
+    # Check if we have a bridge network with quality metrics
+    if hasattr(model, 'unet_sam_bridge'):
+        bridge = model.unet_sam_bridge
+        
+        # Quality assessment loss - encourage high quality
+        if hasattr(bridge, 'last_quality') and bridge.last_quality is not None:
+            quality_loss = 0.05 * (1.0 - bridge.last_quality.mean())
+            auxiliary_losses += quality_loss
+        
+        # Confidence map sparsity loss - encourage focused confidence
+        if hasattr(bridge, 'last_confidence') and bridge.last_confidence is not None:
+            # L1 regularization for sparsity
+            sparsity_loss = 0.01 * torch.mean(torch.abs(bridge.last_confidence))
+            auxiliary_losses += sparsity_loss
+        
+        # Feedback utilization loss - encourage impactful but sparse feedback
+        if hasattr(bridge, 'last_feedback') and bridge.last_feedback is not None:
+            feedback_loss = 0.01 * torch.mean(torch.abs(bridge.last_feedback))
+            auxiliary_losses += feedback_loss
+    
+    return auxiliary_losses
+    
+
 def train_epoch(model, train_loader, optimizer, criterion, device, epoch, scheduler=None):
     """
     Training epoch function with comprehensive BraTS metrics.
@@ -327,12 +354,16 @@ def train_epoch(model, train_loader, optimizer, criterion, device, epoch, schedu
             # Forward pass
             outputs = model(images)
             
-            # Compute BCE Loss and Dice Loss
+            # Compute main losses
             bce_loss = nn.BCEWithLogitsLoss()(outputs, masks)
             dice_loss = BraTSDiceLoss()(outputs, masks)
-
-            # Compute combined loss
-            loss = 0.7 * dice_loss + 0.3 * bce_loss
+            main_loss = 0.7 * dice_loss + 0.3 * bce_loss
+            
+            # Compute auxiliary losses for bridge network
+            aux_loss = compute_auxiliary_losses(model, outputs)
+            
+            # Combined loss
+            loss = main_loss + aux_loss
             
             # Compute IoU
             iou_metrics = calculate_iou(outputs, masks)
