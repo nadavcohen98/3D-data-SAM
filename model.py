@@ -257,7 +257,7 @@ class FlexibleUNet3D(nn.Module):
         
         # Ultra-defensive slice selection for SAM2
         max_slice_idx = depth - 1
-        key_indices = get_strategic_slices(depth, percentage=0.3)
+        key_indices = get_strategic_slices(depth, percentage=0.3 if not self.process_all_slices else 1.0))
         key_indices.sort()
         
         # Add extra slices around the middle
@@ -865,6 +865,7 @@ class AutoSAM2(nn.Module):
         trilinear=True,
         enable_unet_decoder=False,
         enable_sam2=True,
+        process_all_slices=False,
         sam2_model_id="facebook/sam2-hiera-small"
     ):
         super().__init__()
@@ -927,6 +928,8 @@ class AutoSAM2(nn.Module):
         # Initialize SAM2 if enabled
         if enable_sam2:
             self.initialize_sam2()
+
+        self.process_all_slices = process_all_slices
     
     def initialize_sam2(self):
         """Initialize SAM2 with appropriate error handling."""
@@ -1255,14 +1258,13 @@ class AutoSAM2(nn.Module):
             # Process ALL slices with SAM2
             sam2_results = {}
             for idx in range(x.shape[depth_dim_idx]):  # iterate through ALL slices
-                slice_features = self.slice_processor.extract_slice(mid_features, min(mid_features.shape[depth_dim_idx]-1, idx // 4), depth_dim_idx)
+                slice_features = self.slice_processor.extract_slice(mid_features, idx // 4, depth_dim_idx)
                 result = self.process_slice_with_sam2(x, idx, slice_features, depth_dim_idx, device)
                 
                 if result is not None:
                     sam2_results[idx] = result
-                    self.performance_metrics["sam2_slices_processed"] += 1
             
-            # Create 3D volume from ALL SAM2 slice results
+            # Create 3D volume directly from SAM2 results without blending
             final_output = self.create_3d_from_slices(
                 x.shape, sam2_results, depth_dim_idx, device
             )
