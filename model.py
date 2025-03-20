@@ -335,7 +335,7 @@ class FlexibleUNet3D(nn.Module):
 class EnhancedPromptGenerator:
     """Enhanced prompt generator with comprehensive metrics tracking for SAM2"""
     def __init__(self, 
-                 num_positive_points=10,  # Increased from 5 for better coverage
+                 num_positive_points=10,
                  num_negative_points=3,  
                  edge_detection=True,    
                  use_confidence=True,    
