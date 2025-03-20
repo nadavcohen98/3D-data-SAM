@@ -38,7 +38,7 @@ except ImportError:
 # ======= Base model components =======
 
 # For selecting exactly 30% of slices with center concentration:
-def get_strategic_slices(depth, percentage=0.6):
+def get_strategic_slices(depth, percentage=0.3):
     """
     Select strategic slices making up exactly the requested percentage of total depth
     with higher concentration in the center regions.
@@ -218,6 +218,7 @@ class FlexibleUNet3D(nn.Module):
             nn.ReLU(inplace=True),
             ResidualBlock3D(base_channels, base_channels)
         )
+        self.process_all_slices = process_all_slices
         
         # Encoder pathway
         self.enc1 = EncoderBlock3D(base_channels, base_channels * 2)
@@ -242,8 +243,9 @@ class FlexibleUNet3D(nn.Module):
 
         # Dropout for regularization
         self.dropout = nn.Dropout3d(0.15)
-
-        self.process_all_slices = process_all_slices
+        
+        # Debug counters
+        self.debug_counter = 0
     
     def forward(self, x, use_full_decoder=True):
         """Forward pass with multi-class output handling"""
@@ -896,6 +898,7 @@ class AutoSAM2(nn.Module):
             n_classes=num_classes,
             base_channels=base_channels,
             trilinear=trilinear
+            process_all_slices=process_all_slices
         )
         
         # Slice processor for SAM2 integration
@@ -928,6 +931,7 @@ class AutoSAM2(nn.Module):
         if enable_sam2:
             self.initialize_sam2()
 
+        self.process_all_slices = process_all_slices
     
     def initialize_sam2(self):
         """Initialize SAM2 with appropriate error handling."""
