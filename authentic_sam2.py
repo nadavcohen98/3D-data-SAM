@@ -1,6 +1,5 @@
 # Import your existing dependencies from model.py
 from model import EnhancedPromptGenerator, MRItoRGBMapper, FlexibleUNet3D, HAS_SAM2
-from model import build_sam2_hf, SAM2ImagePredictor
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -10,6 +9,14 @@ import os
 import time
 from collections import defaultdict
 import logging
+
+try:
+    from sam2.build_sam import build_sam2_hf
+    from sam2.sam2_image_predictor import SAM2ImagePredictor
+    HAS_SAM2 = True
+except ImportError:
+    print("WARNING: sam2 package not fully available. Some functionality will be limited.")
+    HAS_SAM2 = False
 
 # Configure logging
 logger = logging.getLogger("AuthenticSAM2")
