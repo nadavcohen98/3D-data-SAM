@@ -128,7 +128,7 @@ Performance on BraTS dataset with different slice percentages:
 |---------|---------|---------|---------|
 | 0% (UNet only) | 67.03 | 71.82 | 78.88 |
 | 30% | 63.40 | 66.81 | 73.45 | 
-| 60% | 62.45 | 68.69 | 62.02 | 
+| 60% | 62.02 | 62.45 | 68.69 | 
 
 
 ## Requirements
