@@ -17,7 +17,10 @@ import torch.nn.functional as F
 from model import AutoSAM2
 from dataset import get_brats_dataloader
 from visualization import visualize_batch_comprehensive
+from authentic_sam2 import AuthenticSAM2, compute_segmentation_loss
+
 torch.serialization.add_safe_globals([np.core.multiarray.scalar])
+
 
 
 def calculate_dice_score(y_pred, y_true, epsilon=1e-7):
@@ -750,7 +753,14 @@ def train_model(data_path, batch_size=1, epochs=15, learning_rate=1e-3,
     
     # Initialize AutoSAM2 model
     print("Initializing AutoSAM2 for multi-class segmentation")
-    model = AutoSAM2(num_classes=4).to(device)
+    model = AuthenticSAM2(
+        num_classes=4,
+        base_channels=16,
+        sam2_model_id="facebook/sam2-hiera-small",
+        enable_hybrid_mode=False  # Set to True if you want hybrid mode
+    ).to(device)
+
+    #model = AutoSAM2(num_classes=4).to(device)
     model.set_mode(enable_unet_decoder=False, enable_sam2=True, sam2_percentage=1.0, bg_blend=0.0, tumor_blend=0.0)
                    
     
