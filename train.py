@@ -753,14 +753,7 @@ def train_model(data_path, batch_size=1, epochs=15, learning_rate=1e-3,
     
     # Initialize AutoSAM2 model
     print("Initializing AutoSAM2 for multi-class segmentation")
-    model = AuthenticSAM2(
-        num_classes=4,
-        base_channels=16,
-        sam2_model_id="facebook/sam2-hiera-small",
-        enable_hybrid_mode=False  # Set to True if you want hybrid mode
-    ).to(device)
-
-    #model = AutoSAM2(num_classes=4).to(device)
+    model = AutoSAM2(num_classes=4).to(device)
     model.set_mode(enable_unet_decoder=False, enable_sam2=True, sam2_percentage=1.0, bg_blend=0.0, tumor_blend=0.0)
                    
     
@@ -804,7 +797,7 @@ def train_model(data_path, batch_size=1, epochs=15, learning_rate=1e-3,
             print(f"Error loading optimizer state: {e}. Using fresh optimizer.")
     
     # Get data loaders
-    max_samples = 16 if test_run else None
+    max_samples = 64 if test_run else None
     
     train_loader = get_brats_dataloader(
         data_path, batch_size=batch_size, train=True,
