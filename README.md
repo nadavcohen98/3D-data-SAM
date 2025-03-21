@@ -100,10 +100,10 @@ python train.py --test_run --reset
 model = AutoSAM2(enable_sam2=False, enable_unet_decoder=True)
 
 ### 2. SAM2 only mode (uses UNet features but not decoder)
-model = AutoSAM2(enable_unet_decoder=False, enable_sam2=True)
+model.set_mode(enable_unet_decoder=False, enable_sam2=True, sam2_percentage=1.0)
 
 ### 3. Hybrid mode (default)
-model = AutoSAM2(enable_unet_decoder=True, enable_sam2=True)
+model.set_mode(enable_unet_decoder=True, enable_sam2=True, sam2_percentage=0.3)
 
 ## Modify slice percentage (0%, 30%, 60%)
 Edit percentage parameter in model.py:
@@ -113,6 +113,7 @@ def get_strategic_slices(depth, percentage=0.3): # Change to 0.0, 0.3, or 0.6
 
 ### Load trained model
 model = AutoSAM2(num_classes=4)
+model.set_mode(enable_unet_decoder=True, enable_sam2=False)
 model.load_state_dict(torch.load("checkpoints/best_autosam2_model.pth")["model_state_dict"])
 model.eval()
 
@@ -123,11 +124,11 @@ with torch.no_grad():
 
 # Results
 Performance on BraTS dataset with different slice percentages:
-| Slice % | Dice_ET | Dice_TC | Dice_WT | IoU_ET | IoU_TC | IoU_WT |
-|---------|---------|---------|---------|--------|--------|--------|
-| 0% (UNet only) | 65.2 | 74.3 | 82.7 | 4.1 | 3.8 | 5.7 |
-| 30% | 70.4 | 79.1 | 86.7 | 7.3 | 6.1 | 8.9 |
-| 60% | 72.1 | 81.5 | 87.9 | 8.5 | 6.6 | 9.1 |
+| Slice % | Dice_ET | Dice_TC | Dice_WT | 
+|---------|---------|---------|---------|
+| 0% (UNet only) | 67.03 | 71.82 | 78.88 |
+| 30% | 63.40 | 66.81 | 73.45 | 
+| 60% | 62.45 | 68.69 | 62.02 | 
 
 
 ## Requirements
