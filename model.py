@@ -951,45 +951,28 @@ class AutoSAM2(nn.Module):
             self.has_sam2 = False
             self.sam2 = None
     
-    def set_mode(self, enable_unet_decoder=None, enable_sam2=None, sam2_percentage=None, bg_blend=None, tumor_blend=None):
+    def set_mode(self, enable_sam2=None):
         """
         Change the processing mode dynamically.
-        Supported modes:
-        - UNet3D only (enable_unet_decoder=True, enable_sam2=False)
-        - Hybrid (enable_unet_decoder=True, enable_sam2=True)
+        UNet decoder is always enabled, only SAM2 can be toggled.
         
-        Note: SAM2-only mode is not supported as it doesn't produce good results.
+        Args:
+            enable_sam2: Boolean to enable/disable SAM2 integration
         """
-        # Always ensure UNet decoder is enabled
-        if enable_unet_decoder is not None:
-            self.enable_unet_decoder = enable_unet_decoder
-        else:
-            self.enable_unet_decoder = True
+        # Always keep UNet decoder enabled
+        self.enable_unet_decoder = True
         
+        # Update SAM2 state if specified
         if enable_sam2 is not None:
             self.enable_sam2 = enable_sam2
-            self.has_sam2_enabled = enable_sam2 and self.has_sam2
-        
-        # Store SAM2 slice percentage
-        if sam2_percentage is not None:
-            self.sam2_percentage = sam2_percentage
-        elif not hasattr(self, 'sam2_percentage'):
-            self.sam2_percentage = 0.3
-        
-        # Store blending weights
-        if bg_blend is not None:
-            self.bg_blend = bg_blend
-        elif not hasattr(self, 'bg_blend'):
-            self.bg_blend = 0.9
-        
-        if tumor_blend is not None:
-            self.tumor_blend = tumor_blend
-        elif not hasattr(self, 'tumor_blend'):
-            self.tumor_blend = 0.5
-        
-        logger.info(f"Mode set to: UNet Decoder={self.enable_unet_decoder}, "
-                    f"SAM2={self.enable_sam2}, SAM2 Percentage={self.sam2_percentage}, "
-                    f"BG Blend={self.bg_blend}, Tumor Blend={self.tumor_blend}")
+            
+        # Determine the active mode
+        if self.enable_sam2:
+            mode = "hybrid"
+        else:
+            mode = "unet3d_only"
+            
+        logger.info(f"Mode set to: {mode} (UNet Decoder=True, SAM2={self.enable_sam2})")
     
 
     
