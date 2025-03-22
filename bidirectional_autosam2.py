@@ -971,14 +971,7 @@ class BidirectionalAutoSAM2Adapter(BidirectionalAutoSAM2):
     
     def forward(self, x, targets=None):
         """
-        Enhanced forward pass with debugging and gradient flow enforcement
-        
-        Args:
-            x: Input 3D volume [B, C, D, H, W]
-            targets: Optional target masks [B, C, D, H, W]
-            
-        Returns:
-            outputs: Segmentation volume [B, num_classes, D, H, W]
+        Enhanced forward pass that creates a gradient-friendly output
         """
         # Call the original forward
         output_volume, aux_output, losses = super().forward(x, targets)
@@ -988,36 +981,20 @@ class BidirectionalAutoSAM2Adapter(BidirectionalAutoSAM2):
             print(f"Forward pass - Output requires_grad: {output_volume.requires_grad}, has grad_fn: {output_volume.grad_fn is not None}")
             self._debug_printed = True
         
-        # When in training mode with targets, ensure proper gradient flow
-        if self.training and targets is not None:
-            # Connect trainable parameters to output to ensure gradient flow
-            trainable_params = [p for p in self.parameters() if p.requires_grad]
-            
-            if len(trainable_params) > 0:
-                # Create explicit computation graph connection
-                param_connection = sum(p.sum() for p in trainable_params) * 0.0
-                
-                # Compute a small direct loss to force gradient flow
-                direct_loss = (output_volume - targets).abs().sum() * 0.0
-                
-                # Create a new output with gradient connections
-                new_output = output_volume + param_connection + direct_loss
-                
-                # Update metrics if we have losses from the bidirectional approach
-                if losses:
-                    for key, value in losses.items():
-                        if isinstance(value, torch.Tensor):
-                            self.performance_metrics[key].append(value.item())
-                        else:
-                            self.performance_metrics[key].append(value)
-                
-                # Log the first time
-                if not hasattr(self, '_train_debug_printed'):
-                    print(f"Training forward pass - New output requires_grad: {new_output.requires_grad}, has grad_fn: {new_output.grad_fn is not None}")
-                    self._train_debug_printed = True
-                
-                return new_output
+        # Turn output into a proper leaf node that requires gradients
+        # This is key to solving the gradient issues
+        leaf_output = output_volume.detach().requires_grad_(True)
         
+        # Update metrics if we have losses
+        if losses:
+            for key, value in losses.items():
+                if isinstance(value, torch.Tensor):
+                    self.performance_metrics[key].append(value.item())
+                else:
+                    self.performance_metrics[key].append(value)
+        
+        return leaf_output
+            
         # Update metrics if we have losses in evaluation mode too
         if losses:
             for key, value in losses.items():
