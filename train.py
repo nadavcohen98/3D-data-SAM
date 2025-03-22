@@ -17,12 +17,7 @@ import torch.nn.functional as F
 from model import AutoSAM2
 from dataset import get_brats_dataloader
 from visualization import visualize_batch_comprehensive
-from authentic_sam2 import AuthenticSAM2, compute_segmentation_loss
-from bidirectional_autosam2 import BidirectionalAutoSAM2Adapter
-
-
 torch.serialization.add_safe_globals([np.core.multiarray.scalar])
-
 
 
 def calculate_dice_score(y_pred, y_true, epsilon=1e-7):
@@ -303,33 +298,6 @@ class BraTSCombinedLoss(nn.Module):
         # Weighted sum of losses
         return self.dice_weight * dice + self.bce_weight * bce + self.focal_weight * focal
 
-def compute_auxiliary_losses(model, outputs):
-    """Compute auxiliary losses for bridge network training"""
-    auxiliary_losses = 0.0
-    
-    # Check if we have a bridge network with quality metrics
-    if hasattr(model, 'unet_sam_bridge'):
-        bridge = model.unet_sam_bridge
-        
-        # Quality assessment loss - encourage high quality
-        if hasattr(bridge, 'last_quality') and bridge.last_quality is not None:
-            quality_loss = 0.05 * (1.0 - bridge.last_quality.mean())
-            auxiliary_losses += quality_loss
-        
-        # Confidence map sparsity loss - encourage focused confidence
-        if hasattr(bridge, 'last_confidence') and bridge.last_confidence is not None:
-            # L1 regularization for sparsity
-            sparsity_loss = 0.01 * torch.mean(torch.abs(bridge.last_confidence))
-            auxiliary_losses += sparsity_loss
-        
-        # Feedback utilization loss - encourage impactful but sparse feedback
-        if hasattr(bridge, 'last_feedback') and bridge.last_feedback is not None:
-            feedback_loss = 0.01 * torch.mean(torch.abs(bridge.last_feedback))
-            auxiliary_losses += feedback_loss
-    
-    return auxiliary_losses
-    
-
 def train_epoch(model, train_loader, optimizer, criterion, device, epoch, scheduler=None):
     """
     Training epoch function with comprehensive BraTS metrics.
@@ -359,16 +327,12 @@ def train_epoch(model, train_loader, optimizer, criterion, device, epoch, schedu
             # Forward pass
             outputs = model(images)
             
-            # Compute main losses
+            # Compute BCE Loss and Dice Loss
             bce_loss = nn.BCEWithLogitsLoss()(outputs, masks)
             dice_loss = BraTSDiceLoss()(outputs, masks)
-            main_loss = 0.7 * dice_loss + 0.3 * bce_loss
-            
-            # Compute auxiliary losses for bridge network
-            aux_loss = compute_auxiliary_losses(model, outputs)
-            
-            # Combined loss
-            loss = main_loss + aux_loss
+
+            # Compute combined loss
+            loss = 0.7 * dice_loss + 0.3 * bce_loss
             
             # Compute IoU
             iou_metrics = calculate_iou(outputs, masks)
@@ -510,12 +474,17 @@ def validate(model, val_loader, criterion, device, epoch):
                 })
                 
                 # Visualize batch
-                if batch_idx in [1,2,3]:
-                    # Add batch_idx to the prefix to create unique filenames
-                    batch_prefix = f"val_batch{batch_idx}"
-                    visualize_batch_comprehensive(images, masks, outputs, epoch, mode="hybrid", prefix=batch_prefix)
-                    print(f"Visualization complete for batch {batch_idx}")
-
+                if batch_idx in [1, 2, 3]:
+                    print(f"Creating visualizations for validation batch {batch_idx}")
+                    try:
+                        # Add batch_idx to the prefix to create unique filenames
+                        batch_prefix = f"val_batch{batch_idx}"
+                        visualize_batch_comprehensive(images, masks, outputs, epoch, mode="hybrid", prefix=batch_prefix)
+                        print(f"Visualization complete for batch {batch_idx}")
+                    except Exception as e:
+                        print(f"Error in visualization for batch {batch_idx}: {e}")
+                        import traceback
+                        traceback.print_exc()
                
                 
                 # Update total loss
@@ -732,8 +701,8 @@ def preprocess_batch(batch, device=None):
     return images, masks
 
 
-def train_model(data_path, batch_size=1, epochs=15, learning_rate=1e-3,
-               use_mixed_precision=False, test_run=False, reset=True,  model_type="autosam2"):
+def train_model(data_path, batch_size=1, epochs=20, learning_rate=1e-3,
+               use_mixed_precision=False, test_run=False, reset=True):
     """
     Optimized train function with BraTS-specific metrics
     """
@@ -754,32 +723,11 @@ def train_model(data_path, batch_size=1, epochs=15, learning_rate=1e-3,
     os.makedirs("checkpoints", exist_ok=True)
     
     # Initialize AutoSAM2 model
-    print(f"Initializing {model_type} model for multi-class segmentation")
-    if model_type.lower() == "bidirectional":
-        model = BidirectionalAutoSAM2Adapter(
-            num_classes=4,
-            base_channels=16,
-            sam2_model_id="facebook/sam2-hiera-small",
-            enable_auxiliary_head=True
-        ).to(device)
-        for param in model.prompt_encoder.parameters():
-            param.requires_grad = True
-        model.set_mode(enable_unet_decoder=True, enable_sam2=True, sam2_percentage=0.3)
-    elif model_type.lower() == "authentic":
-        model = AuthenticSAM2(
-            num_classes=4,
-            base_channels=16,
-            sam2_model_id="facebook/sam2-hiera-small",
-            enable_hybrid_mode=False  # Set to True if you want hybrid mode
-        ).to(device)
-        model.set_mode(enable_unet_decoder=True, enable_sam2=True, sam2_percentage=0.3, bg_blend=0.9, tumor_blend=0.5)
-    else:
-        model = AutoSAM2(num_classes=4).to(device)
-        model.set_mode(enable_unet_decoder=True, enable_sam2=True, sam2_percentage=0.3, bg_blend=0.9, tumor_blend=0.5)
-                   
+    print("Initializing AutoSAM2 for multi-class segmentation")
+    model = AutoSAM2(num_classes=4).to(device)
     
     # Check if model file exists to resume training
-    model_path = f"checkpoints/best_{model_type}_model.pth"
+    model_path = "checkpoints/best_autosam2_model.pth"
     start_epoch = 0
     best_dice = 0.0
     
@@ -803,20 +751,11 @@ def train_model(data_path, batch_size=1, epochs=15, learning_rate=1e-3,
                                 region_weights={'ET': 1.6, 'WT': 1.0, 'TC': 1.3})
     
     # Define optimizer
-    if model_type.lower() == "bidirectional":
-        # For bidirectional model - optimize only the prompt encoder
-        optimizer = optim.AdamW(
-            filter(lambda p: p.requires_grad, model.prompt_encoder.parameters()),
-            lr=learning_rate,
-            weight_decay=1e-4
-        )
-    else:
-        # Original optimizer for other models
-        optimizer = optim.AdamW(
-            model.parameters(),
-            lr=learning_rate,
-            weight_decay=1e-4
-        )
+    optimizer = optim.AdamW(
+        model.encoder.parameters(),
+        lr=learning_rate,
+        weight_decay=1e-4
+    )
     
     # Load optimizer state if resuming
     if os.path.exists(model_path) and not reset and 'optimizer_state_dict' in locals().get('checkpoint', {}):
@@ -981,7 +920,7 @@ def train_model(data_path, batch_size=1, epochs=15, learning_rate=1e-3,
                 'model_state_dict': model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
                 'val_metrics': val_metrics,
-            }, f"checkpoints/{model_type}_model_epoch_{epoch}.pth")
+            }, f"checkpoints/autosam2_model_epoch_{epoch}.pth")
             
             # Save training history
             save_training_history(history, f"training_history_epoch_{epoch}.png")
@@ -1028,48 +967,7 @@ def train_model(data_path, batch_size=1, epochs=15, learning_rate=1e-3,
                     std_val = val_metrics.get(f'{region}_std', 0.0)
                     iqr_val = val_metrics.get(f'{region}_iqr', 0.0)
                     print(f"{region}: Mean={mean_val:.2f}%, Median={median_val:.2f}%, Std={std_val:.2f}%, IQR={iqr_val:.2f}%")
-    # Save best metrics to a separate file
-    with open("results/best_metrics_summary.txt", "w") as f:
-        f.write("="*50 + "\n")
-        f.write("BEST PERFORMANCE METRICS:\n")
-        f.write("="*50 + "\n")
-        
-        best_dice_train = max(history['train_dice']) if history['train_dice'] else 0.0
-        best_dice_val = max(history['val_dice']) if history['val_dice'] else 0.0
-        best_wt_dice = max(history['val_dice_wt']) if history['val_dice_wt'] else 0.0
-        best_tc_dice = max(history['val_dice_tc']) if history['val_dice_tc'] else 0.0
-        best_et_dice = max(history['val_dice_et']) if history['val_dice_et'] else 0.0
-        
-        f.write(f"Best Mean Dice Train: {best_dice_train:.4f}\n")
-        f.write(f"Best Mean Dice Validation: {best_dice_val:.4f}\n")
-        f.write(f"Best Whole Tumor (WT) Dice: {best_wt_dice:.4f}\n")
-        f.write(f"Best Tumor Core (TC) Dice: {best_tc_dice:.4f}\n")
-        f.write(f"Best Enhancing Tumor (ET) Dice: {best_et_dice:.4f}\n")
-        
-        # Add IoU metrics if needed
-        best_iou_train = max(history['train_iou']) if history['train_iou'] else 0.0
-        best_iou_val = max(history['val_iou']) if history['val_iou'] else 0.0
-        
-        f.write(f"\nBest Mean IoU Train: {best_iou_train:.4f}\n")
-        f.write(f"Best Mean IoU Validation: {best_iou_val:.4f}\n")
-        
-        # Add timing information
-        if 'epoch_time' in history and history['epoch_time']:
-            avg_epoch_time = sum(history['epoch_time']) / len(history['epoch_time'])
-            f.write(f"\nAverage Epoch Time: {avg_epoch_time:.2f} seconds\n")
-            f.write(f"Total Training Time: {sum(history['epoch_time']):.2f} seconds\n")
-        
-        # Save configuration information
-        f.write("\nModel Configuration:\n")
-        if hasattr(model, 'get_performance_stats'):
-            stats = model.get_performance_stats()
-            for key, value in stats.items():
-                f.write(f"  {key}: {value}\n")
-        
-        # Save timestamp
-        from datetime import datetime
-        f.write(f"\nTraining completed at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-        
+    
     print(f"Training complete! Best overall Dice score: {best_dice:.4f}")
 
     return model, history, best_metrics
@@ -1092,9 +990,7 @@ def main():
                         help='Disable mixed precision training')
     parser.add_argument('--memory_limit', type=float, default=0.9,
                         help='Memory limit for GPU (0.0-1.0)')
-    parser.add_argument('--model_type', type=str, default="autosam2",
-                    choices=["autosam2", "authentic", "bidirectional"],
-                    help='Model type: autosam2, authentic, or bidirectional')
+    
     args = parser.parse_args()
     
     # Set memory limit for GPU if available
@@ -1115,7 +1011,6 @@ def main():
             use_mixed_precision=not args.no_mixed_precision,
             test_run=args.test_run,
             reset=args.reset,
-            model_type=args.model_type,
         )
     except Exception as e:
         print(f"Error during training: {e}")
