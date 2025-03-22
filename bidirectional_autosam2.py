@@ -137,7 +137,9 @@ class BidirectionalAutoSAM2Adapter(BidirectionalAutoSAM2):
             self.tumor_blend = tumor_blend
             
         print(f"Model mode: UNet={self.enable_unet_decoder}, SAM2={self.enable_sam2}, Slices={self.eval_slice_percentage}")
-ionalBridge(nn.Module):
+
+
+class BidirectionalBridge(nn.Module):
     """
     Bidirectional bridge between UNet3D features and SAM2.
     Supports both forward prompt generation and backward feedback integration.
