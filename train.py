@@ -762,6 +762,8 @@ def train_model(data_path, batch_size=1, epochs=15, learning_rate=1e-3,
             sam2_model_id="facebook/sam2-hiera-small",
             enable_auxiliary_head=True
         ).to(device)
+        for param in model.prompt_encoder.parameters():
+            param.requires_grad = True
         model.set_mode(enable_unet_decoder=True, enable_sam2=True, sam2_percentage=0.3)
     elif model_type.lower() == "authentic":
         model = AuthenticSAM2(
