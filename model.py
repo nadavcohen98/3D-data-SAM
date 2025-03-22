@@ -38,6 +38,7 @@ except ImportError:
 # ======= Base model components =======
 
 # For selecting exactly 30% of slices with center concentration:
+# Find this function in model.py, it's outside any class
 def get_strategic_slices(depth, percentage=0.3):
     """
     Select strategic slices making up exactly the requested percentage of total depth
@@ -50,7 +51,7 @@ def get_strategic_slices(depth, percentage=0.3):
     Returns:
         List of selected slice indices
     """
-    # Calculate number of slices to select (30% of total)
+    # Calculate number of slices to select based on percentage
     num_slices = max(1, int(depth * percentage))
     
     # Create a distribution that favors the middle
@@ -121,7 +122,7 @@ def get_strategic_slices(depth, percentage=0.3):
     all_slices = sorted(list(set([min(depth-1, max(0, idx)) for idx in all_slices])))
     
     return all_slices
-
+    
 class ResidualBlock3D(nn.Module):
     """3D convolutional block with residual connections and group normalization."""
     def __init__(self, in_channels, out_channels, num_groups=8):
@@ -951,28 +952,60 @@ class AutoSAM2(nn.Module):
             self.has_sam2 = False
             self.sam2 = None
     
-    def set_mode(self, enable_sam2=None):
-        """
-        Change the processing mode dynamically.
-        UNet decoder is always enabled, only SAM2 can be toggled.
+def set_mode(self, enable_sam2=None, bg_blend=None, tumor_blend=None, sam2_slice_percentage=None):
+    """
+    Change the processing mode dynamically with additional parameters.
+    UNet decoder is always enabled, only SAM2 can be toggled.
+    
+    Args:
+        enable_sam2: Boolean to enable/disable SAM2 integration
+        bg_blend: Weight for background class blending (0.0-1.0, higher = more UNet)
+        tumor_blend: Weight for tumor classes blending (0.0-1.0, higher = more UNet)
+        sam2_slice_percentage: Percentage of slices to process with SAM2 (0.0-1.0)
+    """
+    # Always keep UNet decoder enabled
+    self.enable_unet_decoder = True
+    
+    # Update SAM2 state if specified
+    if enable_sam2 is not None:
+        self.enable_sam2 = enable_sam2
+    
+    # Update blending weights if specified
+    if bg_blend is not None:
+        if not hasattr(self, 'bg_blend'):
+            self.bg_blend = 0.9  # Default value
+        self.bg_blend = max(0.0, min(1.0, bg_blend))  # Ensure value is between 0 and 1
+    
+    if tumor_blend is not None:
+        if not hasattr(self, 'tumor_blend'):
+            self.tumor_blend = 0.5  # Default value
+        self.tumor_blend = max(0.0, min(1.0, tumor_blend))  # Ensure value is between 0 and 1
+    
+    # Update SAM2 slice percentage if specified
+    if sam2_slice_percentage is not None:
+        if not hasattr(self, 'sam2_slice_percentage'):
+            self.sam2_slice_percentage = 0.3  # Default value
+        self.sam2_slice_percentage = max(0.0, min(1.0, sam2_slice_percentage))
         
-        Args:
-            enable_sam2: Boolean to enable/disable SAM2 integration
-        """
-        # Always keep UNet decoder enabled
-        self.enable_unet_decoder = True
+        # Update the prompt generator and slice selection
+        if hasattr(self, 'prompt_generator') and hasattr(self.prompt_generator, 'get_strategic_slices'):
+            # This will be used in the forward pass when selecting slices
+            pass
         
-        # Update SAM2 state if specified
-        if enable_sam2 is not None:
-            self.enable_sam2 = enable_sam2
-            
-        # Determine the active mode
-        if self.enable_sam2:
-            mode = "hybrid"
-        else:
-            mode = "unet3d_only"
-            
-        logger.info(f"Mode set to: {mode} (UNet Decoder=True, SAM2={self.enable_sam2})")
+    # Determine the active mode
+    if self.enable_sam2:
+        mode = "hybrid"
+    else:
+        mode = "unet3d_only"
+        
+    # Log all settings
+    logger.info(f"Mode set to: {mode} (UNet Decoder=True, SAM2={self.enable_sam2})")
+    if hasattr(self, 'bg_blend'):
+        logger.info(f"Background blend weight: {self.bg_blend:.2f}")
+    if hasattr(self, 'tumor_blend'):
+        logger.info(f"Tumor blend weight: {self.tumor_blend:.2f}")
+    if hasattr(self, 'sam2_slice_percentage'):
+        logger.info(f"SAM2 slice percentage: {self.sam2_slice_percentage:.2f}")
     
 
     
@@ -1159,7 +1192,7 @@ class AutoSAM2(nn.Module):
         
         return volume
     
-    def combine_results(self, unet_output, sam2_slices, depth_dim_idx, bg_blend=0.9, tumor_blend=0.5):
+    def combine_results(self, unet_output, sam2_slices, depth_dim_idx, bg_blend=None, tumor_blend=None):
         """
         Combine UNet output with SAM2 results using adaptive blending.
         Modified for multi-class segmentation with class-specific blending.
@@ -1169,11 +1202,20 @@ class AutoSAM2(nn.Module):
             sam2_slices: Dictionary of SAM2 results {slice_idx: mask}
             depth_dim_idx: Index of depth dimension
             bg_blend: Blending weight for background class (higher = more UNet)
+                If None, uses the instance variable or defaults to 0.9
             tumor_blend: Blending weight for tumor classes (higher = more UNet)
-            
+                If None, uses the instance variable or defaults to 0.5
+                
         Returns:
             Combined segmentation with valid probability distribution
         """
+        # Use instance variables if not provided (or default values if not set)
+        if bg_blend is None:
+            bg_blend = getattr(self, 'bg_blend', 0.9)
+        
+        if tumor_blend is None:
+            tumor_blend = getattr(self, 'tumor_blend', 0.5)
+        
         # Start with UNet output
         combined = unet_output.clone()
         
@@ -1217,7 +1259,7 @@ class AutoSAM2(nn.Module):
         combined = combined / total_prob.clamp(min=1e-5)
         
         return combined
-    
+        
 
     def forward(self, x):
         """
@@ -1229,23 +1271,27 @@ class AutoSAM2(nn.Module):
         # Flag for SAM2 usage tracking
         self.has_sam2_enabled = self.enable_sam2 and self.has_sam2
         
-        # Always use full UNet decoder
+        # Process with UNet3D to get mid-decoder features
         unet_output, mid_features, sam_embeddings, metadata = self.unet3d(
             x, 
-            use_full_decoder=True
+            use_full_decoder=self.enable_unet_decoder
         )
         
-        # Store UNet output for visualization
-        self.last_unet_output = unet_output
+        # Store UNet output for visualization if full decoder is enabled
+        if self.enable_unet_decoder:
+            self.last_unet_output = unet_output
         
-        # Mode 1: UNet3D only (if SAM2 is disabled)
+        # Mode 1: UNet3D only
         if not self.enable_sam2 or not self.has_sam2:
             self.performance_metrics["total_time"].append(time.time() - start_time)
             return unet_output
         
         # Extract key slices for SAM2 processing
         depth_dim_idx = metadata["depth_dim_idx"]
-        key_indices = sorted(metadata["key_indices"])
+        
+        # Use configurable percentage if available
+        slice_percentage = getattr(self, 'sam2_slice_percentage', 0.3)  # Default to 0.3 if not set
+        key_indices = sorted(get_strategic_slices(x.shape[depth_dim_idx], percentage=slice_percentage))
         
         # Process key slices with SAM2
         sam2_results = {}
@@ -1266,12 +1312,25 @@ class AutoSAM2(nn.Module):
         # Store SAM2 results for visualization
         self.last_sam2_slices = sam2_results
         
-        # Hybrid mode (UNet + SAM2)
-        final_output = self.combine_results(
-            unet_output, sam2_results, depth_dim_idx, 
-            bg_blend=getattr(self, 'bg_blend', 0.9),
-            tumor_blend=getattr(self, 'tumor_blend', 0.5)
-        )
+        # Mode 2: SAM2 only (without UNet decoder)
+        if not self.enable_unet_decoder:
+            # Create 3D volume from SAM2 slice results
+            final_output = self.create_3d_from_slices(
+                x.shape, sam2_results, depth_dim_idx, device
+            )
+        
+        # Mode 3: Hybrid mode (UNet + SAM2)
+        else:
+            # Get blend weights from instance variables or use defaults
+            bg_blend = getattr(self, 'bg_blend', 0.9)
+            tumor_blend = getattr(self, 'tumor_blend', 0.5)
+            
+            # Combine UNet output with SAM2 results
+            final_output = self.combine_results(
+                unet_output, sam2_results, depth_dim_idx, 
+                bg_blend=bg_blend,      # Use configurable background weight
+                tumor_blend=tumor_blend # Use configurable tumor weight
+            )
         
         # Store combined output for visualization
         self.last_combined_output = final_output
