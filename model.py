@@ -1058,11 +1058,6 @@ class AutoSAM2(nn.Module):
                     typical_dist = [0.0, 0.3, 0.4, 0.3]  # Background + 3 tumor classes
                     for c in range(1, self.num_classes):
                         multi_class_mask[:, c] = mask_tensor[:, 0] * typical_dist[c]
-                        if c == 3:  # זו המחלקה של ET
-                            print(f"ET Slice {slice_idx} Debug:")
-                            print(f"Typical ET distribution: {typical_dist[c]}")
-                            print(f"Original mask_tensor sum: {mask_tensor.sum()}")
-                            print(f"ET mask sum before normalization: {multi_class_mask[:, c].sum()}")
                                                 
                 # Ensure the class probabilities sum to 1.0
                 total_prob = multi_class_mask.sum(dim=1, keepdim=True)
