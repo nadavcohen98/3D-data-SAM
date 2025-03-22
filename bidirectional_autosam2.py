@@ -48,97 +48,6 @@ from model import (
 
 # ==== Bidirectional Bridge between UNet3D features and SAM2 ====
 
-class BidirectionalAutoSAM2Adapter(BidirectionalAutoSAM2):
-    """
-    Adapter class that makes BidirectionalAutoSAM2 compatible with the existing train.py.
-    
-    This adapter:
-    1. Provides properties expected by train.py (encoder, unet3d)
-    2. Modifies forward to ensure gradient flow for train.py's loss calculations
-    3. Implements set_mode to match the behavior expected by train.py
-    """
-    def __init__(self, num_classes=4, base_channels=16, sam2_model_id="facebook/sam2-hiera-small", enable_auxiliary_head=True):
-        super().__init__(num_classes, base_channels, sam2_model_id, enable_auxiliary_head)
-        
-        # Properties that train.py expects
-        self.encoder = self.unet3d  # train.py expects access to encoder
-        
-        # Additional compatibility properties
-        self.enable_unet_decoder = True  # Variable checked in train.py
-        self.enable_sam2 = self.sam2_integration.has_sam2
-        self.has_sam2_enabled = self.sam2_integration.has_sam2
-        
-        # Debug information
-        trainable_count = sum(p.numel() for p in self.parameters() if p.requires_grad)
-        print(f"BidirectionalAutoSAM2: Total trainable parameters: {trainable_count}")
-    
-    def forward(self, x, targets=None):
-        """
-        Adapted forward pass for train.py compatibility
-        
-        Args:
-            x: Input 3D volume [B, C, D, H, W]
-            targets: Optional target masks [B, C, D, H, W]
-            
-        Returns:
-            outputs: Segmentation volume with gradient connections
-        """
-        # Call parent's forward method
-        output_volume, aux_output, losses = super().forward(x, targets)
-        
-        # Debug once
-        if not hasattr(self, '_debug_printed'):
-            print(f"Forward pass - Output requires_grad: {output_volume.requires_grad}, has grad_fn: {output_volume.grad_fn is not None}")
-            self._debug_printed = True
-        
-        # Create gradient-friendly output for training
-        if self.training and targets is not None:
-            # Create a new output that will definitely have gradients
-            # First, detach to break existing connections
-            trainable_output = output_volume.detach().requires_grad_(True)
-            
-            # Connect gradients without changing values
-            if not hasattr(self, '_train_debug_printed'):
-                print(f"Training mode - Creating gradient-friendly output")
-                self._train_debug_printed = True
-            
-            return trainable_output
-        
-        # For validation, just return the output
-        return output_volume
-    
-    def set_mode(self, enable_unet_decoder=None, enable_sam2=None, sam2_percentage=None, bg_blend=None, tumor_blend=None):
-        """
-        Function to change model mode - required by train.py
-        """
-        if enable_unet_decoder is not None:
-            self.enable_unet_decoder = enable_unet_decoder
-        
-        if enable_sam2 is not None:
-            self.enable_sam2 = enable_sam2
-            self.has_sam2_enabled = enable_sam2
-            # Actually disable SAM2 if requested
-            if not enable_sam2:
-                self.sam2_integration.has_sam2 = False
-        
-        # Set slice percentage for processing
-        if sam2_percentage is not None:
-            self.training_slice_percentage = min(sam2_percentage, 0.5)  # Limit to half during training
-            self.eval_slice_percentage = sam2_percentage
-            
-        # Store blending values for future use
-        if bg_blend is not None:
-            if hasattr(self.sam2_integration, 'blend_weight'):
-                # Convert from user-friendly 0-1 to logit
-                self.sam2_integration.blend_weight.data = torch.log(bg_blend / (1 - bg_blend))
-            
-        if tumor_blend is not None:
-            # Store for future use
-            self.tumor_blend = tumor_blend
-            
-        print(f"Model mode: UNet={self.enable_unet_decoder}, SAM2={self.enable_sam2}, Slices={self.eval_slice_percentage}")
-
-
 class BidirectionalBridge(nn.Module):
     """
     Bidirectional bridge between UNet3D features and SAM2.
@@ -806,4 +715,90 @@ class BidirectionalAutoSAM2(nn.Module):
 
 # ==== Adapter for train.py Compatibility ====
 
-class Bidirect
+class BidirectionalAutoSAM2Adapter(BidirectionalAutoSAM2):
+    """
+    Adapter class that makes BidirectionalAutoSAM2 compatible with the existing train.py.
+    
+    This adapter:
+    1. Provides properties expected by train.py (encoder, unet3d)
+    2. Modifies forward to ensure gradient flow for train.py's loss calculations
+    3. Implements set_mode to match the behavior expected by train.py
+    """
+    def __init__(self, num_classes=4, base_channels=16, sam2_model_id="facebook/sam2-hiera-small", enable_auxiliary_head=True):
+        super().__init__(num_classes, base_channels, sam2_model_id, enable_auxiliary_head)
+        
+        # Properties that train.py expects
+        self.encoder = self.unet3d  # train.py expects access to encoder
+        
+        # Additional compatibility properties
+        self.enable_unet_decoder = True  # Variable checked in train.py
+        self.enable_sam2 = self.sam2_integration.has_sam2
+        self.has_sam2_enabled = self.sam2_integration.has_sam2
+        
+        # Debug information
+        trainable_count = sum(p.numel() for p in self.parameters() if p.requires_grad)
+        print(f"BidirectionalAutoSAM2: Total trainable parameters: {trainable_count}")
+    
+    def forward(self, x, targets=None):
+        """
+        Adapted forward pass for train.py compatibility
+        
+        Args:
+            x: Input 3D volume [B, C, D, H, W]
+            targets: Optional target masks [B, C, D, H, W]
+            
+        Returns:
+            outputs: Segmentation volume with gradient connections
+        """
+        # Call parent's forward method
+        output_volume, aux_output, losses = super().forward(x, targets)
+        
+        # Debug once
+        if not hasattr(self, '_debug_printed'):
+            print(f"Forward pass - Output requires_grad: {output_volume.requires_grad}, has grad_fn: {output_volume.grad_fn is not None}")
+            self._debug_printed = True
+        
+        # Add optional auxiliary loss to help train the bridge
+        if self.training and targets is not None and hasattr(self, 'bridge') and self.bridge is not None:
+            # Get quality prediction
+            if hasattr(self.bridge, 'last_quality') and self.bridge.last_quality is not None:
+                quality = self.bridge.last_quality
+                
+                # Add tiny quality-encouraging loss to ensure gradients flow
+                # This doesn't change output values but adds another gradient path
+                if 'feedback_loss' in losses:
+                    feedback_strength = 0.01
+                    output_volume = output_volume - feedback_strength * losses['feedback_loss'].detach() + feedback_strength * losses['feedback_loss']
+        
+        return output_volume
+    
+    def set_mode(self, enable_unet_decoder=None, enable_sam2=None, sam2_percentage=None, bg_blend=None, tumor_blend=None):
+        """
+        Function to change model mode - required by train.py
+        """
+        if enable_unet_decoder is not None:
+            self.enable_unet_decoder = enable_unet_decoder
+        
+        if enable_sam2 is not None:
+            self.enable_sam2 = enable_sam2
+            self.has_sam2_enabled = enable_sam2
+            # Actually disable SAM2 if requested
+            if not enable_sam2:
+                self.sam2_integration.has_sam2 = False
+        
+        # Set slice percentage for processing
+        if sam2_percentage is not None:
+            self.training_slice_percentage = min(sam2_percentage, 0.5)  # Limit to half during training
+            self.eval_slice_percentage = sam2_percentage
+            
+        # Store blending values for future use
+        if bg_blend is not None:
+            if hasattr(self.sam2_integration, 'blend_weight'):
+                # Convert from user-friendly 0-1 to logit
+                self.sam2_integration.blend_weight.data = torch.log(bg_blend / (1 - bg_blend + 1e-7))
+            
+        if tumor_blend is not None:
+            # Store for future use
+            self.tumor_blend = tumor_blend
+            
+        print(f"Model mode: UNet={self.enable_unet_decoder}, SAM2={self.enable_sam2}, Slices={self.eval_slice_percentage}")
