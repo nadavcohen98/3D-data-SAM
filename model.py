@@ -1240,7 +1240,7 @@ class AutoSAM2(nn.Module):
                 # Debug: Occasionally print class distribution
                 if torch.rand(1).item() < 0.01:  # 1% chance
                     class_distribution = [(blended_result[:, c] > 0.5).sum().item() / blended_result[:, c].numel() * 100 for c in range(blended_result.shape[1])]
-                    print(f"Slice {slice_idx} blended class distribution: {class_distribution}")
+                    
                 
                 # Normalize to ensure valid probability distribution
                 total_prob = blended_result.sum(dim=1, keepdim=True)
