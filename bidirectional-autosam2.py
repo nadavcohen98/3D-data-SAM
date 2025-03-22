@@ -941,3 +941,78 @@ class AuxiliarySegHead(nn.Module):
         probs = F.softmax(logits, dim=1)
         
         return probs
+
+# Add this adapter class at the end of BidirectionalAutoSAM2.py
+
+class BidirectionalAutoSAM2Adapter(BidirectionalAutoSAM2):
+    """
+    Adapter version of BidirectionalAutoSAM2 that works with the existing train.py
+    """
+    def __init__(self, num_classes=4, base_channels=32, sam2_model_id="facebook/sam2-hiera-small", enable_auxiliary_head=True):
+        super().__init__(num_classes, base_channels, sam2_model_id, enable_auxiliary_head)
+        
+        # Properties that train.py expects
+        self.encoder = self.prompt_encoder  # train.py expects access to encoder
+        self.unet3d = self.auxiliary_3d_head if self.enable_auxiliary_head else None
+        
+        # Additional compatibility properties
+        self.enable_unet_decoder = True  # Variable checked in train.py
+        self.enable_sam2 = self.sam2_integration.has_sam2
+        self.has_sam2_enabled = self.sam2_integration.has_sam2
+    
+    def forward(self, x, targets=None):
+        """
+        Adapt the forward interface to be compatible with train.py
+        
+        Args:
+            x: Input 3D volume [B, C, D, H, W]
+            targets: Optional target masks [B, C, D, H, W]
+            
+        Returns:
+            outputs: Segmentation volume [B, num_classes, D, H, W]
+        """
+        # Call the original forward
+        output_volume, aux_output, losses = super().forward(x, targets)
+        
+        # Update performance metrics
+        if losses:
+            for key, value in losses.items():
+                if isinstance(value, torch.Tensor):
+                    self.performance_metrics[key].append(value.item())
+                else:
+                    self.performance_metrics[key].append(value)
+        
+        # Return output in the format train.py expects
+        return output_volume
+    
+    def set_mode(self, enable_unet_decoder=None, enable_sam2=None, sam2_percentage=None, bg_blend=None, tumor_blend=None):
+        """
+        Function to change model mode - required by train.py
+        """
+        if enable_unet_decoder is not None:
+            self.enable_unet_decoder = enable_unet_decoder
+            
+            # Update model based on new mode
+            if not enable_unet_decoder:
+                self.enable_auxiliary_head = False
+            else:
+                self.enable_auxiliary_head = True
+        
+        if enable_sam2 is not None:
+            self.enable_sam2 = enable_sam2
+            self.has_sam2_enabled = enable_sam2
+        
+        # Set slice percentage for processing
+        if sam2_percentage is not None:
+            self.training_slice_percentage = min(sam2_percentage, 0.5)  # Limit to half during training
+            self.eval_slice_percentage = sam2_percentage
+            
+        # Store blending values for future use
+        if bg_blend is not None:
+            self.bg_blend = bg_blend
+            
+        if tumor_blend is not None:
+            self.tumor_blend = tumor_blend
+            
+        print(f"Model mode: UNet={self.enable_unet_decoder}, SAM2={self.enable_sam2}, Slices={self.eval_slice_percentage}")
+
