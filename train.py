@@ -756,6 +756,14 @@ def train_model(data_path, batch_size=1, epochs=15, learning_rate=1e-3,
     # Initialize AutoSAM2 model
     print(f"Initializing {model_type} model for multi-class segmentation")
     if model_type.lower() == "bidirectional":
+        model = BidirectionalAutoSAM2Adapter(
+            num_classes=4,
+            base_channels=16,
+            sam2_model_id="facebook/sam2-hiera-small",
+            enable_auxiliary_head=True
+        ).to(device)
+        model.set_mode(enable_unet_decoder=True, enable_sam2=True, sam2_percentage=0.3)
+
         trainable_params = 0
         for name, param in model.named_parameters():
             if param.requires_grad:
@@ -764,13 +772,6 @@ def train_model(data_path, batch_size=1, epochs=15, learning_rate=1e-3,
             else:
                 print(f"Frozen: {name}")
         print(f"Total trainable parameters: {trainable_params}")
-        model = BidirectionalAutoSAM2Adapter(
-            num_classes=4,
-            base_channels=16,
-            sam2_model_id="facebook/sam2-hiera-small",
-            enable_auxiliary_head=True
-        ).to(device)
-        model.set_mode(enable_unet_decoder=True, enable_sam2=True, sam2_percentage=0.3)
     elif model_type.lower() == "authentic":
         model = AuthenticSAM2(
             num_classes=4,
