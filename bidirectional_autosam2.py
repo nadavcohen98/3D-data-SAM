@@ -730,6 +730,10 @@ class BidirectionalAutoSAM2Adapter(BidirectionalAutoSAM2):
         # Properties that train.py expects
         self.encoder = self.unet3d  # train.py expects access to encoder
         
+        # Add prompt_encoder attribute for compatibility with train.py
+        # In our implementation, the bridge serves as the prompt encoder
+        self.prompt_encoder = self.bridge
+        
         # Additional compatibility properties
         self.enable_unet_decoder = True  # Variable checked in train.py
         self.enable_sam2 = self.sam2_integration.has_sam2
