@@ -756,6 +756,14 @@ def train_model(data_path, batch_size=1, epochs=15, learning_rate=1e-3,
     # Initialize AutoSAM2 model
     print(f"Initializing {model_type} model for multi-class segmentation")
     if model_type.lower() == "bidirectional":
+        trainable_params = 0
+        for name, param in model.named_parameters():
+            if param.requires_grad:
+                trainable_params += 1
+                print(f"Trainable: {name}")
+            else:
+                print(f"Frozen: {name}")
+        print(f"Total trainable parameters: {trainable_params}")
         model = BidirectionalAutoSAM2Adapter(
             num_classes=4,
             base_channels=16,
@@ -804,7 +812,7 @@ def train_model(data_path, batch_size=1, epochs=15, learning_rate=1e-3,
     if model_type.lower() == "bidirectional":
         # For bidirectional model - optimize only the prompt encoder
         optimizer = optim.AdamW(
-            model.prompt_encoder.parameters(),
+            filter(lambda p: p.requires_grad, model.prompt_encoder.parameters()),
             lr=learning_rate,
             weight_decay=1e-4
         )
