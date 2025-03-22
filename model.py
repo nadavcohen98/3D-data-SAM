@@ -952,60 +952,60 @@ class AutoSAM2(nn.Module):
             self.has_sam2 = False
             self.sam2 = None
     
-def set_mode(self, enable_sam2=None, bg_blend=None, tumor_blend=None, sam2_slice_percentage=None):
-    """
-    Change the processing mode dynamically with additional parameters.
-    UNet decoder is always enabled, only SAM2 can be toggled.
-    
-    Args:
-        enable_sam2: Boolean to enable/disable SAM2 integration
-        bg_blend: Weight for background class blending (0.0-1.0, higher = more UNet)
-        tumor_blend: Weight for tumor classes blending (0.0-1.0, higher = more UNet)
-        sam2_slice_percentage: Percentage of slices to process with SAM2 (0.0-1.0)
-    """
-    # Always keep UNet decoder enabled
-    self.enable_unet_decoder = True
-    
-    # Update SAM2 state if specified
-    if enable_sam2 is not None:
-        self.enable_sam2 = enable_sam2
-    
-    # Update blending weights if specified
-    if bg_blend is not None:
-        if not hasattr(self, 'bg_blend'):
-            self.bg_blend = 0.9  # Default value
-        self.bg_blend = max(0.0, min(1.0, bg_blend))  # Ensure value is between 0 and 1
-    
-    if tumor_blend is not None:
-        if not hasattr(self, 'tumor_blend'):
-            self.tumor_blend = 0.5  # Default value
-        self.tumor_blend = max(0.0, min(1.0, tumor_blend))  # Ensure value is between 0 and 1
-    
-    # Update SAM2 slice percentage if specified
-    if sam2_slice_percentage is not None:
-        if not hasattr(self, 'sam2_slice_percentage'):
-            self.sam2_slice_percentage = 0.3  # Default value
-        self.sam2_slice_percentage = max(0.0, min(1.0, sam2_slice_percentage))
+    def set_mode(self, enable_sam2=None, bg_blend=None, tumor_blend=None, sam2_slice_percentage=None):
+        """
+        Change the processing mode dynamically with additional parameters.
+        UNet decoder is always enabled, only SAM2 can be toggled.
         
-        # Update the prompt generator and slice selection
-        if hasattr(self, 'prompt_generator') and hasattr(self.prompt_generator, 'get_strategic_slices'):
-            # This will be used in the forward pass when selecting slices
-            pass
+        Args:
+            enable_sam2: Boolean to enable/disable SAM2 integration
+            bg_blend: Weight for background class blending (0.0-1.0, higher = more UNet)
+            tumor_blend: Weight for tumor classes blending (0.0-1.0, higher = more UNet)
+            sam2_slice_percentage: Percentage of slices to process with SAM2 (0.0-1.0)
+        """
+        # Always keep UNet decoder enabled
+        self.enable_unet_decoder = True
         
-    # Determine the active mode
-    if self.enable_sam2:
-        mode = "hybrid"
-    else:
-        mode = "unet3d_only"
+        # Update SAM2 state if specified
+        if enable_sam2 is not None:
+            self.enable_sam2 = enable_sam2
         
-    # Log all settings
-    logger.info(f"Mode set to: {mode} (UNet Decoder=True, SAM2={self.enable_sam2})")
-    if hasattr(self, 'bg_blend'):
-        logger.info(f"Background blend weight: {self.bg_blend:.2f}")
-    if hasattr(self, 'tumor_blend'):
-        logger.info(f"Tumor blend weight: {self.tumor_blend:.2f}")
-    if hasattr(self, 'sam2_slice_percentage'):
-        logger.info(f"SAM2 slice percentage: {self.sam2_slice_percentage:.2f}")
+        # Update blending weights if specified
+        if bg_blend is not None:
+            if not hasattr(self, 'bg_blend'):
+                self.bg_blend = 0.9  # Default value
+            self.bg_blend = max(0.0, min(1.0, bg_blend))  # Ensure value is between 0 and 1
+        
+        if tumor_blend is not None:
+            if not hasattr(self, 'tumor_blend'):
+                self.tumor_blend = 0.5  # Default value
+            self.tumor_blend = max(0.0, min(1.0, tumor_blend))  # Ensure value is between 0 and 1
+        
+        # Update SAM2 slice percentage if specified
+        if sam2_slice_percentage is not None:
+            if not hasattr(self, 'sam2_slice_percentage'):
+                self.sam2_slice_percentage = 0.3  # Default value
+            self.sam2_slice_percentage = max(0.0, min(1.0, sam2_slice_percentage))
+            
+            # Update the prompt generator and slice selection
+            if hasattr(self, 'prompt_generator') and hasattr(self.prompt_generator, 'get_strategic_slices'):
+                # This will be used in the forward pass when selecting slices
+                pass
+            
+        # Determine the active mode
+        if self.enable_sam2:
+            mode = "hybrid"
+        else:
+            mode = "unet3d_only"
+            
+        # Log all settings
+        logger.info(f"Mode set to: {mode} (UNet Decoder=True, SAM2={self.enable_sam2})")
+        if hasattr(self, 'bg_blend'):
+            logger.info(f"Background blend weight: {self.bg_blend:.2f}")
+        if hasattr(self, 'tumor_blend'):
+            logger.info(f"Tumor blend weight: {self.tumor_blend:.2f}")
+        if hasattr(self, 'sam2_slice_percentage'):
+            logger.info(f"SAM2 slice percentage: {self.sam2_slice_percentage:.2f}")
     
 
     
