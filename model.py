@@ -949,15 +949,36 @@ class AutoSAM2(nn.Module):
             self.has_sam2 = False
             self.sam2 = None
     
-    def set_mode(self, enable_unet_decoder=None, enable_sam2=None):
-        """Change the processing mode dynamically."""
+    def set_mode(self, enable_unet_decoder=None, enable_sam2=None, sam2_percentage=None, 
+                 bg_blend=None, tumor_blend=None):
+        """Change the processing mode dynamically with enhanced control over all parameters."""
         if enable_unet_decoder is not None:
             self.enable_unet_decoder = enable_unet_decoder
         
         if enable_sam2 is not None:
             self.enable_sam2 = enable_sam2
             
-        logger.info(f"Mode set to: UNet Decoder={self.enable_unet_decoder}, SAM2={self.enable_sam2}")
+        # Store SAM2 slice percentage
+        if sam2_percentage is not None:
+            self.sam2_percentage = sam2_percentage
+        elif not hasattr(self, 'sam2_percentage'):
+            # Default percentage based on mode
+            self.sam2_percentage = 0.3
+        
+        # Store blending weights
+        if bg_blend is not None:
+            self.bg_blend = bg_blend
+        elif not hasattr(self, 'bg_blend'):
+            self.bg_blend = 0.9  # Default for background
+            
+        if tumor_blend is not None:
+            self.tumor_blend = tumor_blend
+        elif not hasattr(self, 'tumor_blend'):
+            self.tumor_blend = 0.5  # Default for tumor regions
+                
+        logger.info(f"Mode set to: UNet Decoder={self.enable_unet_decoder}, "
+                    f"SAM2={self.enable_sam2}, SAM2 Percentage={self.sam2_percentage}, "
+                    f"BG Blend={self.bg_blend}, Tumor Blend={self.tumor_blend}")
     
 
     
