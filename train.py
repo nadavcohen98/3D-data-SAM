@@ -733,7 +733,7 @@ def preprocess_batch(batch, device=None):
 
 
 def train_model(data_path, batch_size=1, epochs=15, learning_rate=1e-3,
-               use_mixed_precision=False, test_run=False, reset=True):
+               use_mixed_precision=False, test_run=False, reset=True,  model_type="autosam2"):
     """
     Optimized train function with BraTS-specific metrics
     """
@@ -777,7 +777,7 @@ def train_model(data_path, batch_size=1, epochs=15, learning_rate=1e-3,
                    
     
     # Check if model file exists to resume training
-    model_path = "checkpoints/best_autosam2_model.pth"
+    model_path = f"checkpoints/best_{model_type}_model.pth"
     start_epoch = 0
     best_dice = 0.0
     
@@ -979,7 +979,7 @@ def train_model(data_path, batch_size=1, epochs=15, learning_rate=1e-3,
                 'model_state_dict': model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
                 'val_metrics': val_metrics,
-            }, f"checkpoints/autosam2_model_epoch_{epoch}.pth")
+            }, f"checkpoints/{model_type}_model_epoch_{epoch}.pth")
             
             # Save training history
             save_training_history(history, f"training_history_epoch_{epoch}.png")
