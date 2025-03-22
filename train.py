@@ -725,7 +725,8 @@ def train_model(data_path, batch_size=1, epochs=20, learning_rate=1e-3,
     # Initialize AutoSAM2 model
     print("Initializing AutoSAM2 for multi-class segmentation")
     model = AutoSAM2(num_classes=4)
-    model.set_mode(enable_unet_decoder=True, enable_sam2=False)
+    model.set_mode(enable_sam2=True)
+    model = model.to(device)
                   
     
     # Check if model file exists to resume training
