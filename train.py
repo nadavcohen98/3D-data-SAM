@@ -18,6 +18,8 @@ from model import AutoSAM2
 from dataset import get_brats_dataloader
 from visualization import visualize_batch_comprehensive
 from authentic_sam2 import AuthenticSAM2, compute_segmentation_loss
+from bidirectional_autosam2 import BidirectionalAutoSAM2Adapter
+
 
 torch.serialization.add_safe_globals([np.core.multiarray.scalar])
 
@@ -752,15 +754,26 @@ def train_model(data_path, batch_size=1, epochs=15, learning_rate=1e-3,
     os.makedirs("checkpoints", exist_ok=True)
     
     # Initialize AutoSAM2 model
-    print("Initializing AutoSAM2 for multi-class segmentation")
-    #model = AutoSAM2(num_classes=4).to(device)
-    model = AuthenticSAM2(
-        num_classes=4,
-        base_channels=16,
-        sam2_model_id="facebook/sam2-hiera-small",
-        enable_hybrid_mode=False  # Set to True if you want hybrid mode
-    ).to(device)
-    model.set_mode(enable_unet_decoder=True, enable_sam2=True, sam2_percentage=0.3, bg_blend=0.9, tumor_blend=0.5)
+    print(f"Initializing {model_type} model for multi-class segmentation")
+    if model_type.lower() == "bidirectional":
+        model = BidirectionalAutoSAM2Adapter(
+            num_classes=4,
+            base_channels=16,
+            sam2_model_id="facebook/sam2-hiera-small",
+            enable_auxiliary_head=True
+        ).to(device)
+        model.set_mode(enable_unet_decoder=True, enable_sam2=True, sam2_percentage=0.3)
+    elif model_type.lower() == "authentic":
+        model = AuthenticSAM2(
+            num_classes=4,
+            base_channels=16,
+            sam2_model_id="facebook/sam2-hiera-small",
+            enable_hybrid_mode=False  # Set to True if you want hybrid mode
+        ).to(device)
+        model.set_mode(enable_unet_decoder=True, enable_sam2=True, sam2_percentage=0.3, bg_blend=0.9, tumor_blend=0.5)
+    else:
+        model = AutoSAM2(num_classes=4).to(device)
+        model.set_mode(enable_unet_decoder=True, enable_sam2=True, sam2_percentage=0.3, bg_blend=0.9, tumor_blend=0.5)
                    
     
     # Check if model file exists to resume training
@@ -788,11 +801,20 @@ def train_model(data_path, batch_size=1, epochs=15, learning_rate=1e-3,
                                 region_weights={'ET': 1.6, 'WT': 1.0, 'TC': 1.3})
     
     # Define optimizer
-    optimizer = optim.AdamW(
-        model.prompt_encoder.parameters(),
-        lr=learning_rate,
-        weight_decay=1e-4
-    )
+    if model_type.lower() == "bidirectional":
+        # For bidirectional model - optimize only the prompt encoder
+        optimizer = optim.AdamW(
+            model.prompt_encoder.parameters(),
+            lr=learning_rate,
+            weight_decay=1e-4
+        )
+    else:
+        # Original optimizer for other models
+        optimizer = optim.AdamW(
+            model.parameters(),
+            lr=learning_rate,
+            weight_decay=1e-4
+        )
     
     # Load optimizer state if resuming
     if os.path.exists(model_path) and not reset and 'optimizer_state_dict' in locals().get('checkpoint', {}):
@@ -1068,7 +1090,9 @@ def main():
                         help='Disable mixed precision training')
     parser.add_argument('--memory_limit', type=float, default=0.9,
                         help='Memory limit for GPU (0.0-1.0)')
-    
+    parser.add_argument('--model_type', type=str, default="autosam2",
+                    choices=["autosam2", "authentic", "bidirectional"],
+                    help='Model type: autosam2, authentic, or bidirectional')
     args = parser.parse_args()
     
     # Set memory limit for GPU if available
@@ -1089,6 +1113,7 @@ def main():
             use_mixed_precision=not args.no_mixed_precision,
             test_run=args.test_run,
             reset=args.reset,
+            model_type=args.model_type,
         )
     except Exception as e:
         print(f"Error during training: {e}")
