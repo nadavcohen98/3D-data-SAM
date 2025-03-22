@@ -763,15 +763,6 @@ def train_model(data_path, batch_size=1, epochs=15, learning_rate=1e-3,
             enable_auxiliary_head=True
         ).to(device)
         model.set_mode(enable_unet_decoder=True, enable_sam2=True, sam2_percentage=0.3)
-
-        trainable_params = 0
-        for name, param in model.named_parameters():
-            if param.requires_grad:
-                trainable_params += 1
-                print(f"Trainable: {name}")
-            else:
-                print(f"Frozen: {name}")
-        print(f"Total trainable parameters: {trainable_params}")
     elif model_type.lower() == "authentic":
         model = AuthenticSAM2(
             num_classes=4,
