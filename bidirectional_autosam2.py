@@ -46,292 +46,98 @@ from model import (
     FlexibleUNet3D
 )
 
-# ==== Bidirectional Bridge between UNet3D features and SAM2 ====
+# ==== Medical Image Prompt Encoder (follows original AutoSAM more closely) ====
 
-class BidirectionalBridge(nn.Module):
+class MedicalImagePromptEncoder(nn.Module):
     """
-    Bidirectional bridge between UNet3D features and SAM2.
-    Supports both forward prompt generation and backward feedback integration.
+    Direct prompt encoder for medical images that follows the original AutoSAM approach.
+    Takes UNet3D features and generates prompts for SAM2.
     """
-    def __init__(self, input_channels=32, output_channels=256):
-        super(BidirectionalBridge, self).__init__()
+    def __init__(self, in_channels=32, out_channels=256):
+        super(MedicalImagePromptEncoder, self).__init__()
         
-        # Forward path (UNet → SAM2)
-        self.forward_path = nn.Sequential(
-            nn.Conv2d(input_channels, 128, kernel_size=3, padding=1),
+        # Channel attention module to emphasize important feature channels
+        self.channel_attention = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1),
+            nn.Conv2d(in_channels, in_channels // 4, kernel_size=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(in_channels // 4, in_channels, kernel_size=1),
+            nn.Sigmoid()
+        )
+        
+        # Spatial Attention module to focus on relevant regions
+        self.spatial_attention = nn.Sequential(
+            nn.Conv2d(in_channels, 1, kernel_size=7, padding=3),
+            nn.BatchNorm2d(1),
+            nn.Sigmoid()
+        )
+        
+        # Transformer block for feature transformation
+        self.transformer_path = nn.Sequential(
+            nn.Conv2d(in_channels, 128, kernel_size=3, padding=1),
             nn.GroupNorm(16, 128),
             nn.ReLU(inplace=True),
-            nn.Conv2d(128, output_channels, kernel_size=1),
-            nn.GroupNorm(32, output_channels),
+            nn.Conv2d(128, 128, kernel_size=3, padding=1),
+            nn.GroupNorm(16, 128),
             nn.ReLU(inplace=True)
         )
         
-        # Feedback path (SAM2 results → UNet features)
-        self.feedback_processor = nn.Sequential(
-            nn.Conv2d(1, 64, kernel_size=3, padding=1),  # Process binary mask
-            nn.GroupNorm(8, 64),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(64, input_channels, kernel_size=1),
-            nn.Sigmoid()  # Normalize feedback signals
+        # Shortcut connection
+        self.shortcut = nn.Conv2d(in_channels, 128, kernel_size=1)
+        
+        # Final projection to SAM2 expected dimension
+        self.final_proj = nn.Sequential(
+            nn.Conv2d(128, out_channels, kernel_size=1),
+            nn.GroupNorm(32, out_channels),
+            nn.ReLU(inplace=True)
         )
         
-        # Quality prediction head
+        # Quality prediction head (for monitoring only)
         self.quality_predictor = nn.Sequential(
-            nn.AdaptiveAvgPool2d(1),  # Global pooling
-            nn.Conv2d(output_channels, 64, kernel_size=1),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(64, 1, kernel_size=1),
-            nn.Sigmoid()  # 0-1 quality score
-        )
-        
-        # Difference analyzer
-        self.difference_analyzer = nn.Sequential(
-            nn.Conv2d(2, 64, kernel_size=3, padding=1),  # GT + Pred masks
-            nn.GroupNorm(8, 64),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(64, 32, kernel_size=3, padding=1),
-            nn.GroupNorm(8, 32),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(32, 1, kernel_size=1),
-            nn.Tanh()  # -1 to 1 correction signal
-        )
-        
-        # Storage for tracking
-        self.last_quality = None
-        self.last_feedback = None
-        self.feedback_influence = nn.Parameter(torch.tensor(0.5))  # Learnable feedback strength
-    
-    def forward(self, unet_features, feedback_mask=None, gt_mask=None):
-        """
-        Forward pass with optional feedback integration
-        
-        Args:
-            unet_features: Features from UNet3D encoder/mini-decoder [B, C, H, W]
-            feedback_mask: Optional binary mask from SAM2 prediction [B, 1, H, W]
-            gt_mask: Optional ground truth mask for supervised feedback [B, 1, H, W]
-            
-        Returns:
-            prompts: Prompt embeddings for SAM2 [B, 256, H, W]
-            quality: Predicted quality score [B, 1, 1, 1]
-            enhanced_features: Features with feedback integration (if feedback provided)
-        """
-        # Initial prompt generation
-        prompts = self.forward_path(unet_features)
-        quality = self.quality_predictor(prompts)
-        self.last_quality = quality
-        
-        # If feedback is provided, integrate it
-        if feedback_mask is not None:
-            # Process feedback mask
-            processed_feedback = self.feedback_processor(feedback_mask)
-            self.last_feedback = processed_feedback
-            
-            if gt_mask is not None and self.training:
-                # Analyze difference between prediction and ground truth
-                stacked_masks = torch.cat([feedback_mask, gt_mask], dim=1)
-                correction_signal = self.difference_analyzer(stacked_masks)
-                
-                # Adjust feedback based on correction signal
-                adjusted_feedback = processed_feedback * (1.0 + correction_signal)
-            else:
-                adjusted_feedback = processed_feedback
-            
-            # Apply feedback to UNet features
-            enhanced_features = unet_features + self.feedback_influence * adjusted_feedback
-            
-            # Generate enhanced prompts
-            enhanced_prompts = self.forward_path(enhanced_features)
-            enhanced_quality = self.quality_predictor(enhanced_prompts)
-            
-            return enhanced_prompts, enhanced_quality, enhanced_features
-        
-        return prompts, quality, None
-
-# ==== SAM2 Integration with Gradient Preservation ====
-
-class GradientPreservingSAM2(nn.Module):
-    """
-    SAM2 integration module that preserves gradient flow for bidirectional learning.
-    """
-    def __init__(self, sam2_model_id="facebook/sam2-hiera-small"):
-        super(GradientPreservingSAM2, self).__init__()
-        self.sam2_model_id = sam2_model_id
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        
-        # Initialize SAM2
-        self.sam2 = None
-        self.has_sam2 = False
-        self.initialize_sam2()
-        
-        # Initialize MRI to RGB converter and prompt generator
-        self.mri_to_rgb = MRItoRGBMapper()
-        self.prompt_generator = EnhancedPromptGenerator(
-            num_positive_points=5,
-            num_negative_points=3,
-            edge_detection=True,
-            use_confidence=True,
-            use_mask_prompt=True
-        )
-        
-        # Surrogate layers to ensure gradient flow
-        self.surrogate_mask_generator = nn.Sequential(
-            nn.Conv2d(256, 128, kernel_size=3, padding=1),
-            nn.GroupNorm(16, 128),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(128, 64, kernel_size=3, padding=1),
-            nn.GroupNorm(8, 64),
+            nn.AdaptiveAvgPool2d(1),
+            nn.Conv2d(out_channels, 64, kernel_size=1),
             nn.ReLU(inplace=True),
             nn.Conv2d(64, 1, kernel_size=1),
             nn.Sigmoid()
         )
         
-        # Differentiable parameters for blending
-        self.blend_weight = nn.Parameter(torch.tensor(0.7))
-        
-        # Performance metrics
-        self.performance_metrics = defaultdict(list)
+        # Tracking variables
+        self.last_quality = None
     
-    def initialize_sam2(self):
-        """Initialize SAM2"""
-        if not HAS_SAM2:
-            logger.warning("SAM2 package not available.")
-            return
-        
-        try:
-            logger.info(f"Building SAM2 with model_id: {self.sam2_model_id}")
-            sam2_model = build_sam2_hf(self.sam2_model_id)
-            self.sam2 = SAM2ImagePredictor(sam2_model)
-            
-            # Freeze SAM2 weights
-            for param in self.sam2.model.parameters():
-                param.requires_grad = False
-            
-            self.has_sam2 = True
-            logger.info("SAM2 initialized successfully")
-        except Exception as e:
-            logger.error(f"Error initializing SAM2: {e}")
-            self.has_sam2 = False
-    
-    def forward(self, input_slice, prompt_embeddings, slice_idx=0, ground_truth=None):
+    def forward(self, x):
         """
-        Process input with SAM2 while preserving gradient flow
+        Forward pass to generate SAM2 prompts
         
         Args:
-            input_slice: Input MRI slice [B, C, H, W]
-            prompt_embeddings: Embeddings from bridge [B, 256, H', W']
-            slice_idx: Index of current slice
-            ground_truth: Optional ground truth for supervision
+            x: UNet3D features [B, C, H, W]
             
         Returns:
-            mask_tensor: SAM2 generated mask [B, 1, H, W]
-            surrogate_mask: Differentiable mask from surrogate [B, 1, H, W]
-            metrics: Dictionary with performance metrics
+            prompts: Enhanced feature map for SAM2 [B, 256, H, W]
+            quality: Predicted quality score (0-1)
         """
-        batch_size, channels, height, width = input_slice.shape
-        device = input_slice.device
+        # Apply channel attention
+        channel_weights = self.channel_attention(x)
+        x_channel = x * channel_weights
         
-        # Run surrogate mask generator for gradient path
-        surrogate_mask = self.surrogate_mask_generator(prompt_embeddings)
+        # Apply spatial attention
+        spatial_weights = self.spatial_attention(x_channel)
+        x_attended = x_channel * spatial_weights
         
-        # Resize surrogate mask to match input dimensions
-        if surrogate_mask.shape[2:] != (height, width):
-            surrogate_mask = F.interpolate(
-                surrogate_mask,
-                size=(height, width),
-                mode='bilinear',
-                align_corners=False
-            )
+        # Apply transformer path
+        transformed = self.transformer_path(x_attended)
         
-        # Performance metrics
-        metrics = {
-            'surrogate_quality': surrogate_mask.mean().item()
-        }
+        # Add shortcut connection
+        shortcut = self.shortcut(x_attended)
+        features = transformed + shortcut
         
-        # Process with SAM2 if available (non-differentiable path)
-        sam2_mask = None
-        if self.has_sam2:
-            try:
-                # Convert MRI to RGB
-                rgb_tensor = self.mri_to_rgb(input_slice)
-                
-                # Convert to numpy for SAM2
-                rgb_image = rgb_tensor[0].permute(1, 2, 0).detach().cpu().numpy()
-                
-                # Generate points from prompt embeddings
-                points, labels, box, _ = self.prompt_generator.generate_prompts(
-                    prompt_embeddings, slice_idx, height, width
-                )
-                
-                # Set image in SAM2
-                self.sam2.set_image(rgb_image)
-                
-                # Generate masks
-                masks, scores, _ = self.sam2.predict(
-                    point_coords=points,
-                    point_labels=labels,
-                    box=box,
-                    multimask_output=True
-                )
-                
-                # Select best mask
-                if len(masks) > 0:
-                    best_idx = scores.argmax()
-                    best_mask = masks[best_idx]
-                    
-                    # Convert to tensor
-                    sam2_mask = torch.from_numpy(best_mask).float().to(device)
-                    sam2_mask = sam2_mask.unsqueeze(0).unsqueeze(0)  # [1, 1, H, W]
-                    
-                    # Update metrics
-                    metrics['sam2_score'] = scores[best_idx]
-                    
-                    # Calculate Dice with ground truth if available
-                    if ground_truth is not None:
-                        gt_binary = (ground_truth > 0.5).float()
-                        mask_binary = (sam2_mask > 0.5).float()
-                        
-                        intersection = (mask_binary * gt_binary).sum()
-                        dice_score = (2.0 * intersection) / (mask_binary.sum() + gt_binary.sum() + 1e-7)
-                        metrics['dice_score'] = dice_score.item()
-            
-            except Exception as e:
-                logger.error(f"Error in SAM2 processing: {e}")
+        # Final projection to SAM2 expected dimension
+        prompts = self.final_proj(features)
         
-        # Combine differentiable surrogate and non-differentiable SAM2 mask
-        if sam2_mask is not None:
-            # Create a blend that preserves gradient flow
-            # The key insight: detach sam2_mask to prevent gradient blocking
-            # but add a small component of surrogate_mask to maintain gradient flow
-            blend_weight = torch.sigmoid(self.blend_weight)  # Keep between 0-1
-            
-            final_mask = (
-                blend_weight * surrogate_mask + 
-                (1 - blend_weight) * sam2_mask.detach()
-            )
-            
-            # If in training mode, add a tiny gradient-preserving component
-            if self.training:
-                # This ensures gradient flow without significantly changing the mask
-                final_mask = final_mask + 0.001 * surrogate_mask
-                
-                # If ground truth is available, add supervised component
-                if ground_truth is not None:
-                    # Compute binary cross-entropy between surrogate and ground truth
-                    bce_loss = F.binary_cross_entropy(surrogate_mask, ground_truth, reduction='none')
-                    
-                    # Scale the loss to be a very small component
-                    scaled_loss = 0.001 * bce_loss
-                    
-                    # Add gradient path without changing the output significantly
-                    final_mask = final_mask - scaled_loss.detach() + scaled_loss
-            
-            # Update metrics
-            metrics['blend_weight'] = blend_weight.item()
-            
-            return final_mask, surrogate_mask, metrics
-        else:
-            # If SAM2 failed, return surrogate mask
-            return surrogate_mask, surrogate_mask, metrics
+        # Quality prediction (for monitoring)
+        quality = self.quality_predictor(prompts)
+        self.last_quality = quality
+        
+        return prompts, quality
 
 # ==== Slice Processor for 3D Medical Data ====
 
@@ -406,13 +212,12 @@ class MedicalSliceProcessor(nn.Module):
 
 class BidirectionalAutoSAM2(nn.Module):
     """
-    BidirectionalAutoSAM2 model with true bidirectional learning.
+    BidirectionalAutoSAM2 model with improved design that follows the original AutoSAM more closely.
     
     This model:
     1. Uses UNet3D encoder and mini-decoder to process 3D volumes
-    2. Employs a bidirectional bridge to generate prompts and integrate feedback
-    3. Connects to SAM2 in a way that preserves gradient flow
-    4. Recombines slice results into 3D volumes
+    2. Uses a dedicated prompt encoder to generate prompts for SAM2
+    3. Creates a fully automatic segmentation pipeline for 3D medical volumes
     """
     def __init__(
         self,
@@ -436,16 +241,26 @@ class BidirectionalAutoSAM2(nn.Module):
             trilinear=True
         )
         
-        # Bidirectional bridge
-        self.bridge = BidirectionalBridge(
-            input_channels=base_channels * 2,  # Match UNet3D dec2 output
-            output_channels=256  # Match SAM2 expected size
+        # Prompt encoder - follows original AutoSAM approach more closely
+        self.prompt_encoder = MedicalImagePromptEncoder(
+            in_channels=base_channels * 2,  # Match UNet3D dec2 output
+            out_channels=256  # Match SAM2 expected size
         )
         
-        # Gradient-preserving SAM2 integration
-        self.sam2_integration = GradientPreservingSAM2(
-            sam2_model_id=sam2_model_id
+        # Initialize MRI to RGB converter and prompt generator
+        self.mri_to_rgb = MRItoRGBMapper()
+        self.prompt_generator = EnhancedPromptGenerator(
+            num_positive_points=5,
+            num_negative_points=3,
+            edge_detection=True,
+            use_confidence=True,
+            use_mask_prompt=True
         )
+        
+        # Initialize SAM2
+        self.sam2 = None
+        self.has_sam2 = False
+        self.initialize_sam2(sam2_model_id)
         
         # Slice processor
         self.slice_processor = MedicalSliceProcessor(normalize=True)
@@ -458,6 +273,27 @@ class BidirectionalAutoSAM2(nn.Module):
         self.eval_slice_percentage = 0.6
         self.current_epoch = 0
     
+    def initialize_sam2(self, sam2_model_id):
+        """Initialize SAM2"""
+        if not HAS_SAM2:
+            logger.warning("SAM2 package not available.")
+            return
+        
+        try:
+            logger.info(f"Building SAM2 with model_id: {sam2_model_id}")
+            sam2_model = build_sam2_hf(sam2_model_id)
+            self.sam2 = SAM2ImagePredictor(sam2_model)
+            
+            # Freeze SAM2 weights
+            for param in self.sam2.model.parameters():
+                param.requires_grad = False
+            
+            self.has_sam2 = True
+            logger.info("SAM2 initialized successfully")
+        except Exception as e:
+            logger.error(f"Error initializing SAM2: {e}")
+            self.has_sam2 = False
+    
     def set_epoch(self, epoch):
         """Set current epoch for adaptive slice selection"""
         self.current_epoch = epoch
@@ -466,9 +302,77 @@ class BidirectionalAutoSAM2(nn.Module):
         if epoch > 5:
             self.training_slice_percentage = min(0.5, 0.3 + 0.04 * (epoch - 5))
     
+    def process_slice_with_sam2(self, input_slice, prompt_embeddings, slice_idx, device):
+        """
+        Process a single slice with SAM2 using prompts from our prompt encoder
+        
+        Args:
+            input_slice: Input MRI slice [B, C, H, W]
+            prompt_embeddings: Embeddings from prompt encoder [B, 256, H', W']
+            slice_idx: Current slice index
+            device: Device to run computation on
+            
+        Returns:
+            mask_tensor: Generated segmentation mask [B, 1, H, W]
+            metrics: Performance metrics dictionary
+        """
+        if not self.has_sam2:
+            logger.warning(f"SAM2 not available for slice {slice_idx}")
+            return None, {}
+        
+        metrics = {}
+        
+        try:
+            batch_size, channels, height, width = input_slice.shape
+            
+            # Convert MRI to RGB for SAM2
+            rgb_tensor = self.mri_to_rgb(input_slice)
+            
+            # Convert to numpy for SAM2 (from first batch item)
+            rgb_image = rgb_tensor[0].permute(1, 2, 0).detach().cpu().numpy()
+            
+            # Generate point prompts from embeddings
+            points, labels, box, _ = self.prompt_generator.generate_prompts(
+                prompt_embeddings, slice_idx, height, width
+            )
+            
+            # Set image in SAM2
+            self.sam2.set_image(rgb_image)
+            
+            # Call SAM2 with the prompts
+            masks, scores, _ = self.sam2.predict(
+                point_coords=points,
+                point_labels=labels,
+                box=box,
+                multimask_output=True
+            )
+            
+            # Select best mask based on score
+            if len(masks) > 0:
+                best_idx = scores.argmax()
+                best_mask = masks[best_idx]
+                
+                # Convert to tensor
+                mask_tensor = torch.from_numpy(best_mask).float().to(device)
+                mask_tensor = mask_tensor.unsqueeze(0).unsqueeze(0)  # [1, 1, H, W]
+                
+                # Update metrics
+                metrics['sam2_score'] = scores[best_idx]
+                
+                return mask_tensor, metrics
+            else:
+                logger.warning(f"No masks generated for slice {slice_idx}")
+                return None, metrics
+        
+        except Exception as e:
+            logger.error(f"Error processing slice {slice_idx}: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+            return None, metrics
+    
     def forward(self, x, targets=None):
         """
-        Forward pass with bidirectional learning
+        Forward pass with improved design following original AutoSAM
         
         Args:
             x: Input 3D volume [B, C, D, H, W]
@@ -502,14 +406,13 @@ class BidirectionalAutoSAM2(nn.Module):
         key_indices = get_strategic_slices(depth, percentage=slice_percentage)
         key_indices.sort()
         
-        # Process slices with bidirectional approach
+        # Process slices
         slice_results = {}
-        feedback_losses = []
+        slice_qualities = []
         
         for slice_idx in key_indices:
             try:
                 # Get UNet features for this slice
-                # Note: features are at decoder output resolution (e.g., 64x64)
                 ds_idx = min(slice_idx // 4, unet_features.shape[2] - 1)
                 if depth_dim_idx == 2:
                     slice_features = unet_features[:, :, ds_idx].clone()
@@ -521,88 +424,45 @@ class BidirectionalAutoSAM2(nn.Module):
                 # Extract original slice at full resolution
                 original_slice = self.slice_processor.extract_slice(x, slice_idx, depth_dim_idx)
                 
-                # Extract ground truth slice if available
-                gt_slice = None
-                if targets is not None:
-                    # For BraTS: combine all tumor classes (1,2,3) to binary tumor mask
-                    gt = self.slice_processor.extract_slice(targets, slice_idx, depth_dim_idx)
-                    
-                    # Create binary tumor mask (union of all tumor classes)
-                    if gt.shape[1] >= 4:  # Multi-class segmentation
-                        gt_slice = torch.sum(gt[:, 1:], dim=1, keepdim=True) > 0.5
-                        gt_slice = gt_slice.float()
-                    else:
-                        gt_slice = gt[:, 1:2]  # Non-background channel
+                # Generate prompts with the prompt encoder (AutoSAM approach)
+                prompt_embeddings, quality = self.prompt_encoder(slice_features)
+                slice_qualities.append(quality.item())
                 
-                # First pass: Generate prompts from UNet features
-                prompts, quality, _ = self.bridge(slice_features)
-                
-                # Process with SAM2 integration (preserves gradients)
-                mask, surrogate_mask, metrics = self.sam2_integration(
-                    original_slice, prompts, slice_idx, gt_slice
+                # Process with SAM2
+                mask_tensor, metrics = self.process_slice_with_sam2(
+                    original_slice, prompt_embeddings, slice_idx, device
                 )
                 
-                # Second pass: Use feedback for enhanced prompts
-                if training_mode:
-                    enhanced_prompts, enhanced_quality, enhanced_features = self.bridge(
-                        slice_features, mask, gt_slice
-                    )
+                if mask_tensor is not None:
+                    # Convert binary mask to multi-class format
+                    h, w = mask_tensor.shape[2:]
                     
-                    # Process again with enhanced prompts
-                    enhanced_mask, enhanced_surrogate, enhanced_metrics = self.sam2_integration(
-                        original_slice, enhanced_prompts, slice_idx, gt_slice
-                    )
-                    
-                    # Compute feedback loss for bidirectional learning
-                    if gt_slice is not None:
-                        # Compare first and second pass quality
-                        quality_improvement = enhanced_quality - quality
+                    # For multi-class segmentation, convert binary mask to class probabilities
+                    if self.num_classes > 2:
+                        multi_class_mask = torch.zeros((batch_size, self.num_classes, h, w), device=device)
                         
-                        # Calculate errors for both passes
-                        first_error = F.binary_cross_entropy(mask, gt_slice)
-                        second_error = F.binary_cross_entropy(enhanced_mask, gt_slice)
+                        # Background (class 0) is inverse of tumor mask
+                        multi_class_mask[:, 0] = 1.0 - mask_tensor[:, 0]
                         
-                        # Bidirectional loss: encourage quality prediction to match actual improvement
-                        actual_improvement = first_error - second_error
-                        feedback_loss = F.mse_loss(quality_improvement, actual_improvement.detach())
+                        # Distribute tumor probability across tumor classes using typical BraTS distribution
+                        typical_dist = [0.0, 0.3, 0.4, 0.3]  # Background + 3 tumor classes
+                        for c in range(1, self.num_classes):
+                            multi_class_mask[:, c] = mask_tensor[:, 0] * typical_dist[c]
                         
-                        # Track loss
-                        feedback_losses.append(feedback_loss)
-                    
-                    # Use enhanced mask for final output
-                    final_mask = enhanced_mask
-                else:
-                    final_mask = mask
-                
-                # Reshape final mask to multi-class format for 3D reconstruction
-                h, w = original_slice.shape[2:]
-                
-                # For multi-class segmentation, convert binary mask to class probabilities
-                if self.num_classes > 2:
-                    multi_class_mask = torch.zeros((batch_size, self.num_classes, h, w), device=device)
-                    
-                    # Background (class 0) is inverse of tumor mask
-                    multi_class_mask[:, 0] = 1.0 - final_mask[:, 0]
-                    
-                    # Distribute tumor probability across tumor classes using typical BraTS distribution
-                    typical_dist = [0.0, 0.3, 0.4, 0.3]  # Background + 3 tumor classes
-                    for c in range(1, self.num_classes):
-                        multi_class_mask[:, c] = final_mask[:, 0] * typical_dist[c]
-                    
-                    # Ensure probabilities sum to 1.0
-                    total_prob = multi_class_mask.sum(dim=1, keepdim=True)
-                    multi_class_mask = multi_class_mask / total_prob.clamp(min=1e-5)
-                    
-                    # Store result
-                    slice_results[slice_idx] = multi_class_mask
-                else:
-                    # Binary segmentation
-                    binary_mask = torch.zeros((batch_size, 2, h, w), device=device)
-                    binary_mask[:, 0] = 1.0 - final_mask[:, 0]  # Background
-                    binary_mask[:, 1] = final_mask[:, 0]  # Foreground
-                    
-                    # Store result
-                    slice_results[slice_idx] = binary_mask
+                        # Ensure probabilities sum to 1.0
+                        total_prob = multi_class_mask.sum(dim=1, keepdim=True)
+                        multi_class_mask = multi_class_mask / total_prob.clamp(min=1e-5)
+                        
+                        # Store result
+                        slice_results[slice_idx] = multi_class_mask
+                    else:
+                        # Binary segmentation
+                        binary_mask = torch.zeros((batch_size, 2, h, w), device=device)
+                        binary_mask[:, 0] = 1.0 - mask_tensor[:, 0]  # Background
+                        binary_mask[:, 1] = mask_tensor[:, 0]  # Foreground
+                        
+                        # Store result
+                        slice_results[slice_idx] = binary_mask
                 
                 # Update performance metrics
                 for key, value in metrics.items():
@@ -610,17 +470,21 @@ class BidirectionalAutoSAM2(nn.Module):
             
             except Exception as e:
                 logger.error(f"Error processing slice {slice_idx}: {e}")
+                import traceback
+                logger.error(traceback.format_exc())
         
         # Reconstruct 3D volume from processed slices
         output_volume = self.create_3d_from_slices(
             x.shape, slice_results, depth_dim_idx, device
         )
         
-        # Compute combined feedback loss if we have any
+        # Compute auxiliary loss if we have quality predictions
         losses = {}
-        if feedback_losses:
-            combined_feedback_loss = sum(feedback_losses) / len(feedback_losses)
-            losses['feedback_loss'] = combined_feedback_loss
+        if training_mode and slice_qualities:
+            # Encourage high quality predictions
+            avg_quality = sum(slice_qualities) / len(slice_qualities)
+            quality_loss = torch.tensor(1.0 - avg_quality, device=device, requires_grad=True)
+            losses['quality_loss'] = quality_loss
         
         # No auxiliary output for now
         aux_output = None
@@ -698,7 +562,7 @@ class BidirectionalAutoSAM2(nn.Module):
     def get_performance_stats(self):
         """Return performance statistics"""
         stats = {
-            "has_sam2": self.sam2_integration.has_sam2,
+            "has_sam2": self.has_sam2,
             "training_slice_percentage": self.training_slice_percentage,
             "eval_slice_percentage": self.eval_slice_percentage,
             "current_epoch": self.current_epoch
@@ -721,8 +585,7 @@ class BidirectionalAutoSAM2Adapter(BidirectionalAutoSAM2):
     
     This adapter:
     1. Provides properties expected by train.py (encoder, unet3d)
-    2. Modifies forward to ensure gradient flow for train.py's loss calculations
-    3. Implements set_mode to match the behavior expected by train.py
+    2. Implements set_mode to match the behavior expected by train.py
     """
     def __init__(self, num_classes=4, base_channels=16, sam2_model_id="facebook/sam2-hiera-small", enable_auxiliary_head=True):
         super().__init__(num_classes, base_channels, sam2_model_id, enable_auxiliary_head)
@@ -730,14 +593,10 @@ class BidirectionalAutoSAM2Adapter(BidirectionalAutoSAM2):
         # Properties that train.py expects
         self.encoder = self.unet3d  # train.py expects access to encoder
         
-        # Add prompt_encoder attribute for compatibility with train.py
-        # In our implementation, the bridge serves as the prompt encoder
-        self.prompt_encoder = self.bridge
-        
         # Additional compatibility properties
         self.enable_unet_decoder = True  # Variable checked in train.py
-        self.enable_sam2 = self.sam2_integration.has_sam2
-        self.has_sam2_enabled = self.sam2_integration.has_sam2
+        self.enable_sam2 = self.has_sam2
+        self.has_sam2_enabled = self.has_sam2
         
         # Debug information
         trainable_count = sum(p.numel() for p in self.parameters() if p.requires_grad)
@@ -752,27 +611,15 @@ class BidirectionalAutoSAM2Adapter(BidirectionalAutoSAM2):
             targets: Optional target masks [B, C, D, H, W]
             
         Returns:
-            outputs: Segmentation volume with gradient connections
+            outputs: Segmentation volume
         """
         # Call parent's forward method
         output_volume, aux_output, losses = super().forward(x, targets)
         
         # Debug once
         if not hasattr(self, '_debug_printed'):
-            print(f"Forward pass - Output requires_grad: {output_volume.requires_grad}, has grad_fn: {output_volume.grad_fn is not None}")
+            print(f"Forward pass - Output shape: {output_volume.shape}")
             self._debug_printed = True
-        
-        # Add optional auxiliary loss to help train the bridge
-        if self.training and targets is not None and hasattr(self, 'bridge') and self.bridge is not None:
-            # Get quality prediction
-            if hasattr(self.bridge, 'last_quality') and self.bridge.last_quality is not None:
-                quality = self.bridge.last_quality
-                
-                # Add tiny quality-encouraging loss to ensure gradients flow
-                # This doesn't change output values but adds another gradient path
-                if 'feedback_loss' in losses:
-                    feedback_strength = 0.01
-                    output_volume = output_volume - feedback_strength * losses['feedback_loss'].detach() + feedback_strength * losses['feedback_loss']
         
         return output_volume
     
@@ -788,21 +635,18 @@ class BidirectionalAutoSAM2Adapter(BidirectionalAutoSAM2):
             self.has_sam2_enabled = enable_sam2
             # Actually disable SAM2 if requested
             if not enable_sam2:
-                self.sam2_integration.has_sam2 = False
+                self.has_sam2 = False
         
         # Set slice percentage for processing
         if sam2_percentage is not None:
             self.training_slice_percentage = min(sam2_percentage, 0.5)  # Limit to half during training
             self.eval_slice_percentage = sam2_percentage
-            
-        # Store blending values for future use
+        
+        # These parameters aren't used in this implementation but we accept them for compatibility
         if bg_blend is not None:
-            if hasattr(self.sam2_integration, 'blend_weight'):
-                # Convert from user-friendly 0-1 to logit
-                self.sam2_integration.blend_weight.data = torch.log(bg_blend / (1 - bg_blend + 1e-7))
+            self.bg_blend = bg_blend
             
         if tumor_blend is not None:
-            # Store for future use
             self.tumor_blend = tumor_blend
             
         print(f"Model mode: UNet={self.enable_unet_decoder}, SAM2={self.enable_sam2}, Slices={self.eval_slice_percentage}")
