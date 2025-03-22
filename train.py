@@ -726,9 +726,7 @@ def train_model(data_path, batch_size=1, epochs=20, learning_rate=1e-3,
     print("Initializing AutoSAM2 for multi-class segmentation")
     model = AutoSAM2(num_classes=4)
     model.set_mode(enable_unet_decoder=True, enable_sam2=False)
-    model.load_state_dict(torch.load("checkpoints/best_autosam2_model.pth")["model_state_dict"])
-    model.eval() 
-                   
+                  
     
     # Check if model file exists to resume training
     model_path = "checkpoints/best_autosam2_model.pth"
