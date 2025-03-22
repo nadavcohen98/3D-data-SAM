@@ -613,6 +613,10 @@ class BidirectionalAutoSAM2Adapter(BidirectionalAutoSAM2):
         Returns:
             outputs: Segmentation volume
         """
+        # Ensure prompt encoder parameters require gradients
+        for param in self.prompt_encoder.parameters():
+            param.requires_grad = True
+        
         # Call parent's forward method
         output_volume, aux_output, losses = super().forward(x, targets)
         
