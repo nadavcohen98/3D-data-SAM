@@ -38,7 +38,7 @@ except ImportError:
 # ======= Base model components =======
 
 # For selecting exactly 30% of slices with center concentration:
-def get_strategic_slices(depth, percentage):
+def get_strategic_slices(depth, percentage=0.3):
     """
     Select strategic slices making up exactly the requested percentage of total depth
     with higher concentration in the center regions.
@@ -242,7 +242,9 @@ class FlexibleUNet3D(nn.Module):
 
         # Dropout for regularization
         self.dropout = nn.Dropout3d(0.15)
-    
+        
+        # Debug counters
+        self.debug_counter = 0
     
     def forward(self, x, use_full_decoder=True):
         """Forward pass with multi-class output handling"""
@@ -255,8 +257,7 @@ class FlexibleUNet3D(nn.Module):
         
         # Ultra-defensive slice selection for SAM2
         max_slice_idx = depth - 1
-        percentage = getattr(self.unet3d, 'sam2_percentage', 0.6) if hasattr(self, 'sam2_percentage') else 0.6
-        key_indices = get_strategic_slices(depth, percentage=percentage)
+        key_indices = get_strategic_slices(depth, percentage=0.3)
         key_indices.sort()
         
         # Add extra slices around the middle
@@ -950,36 +951,15 @@ class AutoSAM2(nn.Module):
             self.has_sam2 = False
             self.sam2 = None
     
-    def set_mode(self, enable_unet_decoder=None, enable_sam2=None, sam2_percentage=None, 
-                 bg_blend=None, tumor_blend=None):
-        """Change the processing mode dynamically with enhanced control over all parameters."""
+    def set_mode(self, enable_unet_decoder=None, enable_sam2=None):
+        """Change the processing mode dynamically."""
         if enable_unet_decoder is not None:
             self.enable_unet_decoder = enable_unet_decoder
         
         if enable_sam2 is not None:
             self.enable_sam2 = enable_sam2
             
-        # Store SAM2 slice percentage
-        if sam2_percentage is not None:
-            self.sam2_percentage = sam2_percentage
-        elif not hasattr(self, 'sam2_percentage'):
-            # Default percentage based on mode
-            self.sam2_percentage = 0.3
-        
-        # Store blending weights
-        if bg_blend is not None:
-            self.bg_blend = bg_blend
-        elif not hasattr(self, 'bg_blend'):
-            self.bg_blend = 0.9  # Default for background
-            
-        if tumor_blend is not None:
-            self.tumor_blend = tumor_blend
-        elif not hasattr(self, 'tumor_blend'):
-            self.tumor_blend = 0.5  # Default for tumor regions
-                
-        logger.info(f"Mode set to: UNet Decoder={self.enable_unet_decoder}, "
-                    f"SAM2={self.enable_sam2}, SAM2 Percentage={self.sam2_percentage}, "
-                    f"BG Blend={self.bg_blend}, Tumor Blend={self.tumor_blend}")
+        logger.info(f"Mode set to: UNet Decoder={self.enable_unet_decoder}, SAM2={self.enable_sam2}")
     
 
     
@@ -1065,7 +1045,11 @@ class AutoSAM2(nn.Module):
                     typical_dist = [0.0, 0.3, 0.4, 0.3]  # Background + 3 tumor classes
                     for c in range(1, self.num_classes):
                         multi_class_mask[:, c] = mask_tensor[:, 0] * typical_dist[c]
-
+                        if c == 3:  # זו המחלקה של ET
+                            print(f"ET Slice {slice_idx} Debug:")
+                            print(f"Typical ET distribution: {typical_dist[c]}")
+                            print(f"Original mask_tensor sum: {mask_tensor.sum()}")
+                            print(f"ET mask sum before normalization: {multi_class_mask[:, c].sum()}")
                                                 
                 # Ensure the class probabilities sum to 1.0
                 total_prob = multi_class_mask.sum(dim=1, keepdim=True)
@@ -1203,6 +1187,10 @@ class AutoSAM2(nn.Module):
                 # Combine background and tumor results
                 blended_result = torch.cat([bg_result, tumor_result], dim=1)
                 
+                # Debug: Occasionally print class distribution
+                if torch.rand(1).item() < 0.01:  # 1% chance
+                    class_distribution = [(blended_result[:, c] > 0.5).sum().item() / blended_result[:, c].numel() * 100 for c in range(blended_result.shape[1])]
+                    print(f"Slice {slice_idx} blended class distribution: {class_distribution}")
                 
                 # Normalize to ensure valid probability distribution
                 total_prob = blended_result.sum(dim=1, keepdim=True)
@@ -1283,8 +1271,8 @@ class AutoSAM2(nn.Module):
             # Combine UNet output with SAM2 results
             final_output = self.combine_results(
                 unet_output, sam2_results, depth_dim_idx, 
-                bg_blend=getattr(self, 'bg_blend', 0.9),    # Background relies more on UNet
-                tumor_blend=getattr(self, 'tumor_blend', 0.5)  # Tumor relies more on SAM2
+                bg_blend=0.9,    # Background relies more on UNet
+                tumor_blend=0.5  # Tumor relies more on SAM2
             )
         
         # Store combined output for visualization
