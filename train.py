@@ -725,7 +725,12 @@ def train_model(data_path, batch_size=1, epochs=20, learning_rate=1e-3,
     # Initialize AutoSAM2 model
     print("Initializing AutoSAM2 for multi-class segmentation")
     model = AutoSAM2(num_classes=4)
-    model.set_mode(enable_sam2=True)
+    model.set_mode(
+        enable_sam2=True,             # Set to True for hybrid mode, False for UNet3D-only
+        bg_blend=0.7,                 # Weight for background (0.0-1.0, higher = more UNet)
+        tumor_blend=0.3,              # Weight for tumor regions (0.0-1.0, higher = more UNet)
+        sam2_slice_percentage=0.4     # Percentage of slices to process with SAM2 (0.0-1.0)
+    )
     model = model.to(device)
                   
     
