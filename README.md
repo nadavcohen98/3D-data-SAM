@@ -97,13 +97,21 @@ python train.py --test_run --reset
 ## Model Configurations
 
 ### 1. UNet only mode (no SAM2)
-model = AutoSAM2(enable_sam2=False, enable_unet_decoder=True)
+model = AutoSAM2(num_classes=4)
+model.set_mode(enable_sam2=False)
 
-### 2. SAM2 only mode (uses UNet features but not decoder)
-model.set_mode(enable_unet_decoder=False, enable_sam2=True, sam2_percentage=1.0)
+### 2. Hybrid mode (default)
+model = AutoSAM2(num_classes=4)
+model.set_mode(enable_sam2=True)
 
-### 3. Hybrid mode (default)
-model.set_mode(enable_unet_decoder=True, enable_sam2=True, sam2_percentage=0.3)
+### 3. Hybrid mode with custom parameters
+model = AutoSAM2(num_classes=4)
+model.set_mode(
+    enable_sam2=True,
+    bg_blend=0.7,                 # Background blend weight (higher = more UNet)
+    tumor_blend=0.3,              # Tumor blend weight (higher = more UNet)
+    sam2_slice_percentage=0.4     # Percentage of slices to process with SAM2
+)
 
 ## Modify slice percentage (0%, 30%, 60%)
 Edit percentage parameter in model.py:
