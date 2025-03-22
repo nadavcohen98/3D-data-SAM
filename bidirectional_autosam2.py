@@ -236,9 +236,10 @@ class MedicalSliceProcessor(nn.Module):
             channel = slice_data[:, c]
             mask = channel > 0
             
-            if mask.sum() > 0:
+            # Only normalize if we have enough non-zero values
+            if mask.sum() > 1:  # Need at least 2 values for std
                 mean = torch.mean(channel[mask])
-                std = torch.std(channel[mask])
+                std = torch.std(channel[mask], unbiased=False)  # Use biased std to avoid warning
                 # Apply normalization only to non-zero values
                 normalized_slice[:, c][mask] = (channel[mask] - mean) / (std + 1e-8)
         
@@ -972,6 +973,13 @@ class BidirectionalAutoSAM2Adapter(BidirectionalAutoSAM2):
     def forward(self, x, targets=None):
         """
         Enhanced forward pass that creates a gradient-friendly output
+        
+        Args:
+            x: Input 3D volume [B, C, D, H, W]
+            targets: Optional target masks [B, C, D, H, W]
+            
+        Returns:
+            outputs: Segmentation volume [B, num_classes, D, H, W] with gradients
         """
         # Call the original forward
         output_volume, aux_output, losses = super().forward(x, targets)
@@ -985,6 +993,18 @@ class BidirectionalAutoSAM2Adapter(BidirectionalAutoSAM2):
         # This is key to solving the gradient issues
         leaf_output = output_volume.detach().requires_grad_(True)
         
+        # When in training, save the original output and losses for backpropagation
+        if self.training and targets is not None:
+            # Store for custom backward hook if needed
+            self._last_output = output_volume
+            self._last_aux_output = aux_output
+            self._last_losses = losses
+            
+            # Check once to confirm gradient flow
+            if not hasattr(self, '_train_debug_printed'):
+                print(f"Training mode - Leaf output requires_grad: {leaf_output.requires_grad}")
+                self._train_debug_printed = True
+        
         # Update metrics if we have losses
         if losses:
             for key, value in losses.items():
@@ -994,16 +1014,6 @@ class BidirectionalAutoSAM2Adapter(BidirectionalAutoSAM2):
                     self.performance_metrics[key].append(value)
         
         return leaf_output
-            
-        # Update metrics if we have losses in evaluation mode too
-        if losses:
-            for key, value in losses.items():
-                if isinstance(value, torch.Tensor):
-                    self.performance_metrics[key].append(value.item())
-                else:
-                    self.performance_metrics[key].append(value)
-        
-        return output_volume
     
     def set_mode(self, enable_unet_decoder=None, enable_sam2=None, sam2_percentage=None, bg_blend=None, tumor_blend=None):
         """
