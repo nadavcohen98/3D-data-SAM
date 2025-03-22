@@ -255,7 +255,8 @@ class FlexibleUNet3D(nn.Module):
         
         # Ultra-defensive slice selection for SAM2
         max_slice_idx = depth - 1
-        key_indices = get_strategic_slices(depth, percentage=0.6)
+        percentage = getattr(self.unet3d, 'sam2_percentage', 0.6) if hasattr(self, 'sam2_percentage') else 0.6
+        key_indices = get_strategic_slices(depth, percentage=percentage)
         key_indices.sort()
         
         # Add extra slices around the middle
@@ -1282,8 +1283,8 @@ class AutoSAM2(nn.Module):
             # Combine UNet output with SAM2 results
             final_output = self.combine_results(
                 unet_output, sam2_results, depth_dim_idx, 
-                bg_blend=0.9,    # Background relies more on UNet
-                tumor_blend=0.5  # Tumor relies more on SAM2
+                bg_blend=getattr(self, 'bg_blend', 0.9),    # Background relies more on UNet
+                tumor_blend=getattr(self, 'tumor_blend', 0.5)  # Tumor relies more on SAM2
             )
         
         # Store combined output for visualization
