@@ -264,9 +264,13 @@ class BidirectionalAutoSAM2(nn.Module):
         
         # Slice processor
         self.slice_processor = MedicalSliceProcessor(normalize=True)
+         self.prompt_encoder.train()
         
         # Performance tracking
         self.performance_metrics = defaultdict(list)
+        for param in self.prompt_encoder.parameters():
+            param.requires_grad = True
+        
         
         # Training parameters
         self.training_slice_percentage = 0.3
@@ -371,125 +375,77 @@ class BidirectionalAutoSAM2(nn.Module):
             return None, metrics
     
     def forward(self, x, targets=None):
-        """
-        Forward pass with improved design following original AutoSAM
-        
+        """      
         Args:
             x: Input 3D volume [B, C, D, H, W]
             targets: Optional target masks [B, C, D, H, W]
             
         Returns:
-            output_volume: Segmented 3D volume [B, num_classes, D, H, W]
-            aux_output: Optional auxiliary output
-            losses: Dictionary with loss terms
+            Segmentation volume with gradient tracking
         """
-        # Track whether we're in training mode
-        training_mode = self.training
+        # Ensure model is in training mode
+        self.train()
+        
+        # Verify input dimensions
+        if len(x.shape) != 5:
+            raise ValueError(f"Expected 5D input (B, C, D, H, W), got {x.shape}")
         
         # Get device information
         device = x.device
-        batch_size, channels, *spatial_dims = x.shape
         
-        # Identify depth dimension
-        if len(spatial_dims) == 3:
-            depth_dim_idx = spatial_dims.index(min(spatial_dims)) + 2  # +2 for batch and channel
-            depth = spatial_dims[depth_dim_idx - 2]
-        else:
-            depth_dim_idx = 2
-            depth = x.shape[depth_dim_idx]
-        
-        # Get UNet3D features (run on full volume)
-        _, unet_features, _, metadata = self.unet3d(x, use_full_decoder=False)
-        
-        # Select slices to process
-        slice_percentage = self.eval_slice_percentage if not training_mode else self.training_slice_percentage
-        key_indices = get_strategic_slices(depth, percentage=slice_percentage)
-        key_indices.sort()
-        
-        # Process slices
-        slice_results = {}
-        slice_qualities = []
-        
-        for slice_idx in key_indices:
-            try:
-                # Get UNet features for this slice
-                ds_idx = min(slice_idx // 4, unet_features.shape[2] - 1)
-                if depth_dim_idx == 2:
-                    slice_features = unet_features[:, :, ds_idx].clone()
-                elif depth_dim_idx == 3:
-                    slice_features = unet_features[:, :, :, ds_idx].clone()
-                elif depth_dim_idx == 4:
-                    slice_features = unet_features[:, :, :, :, ds_idx].clone()
-                
-                # Extract original slice at full resolution
-                original_slice = self.slice_processor.extract_slice(x, slice_idx, depth_dim_idx)
-                
-                # Generate prompts with the prompt encoder (AutoSAM approach)
-                prompt_embeddings, quality = self.prompt_encoder(slice_features)
-                slice_qualities.append(quality.item())
-                
-                # Process with SAM2
-                mask_tensor, metrics = self.process_slice_with_sam2(
-                    original_slice, prompt_embeddings, slice_idx, device
-                )
-                
-                if mask_tensor is not None:
-                    # Convert binary mask to multi-class format
-                    h, w = mask_tensor.shape[2:]
-                    
-                    # For multi-class segmentation, convert binary mask to class probabilities
-                    if self.num_classes > 2:
-                        multi_class_mask = torch.zeros((batch_size, self.num_classes, h, w), device=device)
-                        
-                        # Background (class 0) is inverse of tumor mask
-                        multi_class_mask[:, 0] = 1.0 - mask_tensor[:, 0]
-                        
-                        # Distribute tumor probability across tumor classes using typical BraTS distribution
-                        typical_dist = [0.0, 0.3, 0.4, 0.3]  # Background + 3 tumor classes
-                        for c in range(1, self.num_classes):
-                            multi_class_mask[:, c] = mask_tensor[:, 0] * typical_dist[c]
-                        
-                        # Ensure probabilities sum to 1.0
-                        total_prob = multi_class_mask.sum(dim=1, keepdim=True)
-                        multi_class_mask = multi_class_mask / total_prob.clamp(min=1e-5)
-                        
-                        # Store result
-                        slice_results[slice_idx] = multi_class_mask
-                    else:
-                        # Binary segmentation
-                        binary_mask = torch.zeros((batch_size, 2, h, w), device=device)
-                        binary_mask[:, 0] = 1.0 - mask_tensor[:, 0]  # Background
-                        binary_mask[:, 1] = mask_tensor[:, 0]  # Foreground
-                        
-                        # Store result
-                        slice_results[slice_idx] = binary_mask
-                
-                # Update performance metrics
-                for key, value in metrics.items():
-                    self.performance_metrics[key].append(value)
-            
-            except Exception as e:
-                logger.error(f"Error processing slice {slice_idx}: {e}")
-                import traceback
-                logger.error(traceback.format_exc())
-        
-        # Reconstruct 3D volume from processed slices
-        output_volume = self.create_3d_from_slices(
-            x.shape, slice_results, depth_dim_idx, device
+        # Process with UNet3D to get mid-decoder features
+        unet_output, mid_features, sam_embeddings, metadata = self.unet3d(
+            x, 
+            use_full_decoder=self.enable_unet_decoder
         )
         
-        # Compute auxiliary loss if we have quality predictions
-        losses = {}
-        if training_mode and slice_qualities:
-            # Encourage high quality predictions
-            avg_quality = sum(slice_qualities) / len(slice_qualities)
-            quality_loss = torch.tensor(1.0 - avg_quality, device=device, requires_grad=True)
-            losses['quality_loss'] = quality_loss
+        # If SAM2 is not enabled, return UNet output
+        if not self.enable_sam2 or not self.has_sam2:
+            return unet_output
         
-        # No auxiliary output for now
-        aux_output = None
+        # Extract key slices and their indices
+        depth_dim_idx = metadata["depth_dim_idx"]
+        key_indices = sorted(metadata["key_indices"])
         
-        return output_volume, aux_output, losses
+        # Process key slices with SAM2
+        sam2_results = {}
+        for idx in key_indices:
+            try:
+                # Get features for this slice
+                slice_features = self.slice_processor.extract_slice(mid_features, idx // 4, depth_dim_idx)
+                
+                # Generate prompts using prompt encoder
+                prompt_embeddings, quality = self.prompt_encoder(slice_features)
+                
+                # Process with SAM2
+                result = self.process_slice_with_sam2(
+                    x, idx, prompt_embeddings, depth_dim_idx, device
+                )
+                
+                if result is not None:
+                    sam2_results[idx] = result
+            
+            except Exception as e:
+                logger.error(f"Error processing slice {idx}: {e}")
+        
+        # Combine results based on processing mode
+        if not self.enable_unet_decoder:
+            # SAM2 only mode
+            final_output = self.create_3d_from_slices(
+                x.shape, sam2_results, depth_dim_idx, device
+            )
+        else:
+            # Hybrid mode: combine UNet and SAM2
+            final_output = self.combine_results(
+                unet_output, sam2_results, depth_dim_idx, 
+                bg_blend=getattr(self, 'bg_blend', 0.9),
+                tumor_blend=getattr(self, 'tumor_blend', 0.5)
+            )
+        
+        # Ensure output requires gradients
+        final_output = final_output.requires_grad_(True)
+        
+        return final_output
     
     def create_3d_from_slices(self, input_shape, slice_results, depth_dim_idx, device):
         """
