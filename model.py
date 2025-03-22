@@ -951,15 +951,45 @@ class AutoSAM2(nn.Module):
             self.has_sam2 = False
             self.sam2 = None
     
-    def set_mode(self, enable_unet_decoder=None, enable_sam2=None):
-        """Change the processing mode dynamically."""
+    def set_mode(self, enable_unet_decoder=None, enable_sam2=None, sam2_percentage=None, bg_blend=None, tumor_blend=None):
+        """
+        Change the processing mode dynamically.
+        Supported modes:
+        - UNet3D only (enable_unet_decoder=True, enable_sam2=False)
+        - Hybrid (enable_unet_decoder=True, enable_sam2=True)
+        
+        Note: SAM2-only mode is not supported as it doesn't produce good results.
+        """
+        # Always ensure UNet decoder is enabled
         if enable_unet_decoder is not None:
             self.enable_unet_decoder = enable_unet_decoder
+        else:
+            self.enable_unet_decoder = True
         
         if enable_sam2 is not None:
             self.enable_sam2 = enable_sam2
-            
-        logger.info(f"Mode set to: UNet Decoder={self.enable_unet_decoder}, SAM2={self.enable_sam2}")
+            self.has_sam2_enabled = enable_sam2 and self.has_sam2
+        
+        # Store SAM2 slice percentage
+        if sam2_percentage is not None:
+            self.sam2_percentage = sam2_percentage
+        elif not hasattr(self, 'sam2_percentage'):
+            self.sam2_percentage = 0.3
+        
+        # Store blending weights
+        if bg_blend is not None:
+            self.bg_blend = bg_blend
+        elif not hasattr(self, 'bg_blend'):
+            self.bg_blend = 0.9
+        
+        if tumor_blend is not None:
+            self.tumor_blend = tumor_blend
+        elif not hasattr(self, 'tumor_blend'):
+            self.tumor_blend = 0.5
+        
+        logger.info(f"Mode set to: UNet Decoder={self.enable_unet_decoder}, "
+                    f"SAM2={self.enable_sam2}, SAM2 Percentage={self.sam2_percentage}, "
+                    f"BG Blend={self.bg_blend}, Tumor Blend={self.tumor_blend}")
     
 
     
@@ -1221,17 +1251,16 @@ class AutoSAM2(nn.Module):
         # Flag for SAM2 usage tracking
         self.has_sam2_enabled = self.enable_sam2 and self.has_sam2
         
-        # Process with UNet3D to get mid-decoder features
+        # Always use full UNet decoder
         unet_output, mid_features, sam_embeddings, metadata = self.unet3d(
             x, 
-            use_full_decoder=self.enable_unet_decoder
+            use_full_decoder=True
         )
         
-        # Store UNet output for visualization if full decoder is enabled
-        if self.enable_unet_decoder:
-            self.last_unet_output = unet_output
+        # Store UNet output for visualization
+        self.last_unet_output = unet_output
         
-        # Mode 1: UNet3D only
+        # Mode 1: UNet3D only (if SAM2 is disabled)
         if not self.enable_sam2 or not self.has_sam2:
             self.performance_metrics["total_time"].append(time.time() - start_time)
             return unet_output
@@ -1259,21 +1288,12 @@ class AutoSAM2(nn.Module):
         # Store SAM2 results for visualization
         self.last_sam2_slices = sam2_results
         
-        # Mode 2: SAM2 only (without UNet decoder)
-        if not self.enable_unet_decoder:
-            # Create 3D volume from SAM2 slice results
-            final_output = self.create_3d_from_slices(
-                x.shape, sam2_results, depth_dim_idx, device
-            )
-        
-        # Mode 3: Hybrid mode (UNet + SAM2)
-        else:
-            # Combine UNet output with SAM2 results
-            final_output = self.combine_results(
-                unet_output, sam2_results, depth_dim_idx, 
-                bg_blend=0.9,    # Background relies more on UNet
-                tumor_blend=0.5  # Tumor relies more on SAM2
-            )
+        # Hybrid mode (UNet + SAM2)
+        final_output = self.combine_results(
+            unet_output, sam2_results, depth_dim_idx, 
+            bg_blend=getattr(self, 'bg_blend', 0.9),
+            tumor_blend=getattr(self, 'tumor_blend', 0.5)
+        )
         
         # Store combined output for visualization
         self.last_combined_output = final_output
@@ -1283,7 +1303,7 @@ class AutoSAM2(nn.Module):
         self.performance_metrics["total_time"].append(total_time)
         
         return final_output
-    
+        
     
     def get_performance_stats(self):
         """Return performance statistics."""
