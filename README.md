@@ -34,7 +34,7 @@ The architecture combines two powerful segmentation approaches:
    - Volumetric reconstruction from SAM2 2D slices
    - Interpolation for unprocessed slices
    - Class-specific blending:
-     - Background: 50% UNet / 50% SAM2
+     - Background: 90% UNet / 10% SAM2
      - Tumor classes: 50% UNet / 50% SAM2
 
 ### Strategic Slice Selection Approach
